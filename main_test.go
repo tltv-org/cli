@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -1364,4 +1366,222 @@ func TestGuideEntryTimestampValidation(t *testing.T) {
 	if err == nil {
 		t.Fatal("should reject fractional-second entry end timestamp")
 	}
+}
+
+// ---------- Integration Tests ----------
+//
+// These tests require a live TLTV node. Set TLTV_TEST_NODE to a host:port
+// (e.g. "node.example.com:8443") to enable them. They are skipped automatically
+// when the env var is unset or the node is unreachable.
+//
+// TODO: stand up a permanent test node so these run in CI.
+
+// integrationNode returns the test node address or calls t.Skip.
+func integrationNode(t *testing.T) string {
+	t.Helper()
+	host := os.Getenv("TLTV_TEST_NODE")
+	if host == "" {
+		t.Skip("TLTV_TEST_NODE not set; skipping integration test")
+	}
+	// Quick TCP dial to confirm reachability
+	conn, err := net.DialTimeout("tcp", host, 2*time.Second)
+	if err != nil {
+		t.Skipf("TLTV_TEST_NODE %s unreachable: %v", host, err)
+	}
+	conn.Close()
+	return host
+}
+
+func TestIntegrationNodeInfo(t *testing.T) {
+	host := integrationNode(t)
+	client := newClient(false)
+	info, err := client.FetchNodeInfo(host)
+	if err != nil {
+		t.Fatalf("FetchNodeInfo: %v", err)
+	}
+	if info.Protocol != "tltv" {
+		t.Errorf("protocol: got %q, want %q", info.Protocol, "tltv")
+	}
+	if len(info.Versions) == 0 {
+		t.Error("node reported no protocol versions")
+	}
+	if len(info.Channels) == 0 {
+		t.Error("node has no channels")
+	}
+}
+
+func TestIntegrationFetchAndVerify(t *testing.T) {
+	host := integrationNode(t)
+	client := newClient(false)
+
+	// Discover channel ID from node info
+	info, err := client.FetchNodeInfo(host)
+	if err != nil {
+		t.Fatalf("FetchNodeInfo: %v", err)
+	}
+	if len(info.Channels) == 0 {
+		t.Skip("no channels on node")
+	}
+	channelID := info.Channels[0].ID
+
+	// Fetch metadata
+	doc, err := client.FetchMetadata(host, channelID, "")
+	if err != nil {
+		t.Fatalf("FetchMetadata: %v", err)
+	}
+
+	// Verify signature against the real server's signing key
+	if err := verifyDocument(doc, channelID); err != nil {
+		t.Fatalf("verifyDocument failed on live metadata: %v", err)
+	}
+
+	// Sanity: the id field must match
+	if getString(doc, "id") != channelID {
+		t.Errorf("id mismatch: got %q, want %q", getString(doc, "id"), channelID)
+	}
+}
+
+func TestIntegrationGuideAndVerify(t *testing.T) {
+	host := integrationNode(t)
+	client := newClient(false)
+
+	info, err := client.FetchNodeInfo(host)
+	if err != nil {
+		t.Fatalf("FetchNodeInfo: %v", err)
+	}
+	if len(info.Channels) == 0 {
+		t.Skip("no channels on node")
+	}
+	channelID := info.Channels[0].ID
+
+	doc, err := client.FetchGuide(host, channelID, "")
+	if err != nil {
+		t.Fatalf("FetchGuide: %v", err)
+	}
+
+	if err := verifyDocument(doc, channelID); err != nil {
+		t.Fatalf("verifyDocument failed on live guide: %v", err)
+	}
+
+	// Guide must have from/until
+	if getString(doc, "from") == "" {
+		t.Error("guide missing 'from' field")
+	}
+	if getString(doc, "until") == "" {
+		t.Error("guide missing 'until' field")
+	}
+}
+
+func TestIntegrationPeers(t *testing.T) {
+	host := integrationNode(t)
+	client := newClient(false)
+
+	exchange, err := client.FetchPeers(host)
+	if err != nil {
+		t.Fatalf("FetchPeers: %v", err)
+	}
+	// Peers endpoint should return a valid structure (even if empty)
+	if exchange == nil {
+		t.Fatal("FetchPeers returned nil")
+	}
+}
+
+func TestIntegrationResolveEndToEnd(t *testing.T) {
+	host := integrationNode(t)
+	client := newClient(false)
+
+	// Get channel ID from node
+	info, err := client.FetchNodeInfo(host)
+	if err != nil {
+		t.Fatalf("FetchNodeInfo: %v", err)
+	}
+	if len(info.Channels) == 0 {
+		t.Skip("no channels on node")
+	}
+	channelID := info.Channels[0].ID
+
+	// Full resolve flow: node info -> metadata -> verify -> stream check
+	doc, err := client.FetchMetadata(host, channelID, "")
+	if err != nil {
+		t.Fatalf("FetchMetadata: %v", err)
+	}
+	if err := verifyDocument(doc, channelID); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	// Stream check (don't fail on non-200, just confirm no transport error)
+	status, _, _, err := client.CheckStream(host, channelID, "")
+	if err != nil {
+		t.Fatalf("CheckStream transport error: %v", err)
+	}
+	t.Logf("stream status: %d", status)
+}
+
+func TestIntegrationSSRFSafeClientAllowsPublic(t *testing.T) {
+	host := integrationNode(t)
+	// The SSRF-safe client must still be able to reach non-local servers.
+	// The test node is on a private network, so this also confirms that
+	// isLocalAddress correctly classifies it. If the test node is on a
+	// truly private IP, this test validates that the SSRF-safe dialer
+	// blocks it (and the test should be run with --local semantics).
+	client := newSSRFSafeClient(false)
+	_, err := client.FetchNodeInfo(host)
+
+	h, _, _ := net.SplitHostPort(host)
+	if isLocalAddress(host) {
+		// Expected to fail -- SSRF-safe client blocks private IPs
+		if err == nil {
+			t.Fatal("SSRF-safe client should have blocked private address")
+		}
+		t.Logf("correctly blocked private address %s: %v", h, err)
+	} else {
+		// Public IP -- should succeed
+		if err != nil {
+			t.Fatalf("SSRF-safe client failed on public address %s: %v", h, err)
+		}
+	}
+}
+
+func TestIntegrationCrawlJSON(t *testing.T) {
+	host := integrationNode(t)
+	client := newClient(false)
+
+	// Simulate what crawl --json does: fetch node info + peers,
+	// verify the output is structured correctly.
+	info, err := client.FetchNodeInfo(host)
+	if err != nil {
+		t.Fatalf("FetchNodeInfo: %v", err)
+	}
+
+	exchange, err := client.FetchPeers(host)
+	if err != nil {
+		t.Fatalf("FetchPeers: %v", err)
+	}
+
+	// Build a JSON result like crawl --json would
+	var channels []map[string]string
+	for _, ch := range info.Channels {
+		channels = append(channels, map[string]string{
+			"id": ch.ID, "name": ch.Name, "host": host, "source": "channel",
+		})
+	}
+
+	result := map[string]interface{}{
+		"nodes_probed": 1,
+		"channels":     channels,
+	}
+
+	// Must marshal to valid JSON with no extra output
+	out, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	// Verify it round-trips
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("crawl JSON output is not valid JSON: %v", err)
+	}
+
+	t.Logf("crawl result: %d channels, %d peers", len(info.Channels), len(exchange.Peers))
 }

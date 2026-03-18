@@ -32,3 +32,15 @@ jobs:
             *"not a dynamic executable"*) echo "OK: static binary" ;;
             *) echo "ERROR: binary is dynamically linked"; echo "$output"; exit 1 ;;
           esac
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Test (race detector)
+        run: go test -race -count=1 ./...

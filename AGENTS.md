@@ -66,7 +66,7 @@ The implementation tracks the TLTV Federation Protocol v1.0 spec at `git.plutoni
 make test    # or: go test -v ./...
 ```
 
-55 tests validate against all protocol test vectors:
+55 unit tests + 7 integration tests validate against all protocol test vectors:
 - C1: identity encoding, C2: signing, C3: complete document, C4: URI parsing, C5: guide, C6: invalid inputs, C7: migration
 - Plus base58 edge cases, canonical JSON ordering, signature hex verification
 - URI format/parse roundtrip, vanity pos-2 feasibility, future timestamp rejection
@@ -78,6 +78,16 @@ make test    # or: go test -v ./...
 - JCS canonical JSON: special chars, Unicode separators, control chars, number formatting, nested, sign stability
 - SSRF hint validation: URL rejection, userinfo, path, query, fragment, normalizeHint
 - Strict validation: seq type/format, timestamp type/format, trailing JSON, guide entry timestamps
+
+### Integration tests
+
+7 integration tests exercise the full network stack against a live TLTV node (node info, fetch+verify, guide+verify, peers, resolve end-to-end, SSRF-safe client behavior, crawl JSON structure). They are gated by `TLTV_TEST_NODE=host:port` and skip automatically when unset or unreachable.
+
+```bash
+TLTV_TEST_NODE=host:port go test -v -run TestIntegration ./...
+```
+
+**TODO:** Stand up a permanent test node so integration tests can run in CI.
 
 ## Building
 
