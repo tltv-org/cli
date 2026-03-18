@@ -143,11 +143,11 @@ func TestURIParsing(t *testing.T) {
 	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
 
 	cases := []struct {
-		name      string
-		uri       string
-		id        string
-		hints     []string
-		token     string
+		name  string
+		uri   string
+		id    string
+		hints []string
+		token string
 	}{
 		{
 			"bare channel ID",
@@ -560,9 +560,9 @@ func TestURIFormatRoundtrip(t *testing.T) {
 	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
 
 	cases := []struct {
-		name   string
-		hints  []string
-		token  string
+		name  string
+		hints []string
+		token string
 	}{
 		{"bare", nil, ""},
 		{"one hint", []string{"example.com:443"}, ""},
@@ -797,5 +797,571 @@ func TestCurrentTimestampAccepted(t *testing.T) {
 	err := verifyDocument(signed, "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3")
 	if err != nil {
 		t.Fatalf("verifyDocument should accept current timestamps: %v", err)
+	}
+}
+
+// Document size limit
+func TestDocumentSizeLimit(t *testing.T) {
+	// Build a document just under the limit — should succeed
+	small := `{"v":1,"id":"test"}`
+	_, err := readDocumentFromString(small)
+	if err != nil {
+		t.Fatalf("small document should parse: %v", err)
+	}
+
+	// Build a document over 64 KB — should fail
+	big := `{"v":1,"data":"` + strings.Repeat("x", 65536) + `"}`
+	_, err = readDocumentFromString(big)
+	if err == nil {
+		t.Fatal("readDocument should reject documents over 64 KB")
+	}
+	if !strings.Contains(err.Error(), "maximum size") {
+		t.Fatalf("expected size limit error, got: %v", err)
+	}
+}
+
+// Timestamp format validation
+func TestTimestampValidation(t *testing.T) {
+	valid := []string{
+		"2026-03-14T12:00:00Z",
+		"2000-01-01T00:00:00Z",
+		"2099-12-31T23:59:59Z",
+	}
+	for _, ts := range valid {
+		if err := validateTimestamp(ts); err != nil {
+			t.Errorf("validateTimestamp(%q) should pass: %v", ts, err)
+		}
+	}
+
+	invalid := []string{
+		"2026-03-14",                // missing time
+		"2026-03-14T12:00:00+05:00", // non-UTC
+		"2026-03-14T12:00:00.000Z",  // fractional seconds
+		"2026-03-14 12:00:00Z",      // space instead of T
+		"not-a-timestamp",           // garbage
+		"",                          // empty
+	}
+	for _, ts := range invalid {
+		if err := validateTimestamp(ts); err == nil {
+			t.Errorf("validateTimestamp(%q) should fail", ts)
+		}
+	}
+}
+
+func TestValidateDocTimestamps(t *testing.T) {
+	// Valid metadata document
+	good := map[string]interface{}{
+		"updated": "2026-03-14T12:00:00Z",
+	}
+	if err := validateDocTimestamps(good); err != nil {
+		t.Fatalf("should pass: %v", err)
+	}
+
+	// Invalid updated format
+	bad := map[string]interface{}{
+		"updated": "2026-03-14",
+	}
+	if err := validateDocTimestamps(bad); err == nil {
+		t.Fatal("should reject non-UTC updated timestamp")
+	}
+
+	// Valid migration document
+	goodMig := map[string]interface{}{
+		"migrated": "2026-03-14T12:00:00Z",
+	}
+	if err := validateDocTimestamps(goodMig); err != nil {
+		t.Fatalf("should pass: %v", err)
+	}
+
+	// Guide document with from/until
+	goodGuide := map[string]interface{}{
+		"updated": "2026-03-14T12:00:00Z",
+		"from":    "2026-03-14T00:00:00Z",
+		"until":   "2026-03-16T00:00:00Z",
+		"entries": []interface{}{},
+	}
+	if err := validateDocTimestamps(goodGuide); err != nil {
+		t.Fatalf("should pass: %v", err)
+	}
+}
+
+// Local address detection
+func TestIsLocalAddress(t *testing.T) {
+	local := []string{
+		"localhost:443",
+		"127.0.0.1:8000",
+		"[::1]:443",
+		"10.0.0.1:443",
+		"172.16.0.1:443",
+		"192.168.1.1:443",
+		"100.64.0.1:443",     // CGN
+		"100.127.255.254:80", // CGN upper bound
+		"169.254.1.1:443",    // link-local
+	}
+	for _, addr := range local {
+		if !isLocalAddress(addr) {
+			t.Errorf("isLocalAddress(%q) should be true", addr)
+		}
+	}
+
+	nonLocal := []string{
+		"example.com:443",
+		"8.8.8.8:443",
+		"1.1.1.1:443",
+		"100.128.0.1:443", // just outside CGN range
+		"172.32.0.1:443",  // just outside 172.16-31 range
+		"192.169.1.1:443", // just outside 192.168
+	}
+	for _, addr := range nonLocal {
+		if isLocalAddress(addr) {
+			t.Errorf("isLocalAddress(%q) should be false", addr)
+		}
+	}
+}
+
+// IPv6 URI parsing
+func TestURIParsingIPv6(t *testing.T) {
+	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
+
+	cases := []struct {
+		name  string
+		uri   string
+		hints []string
+	}{
+		{
+			"bracketed IPv6 @ hint",
+			"tltv://" + channelID + "@[2001:db8::1]:8443",
+			[]string{"[2001:db8::1]:8443"},
+		},
+		{
+			"bracketed loopback @ hint",
+			"tltv://" + channelID + "@[::1]:8000",
+			[]string{"[::1]:8000"},
+		},
+		{
+			"IPv6 via hint",
+			"tltv://" + channelID + "?via=[2001:db8::1]:443",
+			[]string{"[2001:db8::1]:443"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := parseTLTVUri(tc.uri)
+			if err != nil {
+				t.Fatalf("parseTLTVUri(%q): %v", tc.uri, err)
+			}
+			if len(parsed.Hints) != len(tc.hints) {
+				t.Fatalf("hints count: got %d, want %d", len(parsed.Hints), len(tc.hints))
+			}
+			for i, h := range parsed.Hints {
+				if h != tc.hints[i] {
+					t.Errorf("hint[%d]: got %q, want %q", i, h, tc.hints[i])
+				}
+			}
+		})
+	}
+}
+
+// XMLTV time conversion
+func TestXMLTVTimeConversion(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"2026-03-15T00:00:00Z", "20260315000000 +0000"},
+		{"2026-03-15T23:59:59Z", "20260315235959 +0000"},
+		{"invalid", ""},
+	}
+	for _, tc := range cases {
+		got := toXMLTVTime(tc.input)
+		if got != tc.expected {
+			t.Errorf("toXMLTVTime(%q): got %q, want %q", tc.input, got, tc.expected)
+		}
+	}
+}
+
+// ---------- JCS Canonical JSON Tests ----------
+
+func TestCanonicalJSONSpecialChars(t *testing.T) {
+	// JCS must NOT escape <, >, & (unlike Go's json.Marshal)
+	doc := map[string]interface{}{
+		"html": "<b>bold</b> & fun",
+	}
+	out, err := canonicalJSON(doc)
+	if err != nil {
+		t.Fatalf("canonicalJSON error: %v", err)
+	}
+	expected := `{"html":"<b>bold</b> & fun"}`
+	if string(out) != expected {
+		t.Fatalf("JCS should not escape HTML chars:\n  got  %q\n  want %q", string(out), expected)
+	}
+}
+
+func TestCanonicalJSONUnicodeSeparators(t *testing.T) {
+	// JCS must NOT escape U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR)
+	doc := map[string]interface{}{
+		"text": "line\u2028sep\u2029end",
+	}
+	out, err := canonicalJSON(doc)
+	if err != nil {
+		t.Fatalf("canonicalJSON error: %v", err)
+	}
+	expected := `{"text":"line` + "\u2028" + `sep` + "\u2029" + `end"}`
+	if string(out) != expected {
+		t.Fatalf("JCS should not escape U+2028/U+2029:\n  got  %q\n  want %q", string(out), expected)
+	}
+}
+
+func TestCanonicalJSONControlChars(t *testing.T) {
+	// Control characters < 0x20 (except those with short escapes) must be \u00XX
+	doc := map[string]interface{}{
+		"ctl": "a\x01b\x1fc",
+	}
+	out, err := canonicalJSON(doc)
+	if err != nil {
+		t.Fatalf("canonicalJSON error: %v", err)
+	}
+	expected := `{"ctl":"a\u0001b\u001fc"}`
+	if string(out) != expected {
+		t.Fatalf("JCS control char escaping:\n  got  %q\n  want %q", string(out), expected)
+	}
+}
+
+func TestCanonicalJSONNumbers(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    interface{}
+		expected string
+	}{
+		{"integer 1", json.Number("1"), "1"},
+		{"integer 0", json.Number("0"), "0"},
+		{"large integer", json.Number("1742000000"), "1742000000"},
+		{"negative integer", json.Number("-5"), "-5"},
+		{"float 1.5", json.Number("1.5"), "1.5"},
+		{"exponent normalized", json.Number("1e2"), "100"},
+		{"small float", json.Number("0.001"), "0.001"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := map[string]interface{}{"n": tc.input}
+			out, err := canonicalJSON(doc)
+			if err != nil {
+				t.Fatalf("canonicalJSON error: %v", err)
+			}
+			expected := `{"n":` + tc.expected + `}`
+			if string(out) != expected {
+				t.Fatalf("got %q, want %q", string(out), expected)
+			}
+		})
+	}
+}
+
+func TestCanonicalJSONNested(t *testing.T) {
+	doc := map[string]interface{}{
+		"b": []interface{}{json.Number("1"), "two", true, nil},
+		"a": map[string]interface{}{"z": "last", "a": "first"},
+	}
+	out, err := canonicalJSON(doc)
+	if err != nil {
+		t.Fatalf("canonicalJSON error: %v", err)
+	}
+	expected := `{"a":{"a":"first","z":"last"},"b":[1,"two",true,null]}`
+	if string(out) != expected {
+		t.Fatalf("nested JCS:\n  got  %q\n  want %q", string(out), expected)
+	}
+}
+
+func TestCanonicalJSONSignStability(t *testing.T) {
+	// Sign and verify with JCS -- must produce stable signatures
+	seedHex := "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+	seed, _ := hex.DecodeString(seedHex)
+	priv, _ := keyFromSeed(seed)
+	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
+
+	doc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number("1742000000"),
+		"id":      channelID,
+		"name":    "Test",
+		"stream":  "/test",
+		"access":  "public",
+		"updated": "2026-03-14T12:00:00Z",
+	}
+
+	// Sign twice -- must produce the same signature
+	doc1 := copyDoc(doc)
+	doc2 := copyDoc(doc)
+	signed1, _ := signDocument(doc1, priv)
+	signed2, _ := signDocument(doc2, priv)
+
+	sig1 := signed1["signature"].(string)
+	sig2 := signed2["signature"].(string)
+	if sig1 != sig2 {
+		t.Fatalf("JCS signing not stable: %q != %q", sig1, sig2)
+	}
+
+	// Verify should succeed
+	if err := verifyDocument(signed1, channelID); err != nil {
+		t.Fatalf("verification failed after JCS sign: %v", err)
+	}
+}
+
+func copyDoc(doc map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{})
+	for k, v := range doc {
+		out[k] = v
+	}
+	return out
+}
+
+// ---------- SSRF / Hint Validation Tests ----------
+
+func TestValidateHint(t *testing.T) {
+	valid := []string{
+		"example.com:443",
+		"192.168.1.1:8000",
+		"[2001:db8::1]:443",
+		"example.com",
+		"node.tltv.example.org:8443",
+	}
+	for _, h := range valid {
+		if err := validateHint(h); err != nil {
+			t.Errorf("validateHint(%q) should pass: %v", h, err)
+		}
+	}
+
+	invalid := []struct {
+		name string
+		hint string
+	}{
+		{"full URL http", "http://127.0.0.1:8000"},
+		{"full URL https", "https://evil.com"},
+		{"userinfo trick", "evil.com@127.0.0.1:8000"},
+		{"path component", "example.com/evil"},
+		{"query string", "example.com?foo=bar"},
+		{"fragment", "example.com#frag"},
+		{"empty", ""},
+		{"scheme only", "http://"},
+		{"userinfo localhost", "user:pass@127.0.0.1"},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateHint(tc.hint); err == nil {
+				t.Fatalf("validateHint(%q) should fail", tc.hint)
+			}
+		})
+	}
+}
+
+func TestNormalizeHint(t *testing.T) {
+	// Valid hint with port stays as-is
+	h, err := normalizeHint("example.com:443")
+	if err != nil || h != "example.com:443" {
+		t.Fatalf("normalizeHint: got %q, %v", h, err)
+	}
+
+	// Valid hint without port gets :443
+	h, err = normalizeHint("example.com")
+	if err != nil || h != "example.com:443" {
+		t.Fatalf("normalizeHint: got %q, %v", h, err)
+	}
+
+	// Malformed hint returns error
+	_, err = normalizeHint("http://evil.com")
+	if err == nil {
+		t.Fatal("normalizeHint should reject URLs")
+	}
+}
+
+func TestIsLocalAddressUnspecified(t *testing.T) {
+	// Unspecified addresses (0.0.0.0, ::) should be detected as local
+	unspecified := []string{
+		"0.0.0.0:80",
+		"[::]:443",
+	}
+	for _, addr := range unspecified {
+		if !isLocalAddress(addr) {
+			t.Errorf("isLocalAddress(%q) should be true (unspecified)", addr)
+		}
+	}
+}
+
+func TestSSRFSafeClientBlocksLocal(t *testing.T) {
+	client := newSSRFSafeClient(false)
+	// Attempt to connect to loopback -- the SSRF-safe dialer should resolve
+	// the IP and block before establishing a connection.
+	_, _, err := client.get("http://127.0.0.1:1/test")
+	if err == nil {
+		t.Fatal("SSRF-safe client should block connections to localhost")
+	}
+	// The error should come from SSRF check, not connection refused
+	if !strings.Contains(err.Error(), "local address") {
+		t.Logf("got error: %v (expected local-address block)", err)
+	}
+}
+
+// ---------- Stricter Document Validation Tests ----------
+
+func TestStrictSeqValidation(t *testing.T) {
+	// seq as string should be rejected
+	doc := map[string]interface{}{
+		"v":   json.Number("1"),
+		"seq": "not-a-number",
+	}
+	if err := checkTimestamps(doc); err == nil {
+		t.Fatal("should reject string seq")
+	}
+
+	// seq as non-integer json.Number should be rejected
+	doc2 := map[string]interface{}{
+		"v":   json.Number("1"),
+		"seq": json.Number("1.5"),
+	}
+	if err := checkTimestamps(doc2); err == nil {
+		t.Fatal("should reject non-integer seq")
+	}
+
+	// seq as boolean should be rejected
+	doc3 := map[string]interface{}{
+		"v":   json.Number("1"),
+		"seq": true,
+	}
+	if err := checkTimestamps(doc3); err == nil {
+		t.Fatal("should reject boolean seq")
+	}
+
+	// seq as negative should be rejected
+	doc4 := map[string]interface{}{
+		"v":   json.Number("1"),
+		"seq": json.Number("-1"),
+	}
+	if err := checkTimestamps(doc4); err == nil {
+		t.Fatal("should reject negative seq")
+	}
+}
+
+func TestStrictTimestampTypeValidation(t *testing.T) {
+	// updated as number should be rejected
+	doc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"updated": 12345,
+	}
+	if err := checkTimestamps(doc); err == nil {
+		t.Fatal("should reject numeric updated")
+	}
+
+	// updated as malformed string
+	doc2 := map[string]interface{}{
+		"v":       json.Number("1"),
+		"updated": "2026-03-14",
+	}
+	if err := checkTimestamps(doc2); err == nil {
+		t.Fatal("should reject malformed updated")
+	}
+
+	// migrated as boolean
+	doc3 := map[string]interface{}{
+		"v":        json.Number("1"),
+		"migrated": true,
+	}
+	if err := checkTimestamps(doc3); err == nil {
+		t.Fatal("should reject non-string migrated")
+	}
+
+	// migrated as fractional seconds
+	doc4 := map[string]interface{}{
+		"v":        json.Number("1"),
+		"migrated": "2026-03-14T12:00:00.000Z",
+	}
+	if err := checkTimestamps(doc4); err == nil {
+		t.Fatal("should reject fractional-second migrated")
+	}
+}
+
+func TestTrailingJSON(t *testing.T) {
+	// Concatenated JSON objects
+	_, err := readDocumentFromString(`{"v":1}{"extra":true}`)
+	if err == nil {
+		t.Fatal("readDocument should reject trailing JSON object")
+	}
+	if !strings.Contains(err.Error(), "trailing") {
+		t.Fatalf("expected trailing error, got: %v", err)
+	}
+
+	// Trailing garbage
+	_, err = readDocumentFromString(`{"v":1}garbage`)
+	if err == nil {
+		t.Fatal("readDocument should reject trailing garbage")
+	}
+
+	// Trailing whitespace is OK
+	_, err = readDocumentFromString(`{"v":1}   `)
+	if err != nil {
+		t.Fatalf("readDocument should accept trailing whitespace: %v", err)
+	}
+
+	// Trailing newline is OK
+	_, err = readDocumentFromString("{\"v\":1}\n")
+	if err != nil {
+		t.Fatalf("readDocument should accept trailing newline: %v", err)
+	}
+}
+
+func TestGuideEntryTimestampValidation(t *testing.T) {
+	// Valid guide with correct entry timestamps
+	good := map[string]interface{}{
+		"updated": "2026-03-14T12:00:00Z",
+		"from":    "2026-03-14T00:00:00Z",
+		"until":   "2026-03-16T00:00:00Z",
+		"entries": []interface{}{
+			map[string]interface{}{
+				"start": "2026-03-15T00:00:00Z",
+				"end":   "2026-03-15T01:00:00Z",
+				"title": "Test",
+			},
+		},
+	}
+	if err := validateDocTimestamps(good); err != nil {
+		t.Fatalf("should pass: %v", err)
+	}
+
+	// Invalid entry start timestamp
+	bad := map[string]interface{}{
+		"updated": "2026-03-14T12:00:00Z",
+		"from":    "2026-03-14T00:00:00Z",
+		"until":   "2026-03-16T00:00:00Z",
+		"entries": []interface{}{
+			map[string]interface{}{
+				"start": "not-a-timestamp",
+				"end":   "2026-03-15T01:00:00Z",
+				"title": "Bad Entry",
+			},
+		},
+	}
+	err := validateDocTimestamps(bad)
+	if err == nil {
+		t.Fatal("should reject invalid entry start timestamp")
+	}
+	if !strings.Contains(err.Error(), "entries[0].start") {
+		t.Fatalf("expected entries[0].start error, got: %v", err)
+	}
+
+	// Invalid entry end timestamp (fractional seconds)
+	bad2 := map[string]interface{}{
+		"updated": "2026-03-14T12:00:00Z",
+		"from":    "2026-03-14T00:00:00Z",
+		"until":   "2026-03-16T00:00:00Z",
+		"entries": []interface{}{
+			map[string]interface{}{
+				"start": "2026-03-15T00:00:00Z",
+				"end":   "2026-03-15T01:00:00.500Z",
+				"title": "Bad Entry",
+			},
+		},
+	}
+	err = validateDocTimestamps(bad2)
+	if err == nil {
+		t.Fatal("should reject fractional-second entry end timestamp")
 	}
 }

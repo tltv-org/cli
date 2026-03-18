@@ -66,7 +66,7 @@ tltv crawl example.com
 
 | Command | Description |
 |---|---|
-| `keygen` | Generate a new Ed25519 keypair and channel ID. Saves the 32-byte seed to `<channel-id>.key`. |
+| `keygen` | Generate a new Ed25519 keypair and channel ID. Saves the 32-byte seed to `<channel-id>.key`. Use `--out -` to write seed to stdout. |
 | `vanity <pattern>` | Mine channel IDs matching a pattern. Multi-threaded (uses all cores). Modes: `prefix` (default, after TV), `contains`, `suffix`. |
 | `inspect <id>` | Decode a channel ID. Shows the public key, validates format, warns if it's the RFC 8032 test key. |
 
@@ -74,8 +74,8 @@ tltv crawl example.com
 
 | Command | Description |
 |---|---|
-| `sign -key <file>` | Sign a JSON document with an Ed25519 seed. Reads from stdin or `-in` file. Use `-auto-seq` to set `seq` and `updated` to now. |
-| `verify [file]` | Verify a signed document's Ed25519 signature and protocol version. Reads from stdin or file. Auto-detects metadata vs. migration documents. Validates migration `to` field. |
+| `sign -key <file>` | Sign a JSON document with an Ed25519 seed. Reads from stdin or `-in` file. Use `-auto-seq` to set `seq` and `updated` to now. Validates timestamp formats before signing. |
+| `verify [file]` | Verify a signed document's Ed25519 signature and protocol version. Reads from stdin or file. Auto-detects metadata vs. migration documents. Validates migration `to` field. Enforces 64 KB document size limit. |
 | `template <type>` | Output a JSON template (`metadata`, `guide`, or `migration`) with current timestamps. |
 
 ### URIs
@@ -89,10 +89,10 @@ tltv crawl example.com
 
 | Command | Description |
 |---|---|
-| `resolve <uri>` | Resolve a `tltv://` URI end-to-end: try hints, verify metadata, check stream. |
+| `resolve <uri>` | Resolve a `tltv://` URI end-to-end: try hints, verify metadata, follow migration chains (max 5 hops), check stream. Filters local/private hints unless `--local`. |
 | `node <host>` | Fetch `/.well-known/tltv` from a node. Shows protocol version, channels, and relaying info. |
 | `fetch <id@host>` | Fetch channel metadata and verify its signature. Handles migration documents. Exits non-zero on verification failure. |
-| `guide <id@host>` | Fetch a channel guide and verify its signature. Displays entries in a table. Exits non-zero on verification failure. |
+| `guide <id@host>` | Fetch a channel guide and verify its signature. Displays entries in a table. Use `--xmltv` for XMLTV XML output. Exits non-zero on verification failure. |
 | `peers <host>` | Fetch the peer exchange list from a node. |
 | `stream <id@host>` | Check HLS stream availability. Parses the manifest and reports segment count, target duration. |
 | `crawl <host>` | BFS-crawl the gossip network starting from a host. Discovers channels across nodes via peer exchange. |
@@ -112,6 +112,7 @@ tltv crawl example.com
 | `--json` | Machine-readable JSON output on all commands. |
 | `--no-color` | Disable colored terminal output. Also respects `NO_COLOR` env var. |
 | `--insecure` | Skip TLS certificate verification (for development). |
+| `--local` | Allow local/private address hints in `resolve` and `crawl`. Without this flag, loopback, RFC 1918, link-local, and CGN addresses are skipped (per spec section 3.1). |
 
 ## Vanity Mining
 
@@ -157,11 +158,13 @@ The implementation is validated against all 7 test vector suites from the [proto
 - **C6** -- Invalid input rejection (malformed IDs, tampered docs, truncated sigs)
 - **C7** -- Key migration document signing and verification
 
-Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection. Run `make test` to verify (32 tests).
+Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection, document size limits, timestamp format validation, local address detection, IPv6 hint parsing, XMLTV time conversion, JCS canonical JSON edge cases, SSRF hint validation, strict document field validation, trailing JSON rejection. Run `make test` to verify (55 tests).
 
 ## Network Commands
 
 Network commands default to HTTPS (port 443). For local development, `localhost` and `127.0.0.1` default to HTTP. Use `--insecure` to skip TLS verification for self-signed certificates.
+
+The `resolve` and `crawl` commands use an SSRF-safe HTTP client that validates hints (rejecting URLs, userinfo, paths) and checks resolved DNS addresses against private/loopback/link-local ranges at connection time. Use `--local` to allow local addresses for development.
 
 The `<id@host>` format is used for commands that need both a channel ID and a host:
 
@@ -184,15 +187,15 @@ tltv --json crawl example.com | jq '.channels | length'
 main.go             Entry point, command dispatch, simple commands
 base58.go           Base58 encode/decode (Bitcoin alphabet)
 identity.go         Channel ID: make, parse, validate
-signing.go          Canonical JSON (RFC 8785), Ed25519 sign/verify
+signing.go          JCS canonical JSON (RFC 8785), Ed25519 sign/verify
 uri.go              tltv:// URI parse and format
-client.go           HTTP client for TLTV protocol endpoints
+client.go           HTTP client, SSRF-safe client, hint validation
 network.go          Network commands (node, fetch, guide, peers, stream, crawl)
 vanity.go           Multi-threaded vanity channel ID miner
 output.go           Terminal output formatting and colors
 signal.go           OS signal handling
-main_test.go        Tests against all protocol test vectors
-Makefile            Build, test, install, cross-compile
+main_test.go        55 tests against all protocol test vectors + edge cases
+Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 ```
 
 Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`).

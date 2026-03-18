@@ -21,6 +21,7 @@ var (
 	flagJSON     bool
 	flagNoColor  bool
 	flagInsecure bool
+	flagLocal    bool
 )
 
 func usage() {
@@ -30,7 +31,8 @@ func usage() {
 	fmt.Fprintf(w, "Global Flags:\n")
 	fmt.Fprintf(w, "  --json        Machine-readable JSON output\n")
 	fmt.Fprintf(w, "  --no-color    Disable colored output\n")
-	fmt.Fprintf(w, "  --insecure    Skip TLS verification\n\n")
+	fmt.Fprintf(w, "  --insecure    Skip TLS verification\n")
+	fmt.Fprintf(w, "  --local       Allow local/private address hints\n\n")
 	fmt.Fprintf(w, "Identity & Keys:\n")
 	fmt.Fprintf(w, "  keygen                 Generate a new channel keypair\n")
 	fmt.Fprintf(w, "  vanity <pattern>       Mine vanity channel IDs\n")
@@ -77,6 +79,8 @@ func main() {
 			flagNoColor = true
 		case "--insecure":
 			flagInsecure = true
+		case "--local":
+			flagLocal = true
 		case "-v", "--version":
 			initColor()
 			cmdVersion()
@@ -93,6 +97,11 @@ func main() {
 				cmd = arg
 				cmdArgs = os.Args[i+1:]
 				goto dispatch
+			}
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(os.Stderr, "unknown flag: %s\n\n", arg)
+				usage()
+				os.Exit(1)
 			}
 			globalArgs = append(globalArgs, arg)
 		}
@@ -153,7 +162,7 @@ dispatch:
 
 func cmdKeygen(args []string) {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
-	outFile := fs.String("out", "", "output file for seed (default: <channel-id>.key)")
+	outFile := fs.String("out", "", "output file for seed (- for stdout, default: <channel-id>.key)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Generate a new TLTV channel keypair\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv keygen [flags]\n\n")
@@ -175,6 +184,13 @@ func cmdKeygen(args []string) {
 	filename := *outFile
 	if filename == "" {
 		filename = channelID + ".key"
+	}
+
+	// Support --out - for writing seed to stdout
+	if filename == "-" {
+		os.Stdout.Write(seed)
+		fmt.Fprintf(os.Stderr, "%s\n", channelID)
+		return
 	}
 
 	// Check if file exists
@@ -357,6 +373,11 @@ func cmdSign(args []string) {
 		now := time.Now().UTC()
 		doc["seq"] = json.Number(fmt.Sprintf("%d", now.Unix()))
 		doc["updated"] = now.Format("2006-01-02T15:04:05Z")
+	}
+
+	// Validate timestamp formats before signing (spec section 6.4)
+	if err := validateDocTimestamps(doc); err != nil {
+		fatal("timestamp validation: %v", err)
 	}
 
 	// Ensure id field matches the signing key
@@ -844,6 +865,7 @@ _tltv() {
         '--json[JSON output]' \
         '--no-color[Disable colors]' \
         '--insecure[Skip TLS verification]' \
+        '--local[Allow local/private address hints]' \
         '1:command:->cmd' \
         '*::arg:->args'
 
@@ -881,6 +903,7 @@ func completionFish() string {
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l json -d 'JSON output'\n")
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l no-color -d 'Disable colors'\n")
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l insecure -d 'Skip TLS'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l local -d 'Allow local addresses'\n")
 
 	descriptions := map[string]string{
 		"keygen": "Generate channel keypair", "vanity": "Mine vanity IDs",
@@ -901,4 +924,3 @@ func completionFish() string {
 	sb.WriteString("complete -c tltv -n \"__fish_seen_subcommand_from completion\" -a 'bash zsh fish'\n")
 	return sb.String()
 }
-
