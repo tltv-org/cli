@@ -84,7 +84,7 @@ jobs:
           RESPONSE=$(curl -sS -X POST \
             -H "Authorization: token ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${TAG}\",\"name\":\"TLTV CLI ${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":${PRERELEASE}}" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"tltv-cli ${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":${PRERELEASE}}" \
             "${API_BASE}/releases")
 
           # Extract release ID (works for both APIs -- "id" is always the first integer id field)
