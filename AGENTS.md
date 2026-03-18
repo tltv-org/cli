@@ -94,6 +94,7 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 ## Git
 
 - Author: `Philo Farnsworth <farnsworth27@protonmail.com>`
+- **All commits must be authored as Philo.** Do not commit as the agent identity. The GitHub release squash ensures only Philo appears in public history, but Forgejo history should also use the correct author.
 - Do not include Co-Authored-By lines in commit messages
 - `origin` -- Forgejo (git.plutoniumtech.com/tltv/cli)
 - `github` -- GitHub (github.com/tltv-org/cli). Public release. Squashed history.
@@ -101,7 +102,7 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 ### Branching
 
 - **`main`** -- Release branch. Only receives merges from `dev`. Tags (`v*`) trigger GitHub Actions release builds.
-- **`dev`** -- Integration branch. Ongoing work lands here. Feature branches merge to `dev` via PR.
+- **`dev`** -- Integration branch. Do NOT commit directly to `dev`. Feature branches merge to `dev` via PR.
 - **Feature branches** -- Branch off `dev`, merge back to `dev`. Name: `feature/<name>` or just descriptive (`vanity-optimization`, `add-resolve-command`).
 - **Release flow**: `dev` -> PR to `main` -> merge -> tag `vX.Y.Z` on `main` -> Actions builds binaries.
 
