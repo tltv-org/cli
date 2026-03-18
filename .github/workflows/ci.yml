@@ -16,8 +16,16 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Build
-        run: CGO_ENABLED=0 go build -v ./...
+      - name: Vet
+        run: go vet ./...
 
       - name: Test
-        run: go test -v ./...
+        run: go test -v -count=1 ./...
+
+      - name: Build (static)
+        run: CGO_ENABLED=0 go build -v -ldflags "-s -w" -o tltv .
+
+      - name: Verify static linkage
+        run: |
+          ldd ./tltv 2>&1 | grep -q "not a dynamic executable" || \
+            (echo "ERROR: binary is dynamically linked" && ldd ./tltv && exit 1)
