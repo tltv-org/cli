@@ -529,6 +529,205 @@ func cmdCrawl(args []string) {
 	fmt.Println()
 }
 
+func cmdResolve(args []string) {
+	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
+	token := fs.String("token", "", "access token (overrides URI token)")
+	noVerify := fs.Bool("no-verify", false, "skip signature verification")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Resolve a tltv:// URI end-to-end\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv resolve <uri>\n\n")
+		fmt.Fprintf(os.Stderr, "Parses the URI, tries each hint, fetches and verifies metadata,\n")
+		fmt.Fprintf(os.Stderr, "and checks stream availability.\n\n")
+		fmt.Fprintf(os.Stderr, "Examples:\n")
+		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...@example.com:443\"\n")
+		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...?via=relay1.com:443,relay2.com:443\"\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	uri, err := parseTLTVUri(fs.Arg(0))
+	if err != nil {
+		fatal("invalid URI: %v", err)
+	}
+
+	// Override token if flag provided
+	tok := uri.Token
+	if *token != "" {
+		tok = *token
+	}
+
+	// Validate channel ID
+	if err := validateChannelID(uri.ChannelID); err != nil {
+		fatal("invalid channel ID: %v", err)
+	}
+
+	client := newClient(flagInsecure)
+
+	printHeader("Resolving: " + fs.Arg(0))
+	printField("Channel ID", uri.ChannelID)
+	if tok != "" {
+		printField("Token", tok)
+	}
+	if len(uri.Hints) == 0 {
+		fatal("no peer hints in URI -- need at least one host to contact")
+	}
+	fmt.Println()
+
+	// Try each hint
+	var resolvedHost string
+	var metadata map[string]interface{}
+
+	for i, hint := range uri.Hints {
+		host := normalizeHost(hint)
+		label := fmt.Sprintf("Hint %d", i+1)
+		fmt.Printf("  %s  %s ... ", c(cDim, label), host)
+
+		// Step 1: Fetch .well-known/tltv and check for channel
+		info, err := client.FetchNodeInfo(host)
+		if err != nil {
+			fmt.Printf("%s\n", c(cRed, "unreachable"))
+			continue
+		}
+
+		found := false
+		source := ""
+		for _, ch := range info.Channels {
+			if ch.ID == uri.ChannelID {
+				found = true
+				source = "channel"
+				break
+			}
+		}
+		if !found {
+			for _, ch := range info.Relaying {
+				if ch.ID == uri.ChannelID {
+					found = true
+					source = "relay"
+					break
+				}
+			}
+		}
+
+		if !found && tok == "" {
+			// Private channels won't appear in .well-known/tltv
+			// Still try fetching metadata directly
+			fmt.Printf("%s", c(cYellow, "not listed"))
+		} else if found {
+			fmt.Printf("%s (%s)", c(cGreen, "found"), source)
+		}
+
+		// Step 2: Negotiate version
+		bestVersion := 0
+		for _, v := range info.Versions {
+			if v > bestVersion {
+				bestVersion = v
+			}
+		}
+		if bestVersion == 0 {
+			bestVersion = 1 // fallback
+		}
+
+		// Step 3: Fetch metadata
+		doc, err := client.FetchMetadata(host, uri.ChannelID, tok)
+		if err != nil {
+			fmt.Printf(" ... %s\n", c(cRed, "metadata: "+err.Error()))
+			continue
+		}
+
+		// Step 4: Verify signature
+		if !*noVerify {
+			docType, _ := doc["type"].(string)
+			if docType == "migration" {
+				err = verifyMigration(doc, uri.ChannelID)
+			} else {
+				err = verifyDocument(doc, uri.ChannelID)
+			}
+			if err != nil {
+				fmt.Printf(" ... %s\n", c(cRed, "signature: "+err.Error()))
+				continue
+			}
+		}
+
+		fmt.Printf(" ... %s\n", c(cGreen, "verified"))
+		resolvedHost = host
+		metadata = doc
+		break
+	}
+
+	if metadata == nil {
+		fmt.Println()
+		fatal("could not resolve channel from any hint")
+	}
+
+	// Display metadata
+	docType, _ := metadata["type"].(string)
+	if docType == "migration" {
+		printHeader("Migration")
+		printField("From", getString(metadata, "from"))
+		printField("To", getString(metadata, "to"))
+		printField("Reason", getString(metadata, "reason"))
+		printField("Migrated", getString(metadata, "migrated"))
+		printWarn("Channel has migrated to " + getString(metadata, "to"))
+	} else {
+		printHeader("Channel")
+		printField("Name", getString(metadata, "name"))
+		if desc := getString(metadata, "description"); desc != "" {
+			printField("Description", desc)
+		}
+		printField("Status", getStringDefault(metadata, "status", "active"))
+		printField("Access", getStringDefault(metadata, "access", "public"))
+		printField("Updated", getString(metadata, "updated"))
+		if tags := getStringSlice(metadata, "tags"); len(tags) > 0 {
+			printField("Tags", strings.Join(tags, ", "))
+		}
+	}
+
+	// Step 5: Check stream
+	if docType != "migration" {
+		fmt.Println()
+		status, contentType, _, err := client.CheckStream(resolvedHost, uri.ChannelID, tok)
+		if err != nil {
+			printField("Stream", c(cRed, "error: "+err.Error()))
+		} else {
+			switch status {
+			case 200:
+				printOK("Stream is live (" + contentType + ")")
+			case 302:
+				printOK("Stream available (redirect)")
+			case 503:
+				printWarn("Stream unavailable (on-demand / idle)")
+			default:
+				printFail(fmt.Sprintf("Stream HTTP %d", status))
+			}
+		}
+	}
+
+	if isTestChannel(uri.ChannelID) {
+		fmt.Println()
+		printWarn("This is the RFC 8032 test channel. Do NOT use in production.")
+	}
+
+	if flagJSON {
+		result := map[string]interface{}{
+			"channel_id":    uri.ChannelID,
+			"resolved_host": resolvedHost,
+			"metadata":      metadata,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(result)
+		return
+	}
+
+	fmt.Println()
+}
+
 // Helper functions for extracting typed values from map[string]interface{}
 func getString(doc map[string]interface{}, key string) string {
 	v, ok := doc[key]

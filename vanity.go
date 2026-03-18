@@ -98,13 +98,40 @@ func mineVanity(ctx context.Context, pattern string, mode string, ignoreCase boo
 // vanityChecked tracks total keys checked across all threads.
 var vanityChecked uint64
 
+// pos2Chars are the base58 characters achievable at position 2 (after "TV")
+// in a channel ID. The 0x1433 version prefix constrains this to 18 of 58.
+// Determined empirically over 100K key generations.
+const pos2Chars = "789ABCDEFGHJKLMNPQ"
+
+// checkPrefixFeasibility warns and auto-switches to contains mode if the
+// prefix pattern starts with a character impossible at position 2.
+func checkPrefixFeasibility(pattern string, ignoreCase bool) (newMode string, ok bool) {
+	if len(pattern) == 0 {
+		return "prefix", true
+	}
+	ch := pattern[0]
+	if ignoreCase {
+		// Check if any case variant is in pos2Chars
+		upper := strings.ToUpper(string(ch))[0]
+		lower := strings.ToLower(string(ch))[0]
+		if strings.ContainsRune(pos2Chars, rune(upper)) || strings.ContainsRune(pos2Chars, rune(lower)) {
+			return "prefix", true
+		}
+	} else {
+		if strings.ContainsRune(pos2Chars, rune(ch)) {
+			return "prefix", true
+		}
+	}
+	return "contains", false
+}
+
 // runVanityMiner runs the interactive vanity miner.
 func runVanityMiner(pattern, mode string, ignoreCase bool, threads, maxCount int) {
 	if threads <= 0 {
 		threads = runtime.NumCPU()
 	}
 
-	// Validate pattern characters
+	// Validate pattern characters against base58 alphabet
 	checkPattern := pattern
 	if ignoreCase {
 		checkPattern = strings.ToLower(pattern)
@@ -114,7 +141,6 @@ func runVanityMiner(pattern, mode string, ignoreCase bool, threads, maxCount int
 		for _, a := range b58Alphabet {
 			c := a
 			if ignoreCase {
-				// Check if lowercased version matches
 				lc := strings.ToLower(string(a))
 				if lc == string(ch) {
 					valid = true
@@ -127,6 +153,16 @@ func runVanityMiner(pattern, mode string, ignoreCase bool, threads, maxCount int
 		}
 		if !valid {
 			fatal("pattern contains character %q not achievable in base58", string(ch))
+		}
+	}
+
+	// Check prefix feasibility at position 2
+	if mode == "prefix" {
+		newMode, feasible := checkPrefixFeasibility(pattern, ignoreCase)
+		if !feasible {
+			fmt.Fprintf(os.Stderr, "note: %q cannot appear at position 2 (after TV) due to encoding constraints\n", string(pattern[0]))
+			fmt.Fprintf(os.Stderr, "      switching to --mode contains\n\n")
+			mode = newMode
 		}
 	}
 

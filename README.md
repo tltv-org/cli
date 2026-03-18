@@ -7,17 +7,17 @@ Command-line tool for the [TLTV Federation Protocol](https://github.com/tltv-org
 ### From source
 
 ```bash
-go install github.com/tltv-org/tltv-cli@latest
+go install github.com/tltv-org/cli@latest
 ```
 
 ### Pre-built binaries
 
-Download from the [releases page](https://github.com/tltv-org/tltv-cli/releases). Available for Linux, macOS, and Windows (amd64 + arm64).
+Download from the [releases page](https://github.com/tltv-org/cli/releases). Available for Linux, macOS, and Windows (amd64 + arm64).
 
 ### Build from source
 
 ```bash
-git clone https://github.com/tltv-org/tltv-cli.git
+git clone https://github.com/tltv-org/cli.git tltv-cli
 cd tltv-cli
 make build      # builds ./tltv
 make install    # installs to $GOPATH/bin
@@ -86,6 +86,7 @@ tltv crawl example.com
 
 | Command | Description |
 |---|---|
+| `resolve <uri>` | Resolve a `tltv://` URI end-to-end: try hints, verify metadata, check stream. |
 | `node <host>` | Fetch `/.well-known/tltv` from a node. Shows protocol version, channels, and relaying info. |
 | `fetch <id@host>` | Fetch channel metadata and verify its signature. Handles migration documents. |
 | `guide <id@host>` | Fetch a channel guide and verify its signature. Displays entries in a table. |
@@ -98,6 +99,7 @@ tltv crawl example.com
 | Command | Description |
 |---|---|
 | `migrate` | Create a signed key migration document. Requires `-from-key` (old seed) and `-to` (new channel ID). |
+| `completion <shell>` | Generate shell completions for bash, zsh, or fish. |
 | `version` | Show version, protocol version, Go version, and platform. |
 
 ## Global Flags

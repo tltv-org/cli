@@ -70,7 +70,7 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 - Author: `Philo Farnsworth <farnsworth27@protonmail.com>`
 - Do not include Co-Authored-By lines in commit messages
 - `origin` -- Forgejo (git.plutoniumtech.com/tltv/cli)
-- `github` -- GitHub (github.com/tltv-org/tltv-cli). Public release.
+- `github` -- GitHub (github.com/tltv-org/cli). Public release. Squashed history.
 
 ### Branching
 
@@ -103,3 +103,30 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 ### Adding a new flag to a command
 
 Use `flag.NewFlagSet` for the command. Flags must come before positional arguments (Go `flag` package convention).
+
+### GitHub Release Process
+
+GitHub gets a squashed single-commit release. Forgejo keeps the full history.
+
+1. Finalize all changes on `dev`, merge to `main`, push to `origin` (Forgejo).
+2. Run tests: `make test`
+3. Create an orphan branch for GitHub:
+   ```bash
+   git checkout --orphan github-release
+   git reset
+   git add .gitignore .github/ LICENSE README.md Makefile go.mod \
+       *.go
+   ```
+4. Do NOT include: AGENTS.md or anything not meant for public.
+5. Commit with a clean message:
+   ```bash
+   git commit -m "TLTV CLI vX.Y.Z
+
+   <one paragraph summary>"
+   ```
+6. Push and tag:
+   ```bash
+   git push github github-release:main --force
+   git push github <commit-hash>:refs/tags/vX.Y.Z
+   ```
+7. Switch back: `git checkout -f dev`
