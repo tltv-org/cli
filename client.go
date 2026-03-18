@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -13,10 +14,10 @@ import (
 
 // NodeInfo represents the response from /.well-known/tltv
 type NodeInfo struct {
-	Protocol string        `json:"protocol"`
-	Versions []int         `json:"versions"`
-	Channels []ChannelRef  `json:"channels"`
-	Relaying []ChannelRef  `json:"relaying"`
+	Protocol string       `json:"protocol"`
+	Versions []int        `json:"versions"`
+	Channels []ChannelRef `json:"channels"`
+	Relaying []ChannelRef `json:"relaying"`
 }
 
 // ChannelRef is a channel reference in node info or peer exchange.
@@ -44,6 +45,7 @@ type Client struct {
 }
 
 // newClient creates a new TLTV HTTP client.
+// Use for user-chosen targets (node, fetch, guide, peers, stream).
 func newClient(insecure bool) *Client {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -63,6 +65,60 @@ func newClient(insecure bool) *Client {
 	}
 }
 
+// newSSRFSafeClient creates a client that blocks connections to local/private
+// addresses at DNS resolution time, preventing SSRF via DNS rebinding.
+// Used for untrusted hints in resolve and crawl (spec section 3.1).
+func newSSRFSafeClient(insecure bool) *Client {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: insecure,
+		},
+		DialContext:         ssrfSafeDialContext,
+		TLSHandshakeTimeout: 5 * time.Second,
+	}
+
+	return &Client{
+		http: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: tr,
+		},
+	}
+}
+
+// ssrfSafeDialContext resolves hostnames and blocks connections to
+// local/private/loopback/link-local/CGN addresses. Connects directly to the
+// resolved IP to prevent TOCTOU between DNS lookup and connection.
+func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	var lastErr error
+	for _, ip := range ips {
+		if isLocalAddress(ip.IP.String() + ":0") {
+			lastErr = fmt.Errorf("hint resolves to local address %s (%s), blocked per spec section 3.1", host, ip.IP)
+			continue
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return conn, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no addresses found for %s", host)
+}
+
 // baseURL constructs the base URL for a host.
 // Defaults to HTTPS, but uses HTTP for localhost/loopback.
 func (c *Client) baseURL(host string) string {
@@ -77,8 +133,7 @@ func (c *Client) baseURL(host string) string {
 
 	// Detect local addresses -> use HTTP
 	scheme := "https"
-	hostPart, _, _ := net.SplitHostPort(host)
-	if hostPart == "localhost" || hostPart == "127.0.0.1" || hostPart == "::1" || hostPart == "[::1]" {
+	if isLocalAddress(host) {
 		scheme = "http"
 	}
 
@@ -223,6 +278,87 @@ func (c *Client) CheckStream(host, channelID, token string) (int, string, string
 	return resp.StatusCode, contentType, string(body), nil
 }
 
+// isLocalAddress checks if a hint refers to a loopback, private, link-local,
+// unspecified, or CGN address. Per spec section 3.1, clients MUST NOT contact
+// such hints unless --local is set.
+func isLocalAddress(host string) bool {
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	// Strip IPv6 brackets
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+
+	if h == "localhost" {
+		return true
+	}
+
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false // DNS name, can't check without resolving
+	}
+
+	// Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1 -> 127.0.0.1)
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return true
+	}
+
+	// CGN/shared address space (100.64.0.0/10, RFC 6598)
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 100 && ip4[1]&0xc0 == 0x40 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// validateHint checks that a hint is a valid host[:port] and does not contain
+// URL components that could enable SSRF bypass (scheme, userinfo, path, etc.).
+func validateHint(hint string) error {
+	if hint == "" {
+		return fmt.Errorf("empty hint")
+	}
+	if strings.Contains(hint, "://") {
+		return fmt.Errorf("hint must be host[:port], not a URL")
+	}
+	if strings.Contains(hint, "@") {
+		return fmt.Errorf("hint must not contain userinfo (@)")
+	}
+	if strings.Contains(hint, "/") {
+		return fmt.Errorf("hint must not contain a path")
+	}
+	if strings.Contains(hint, "?") {
+		return fmt.Errorf("hint must not contain a query string")
+	}
+	if strings.Contains(hint, "#") {
+		return fmt.Errorf("hint must not contain a fragment")
+	}
+	// Validate bracketed IPv6
+	if strings.HasPrefix(hint, "[") {
+		if !strings.Contains(hint, "]") {
+			return fmt.Errorf("malformed IPv6 hint: missing closing bracket")
+		}
+	}
+	return nil
+}
+
+// normalizeHint validates and normalizes a hint from untrusted sources.
+// Rejects malformed hints and adds default port 443 if missing.
+func normalizeHint(s string) (string, error) {
+	if err := validateHint(s); err != nil {
+		return "", err
+	}
+	if _, _, err := net.SplitHostPort(s); err != nil {
+		return s + ":443", nil
+	}
+	return s, nil
+}
+
 // truncateBody returns the first 200 bytes of a response body for error display.
 func truncateBody(body []byte) string {
 	s := strings.TrimSpace(string(body))
@@ -247,6 +383,7 @@ func parseTarget(s string) (channelID, host string, err error) {
 }
 
 // normalizeHost ensures a host has a port.
+// Accepts full URLs for user-provided hosts (direct commands).
 func normalizeHost(s string) string {
 	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
 		return s

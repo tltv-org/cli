@@ -97,32 +97,44 @@ func cmdFetch(args []string) {
 		fatal("%v", err)
 	}
 
+	// Verify signature
+	var sigErr error
+	docType, _ := doc["type"].(string)
+	if !*noVerify {
+		if docType == "migration" {
+			sigErr = verifyMigration(doc, channelID)
+		} else {
+			sigErr = verifyDocument(doc, channelID)
+		}
+	}
+
 	if flagJSON {
+		result := map[string]interface{}{
+			"channel_id": channelID,
+			"host":       host,
+			"verified":   !*noVerify && sigErr == nil,
+			"document":   doc,
+		}
+		if sigErr != nil {
+			result["verification_error"] = sigErr.Error()
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(doc)
+		enc.Encode(result)
+		if sigErr != nil {
+			os.Exit(1)
+		}
 		return
 	}
 
-	// Verify signature
-	verified := false
 	if !*noVerify {
-		// Check if this is a migration document
-		docType, _ := doc["type"].(string)
-		if docType == "migration" {
-			err = verifyMigration(doc, channelID)
+		if sigErr != nil {
+			printFail("Signature: " + sigErr.Error())
 		} else {
-			err = verifyDocument(doc, channelID)
-		}
-		if err != nil {
-			printFail("Signature: " + err.Error())
-		} else {
-			verified = true
 			printOK("Signature valid")
 		}
 	}
 
-	docType, _ := doc["type"].(string)
 	if docType == "migration" {
 		printHeader("Migration Document")
 		printField("From", getString(doc, "from"))
@@ -166,14 +178,18 @@ func cmdFetch(args []string) {
 		fmt.Println()
 		printWarn("This is the RFC 8032 test channel. Do NOT use in production.")
 	}
-	_ = verified
 	fmt.Println()
+
+	if sigErr != nil {
+		os.Exit(1)
+	}
 }
 
 func cmdGuide(args []string) {
 	fs := flag.NewFlagSet("guide", flag.ExitOnError)
 	token := fs.String("token", "", "access token for private channels")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
+	xmltv := fs.Bool("xmltv", false, "output as XMLTV XML")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Fetch and verify a channel guide\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv guide <channel_id@host[:port]>\n\n")
@@ -198,18 +214,46 @@ func cmdGuide(args []string) {
 		fatal("%v", err)
 	}
 
-	if flagJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(doc)
+	// Verify signature
+	var sigErr error
+	if !*noVerify {
+		sigErr = verifyDocument(doc, channelID)
+	}
+
+	// XMLTV output
+	if *xmltv {
+		if sigErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: signature verification failed: %s\n", sigErr.Error())
+		}
+		outputXMLTV(channelID, doc)
+		if sigErr != nil {
+			os.Exit(1)
+		}
 		return
 	}
 
-	// Verify signature
+	if flagJSON {
+		result := map[string]interface{}{
+			"channel_id": channelID,
+			"host":       host,
+			"verified":   !*noVerify && sigErr == nil,
+			"document":   doc,
+		}
+		if sigErr != nil {
+			result["verification_error"] = sigErr.Error()
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(result)
+		if sigErr != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if !*noVerify {
-		err = verifyDocument(doc, channelID)
-		if err != nil {
-			printFail("Signature: " + err.Error())
+		if sigErr != nil {
+			printFail("Signature: " + sigErr.Error())
 		} else {
 			printOK("Signature valid")
 		}
@@ -250,6 +294,10 @@ func cmdGuide(args []string) {
 		printTable([]string{"Time", "Title", "Category"}, rows)
 	}
 	fmt.Println()
+
+	if sigErr != nil {
+		os.Exit(1)
+	}
 }
 
 func cmdPeers(args []string) {
@@ -406,7 +454,14 @@ func cmdCrawl(args []string) {
 	}
 
 	startHost := normalizeHost(fs.Arg(0))
-	client := newClient(flagInsecure)
+
+	// Use SSRF-safe client for crawling untrusted peer hints
+	var client *Client
+	if flagLocal {
+		client = newClient(flagInsecure)
+	} else {
+		client = newSSRFSafeClient(flagInsecure)
+	}
 
 	type discoveredChannel struct {
 		ID     string
@@ -424,7 +479,9 @@ func cmdCrawl(args []string) {
 	channels := make(map[string]discoveredChannel) // dedup by ID
 	queue := []crawlTarget{{host: startHost, depth: 0}}
 
-	fmt.Printf("Crawling from %s (max depth %d)...\n\n", startHost, *depth)
+	if !flagJSON {
+		fmt.Printf("Crawling from %s (max depth %d)...\n\n", startHost, *depth)
+	}
 
 	nodesProbed := 0
 
@@ -438,15 +495,21 @@ func cmdCrawl(args []string) {
 		visited[target.host] = true
 
 		// Fetch node info
-		fmt.Printf("  Probing %s...", target.host)
+		if !flagJSON {
+			fmt.Printf("  Probing %s...", target.host)
+		}
 		info, err := client.FetchNodeInfo(target.host)
 		if err != nil {
-			fmt.Printf(" %s\n", c(cRed, "error: "+err.Error()))
+			if !flagJSON {
+				fmt.Printf(" %s\n", c(cRed, "error: "+err.Error()))
+			}
 			continue
 		}
 
 		nodesProbed++
-		fmt.Printf(" %d ch, %d relay", len(info.Channels), len(info.Relaying))
+		if !flagJSON {
+			fmt.Printf(" %d ch, %d relay", len(info.Channels), len(info.Relaying))
+		}
 
 		for _, ch := range info.Channels {
 			if _, exists := channels[ch.ID]; !exists {
@@ -468,11 +531,15 @@ func cmdCrawl(args []string) {
 		// Fetch peers
 		exchange, err := client.FetchPeers(target.host)
 		if err != nil {
-			fmt.Printf(", no peers\n")
+			if !flagJSON {
+				fmt.Printf(", no peers\n")
+			}
 			continue
 		}
 
-		fmt.Printf(", %d peers\n", len(exchange.Peers))
+		if !flagJSON {
+			fmt.Printf(", %d peers\n", len(exchange.Peers))
+		}
 
 		for _, p := range exchange.Peers {
 			if _, exists := channels[p.ID]; !exists {
@@ -485,10 +552,14 @@ func cmdCrawl(args []string) {
 					Host: hintStr, Source: "peer",
 				}
 			}
-			// Add peer hints to crawl queue
+			// Add validated peer hints to crawl queue
 			for _, hint := range p.Hints {
-				if !visited[hint] {
-					queue = append(queue, crawlTarget{host: hint, depth: target.depth + 1})
+				normalized, err := normalizeHint(hint)
+				if err != nil {
+					continue // silently skip malformed hints from peer exchange
+				}
+				if !visited[normalized] && (flagLocal || !isLocalAddress(normalized)) {
+					queue = append(queue, crawlTarget{host: normalized, depth: target.depth + 1})
 				}
 			}
 		}
@@ -527,6 +598,388 @@ func cmdCrawl(args []string) {
 		printTable([]string{"ID", "Name", "Host", "Source"}, rows)
 	}
 	fmt.Println()
+}
+
+func cmdResolve(args []string) {
+	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
+	token := fs.String("token", "", "access token (overrides URI token)")
+	noVerify := fs.Bool("no-verify", false, "skip signature verification")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Resolve a tltv:// URI end-to-end\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv resolve <uri>\n\n")
+		fmt.Fprintf(os.Stderr, "Parses the URI, tries each hint, fetches and verifies metadata,\n")
+		fmt.Fprintf(os.Stderr, "and checks stream availability.\n\n")
+		fmt.Fprintf(os.Stderr, "Examples:\n")
+		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...@example.com:443\"\n")
+		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...?via=relay1.com:443,relay2.com:443\"\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	uri, err := parseTLTVUri(fs.Arg(0))
+	if err != nil {
+		fatal("invalid URI: %v", err)
+	}
+
+	// Override token if flag provided
+	tok := uri.Token
+	if *token != "" {
+		tok = *token
+	}
+
+	// Validate channel ID
+	if err := validateChannelID(uri.ChannelID); err != nil {
+		fatal("invalid channel ID: %v", err)
+	}
+
+	// Use SSRF-safe client for untrusted URI hints
+	var client *Client
+	if flagLocal {
+		client = newClient(flagInsecure)
+	} else {
+		client = newSSRFSafeClient(flagInsecure)
+	}
+
+	if len(uri.Hints) == 0 {
+		fatal("no peer hints in URI -- need at least one host to contact")
+	}
+
+	if !flagJSON {
+		printHeader("Resolving: " + fs.Arg(0))
+		printField("Channel ID", uri.ChannelID)
+		if tok != "" {
+			printField("Token", tok)
+		}
+		fmt.Println()
+	}
+
+	// Try each hint
+	var resolvedHost string
+	var metadata map[string]interface{}
+	var streamStatus int
+	var streamContentType string
+
+	for i, hint := range uri.Hints {
+		// Validate hint structure (reject URLs, userinfo, paths)
+		host, err := normalizeHint(hint)
+		if err != nil {
+			if !flagJSON {
+				label := fmt.Sprintf("Hint %d", i+1)
+				fmt.Printf("  %s  %s ... %s\n", c(cDim, label), hint, c(cRed, "rejected: "+err.Error()))
+			}
+			continue
+		}
+
+		// Filter local/private addresses unless --local (spec section 3.1)
+		if !flagLocal && isLocalAddress(host) {
+			if !flagJSON {
+				label := fmt.Sprintf("Hint %d", i+1)
+				fmt.Printf("  %s  %s ... %s\n", c(cDim, label), host, c(cYellow, "skipped (local address, use --local)"))
+			}
+			continue
+		}
+
+		if !flagJSON {
+			label := fmt.Sprintf("Hint %d", i+1)
+			fmt.Printf("  %s  %s ... ", c(cDim, label), host)
+		}
+
+		// Step 1: Fetch .well-known/tltv and check for channel
+		info, err := client.FetchNodeInfo(host)
+		if err != nil {
+			if !flagJSON {
+				fmt.Printf("%s\n", c(cRed, "unreachable"))
+			}
+			continue
+		}
+
+		found := false
+		source := ""
+		for _, ch := range info.Channels {
+			if ch.ID == uri.ChannelID {
+				found = true
+				source = "channel"
+				break
+			}
+		}
+		if !found {
+			for _, ch := range info.Relaying {
+				if ch.ID == uri.ChannelID {
+					found = true
+					source = "relay"
+					break
+				}
+			}
+		}
+
+		if !flagJSON {
+			if !found && tok == "" {
+				fmt.Printf("%s", c(cYellow, "not listed"))
+			} else if found {
+				fmt.Printf("%s (%s)", c(cGreen, "found"), source)
+			}
+		}
+
+		// Step 2: Negotiate version
+		bestVersion := 0
+		for _, v := range info.Versions {
+			if v > bestVersion {
+				bestVersion = v
+			}
+		}
+		if bestVersion == 0 {
+			bestVersion = 1 // fallback
+		}
+
+		// Step 3: Fetch metadata
+		doc, err := client.FetchMetadata(host, uri.ChannelID, tok)
+		if err != nil {
+			if !flagJSON {
+				fmt.Printf(" ... %s\n", c(cRed, "metadata: "+err.Error()))
+			}
+			continue
+		}
+
+		// Step 4: Verify signature
+		if !*noVerify {
+			docType, _ := doc["type"].(string)
+			if docType == "migration" {
+				err = verifyMigration(doc, uri.ChannelID)
+			} else {
+				err = verifyDocument(doc, uri.ChannelID)
+			}
+			if err != nil {
+				if !flagJSON {
+					fmt.Printf(" ... %s\n", c(cRed, "signature: "+err.Error()))
+				}
+				continue
+			}
+		}
+
+		if !flagJSON {
+			fmt.Printf(" ... %s\n", c(cGreen, "verified"))
+		}
+		resolvedHost = host
+		metadata = doc
+		break
+	}
+
+	if metadata == nil {
+		if !flagJSON {
+			fmt.Println()
+		}
+		fatal("could not resolve channel from any hint")
+	}
+
+	// Step 5: Follow migration chain (max 5 hops, per spec section 5.14)
+	finalChannelID := uri.ChannelID
+	visited := map[string]bool{uri.ChannelID: true}
+	var migrationErr error
+
+	for hop := 0; hop < 5; hop++ {
+		dt, _ := metadata["type"].(string)
+		if dt != "migration" {
+			break
+		}
+
+		toID, _ := metadata["to"].(string)
+		if toID == "" {
+			migrationErr = fmt.Errorf("migration document missing 'to' field")
+			break
+		}
+
+		// Detect loops
+		if visited[toID] {
+			migrationErr = fmt.Errorf("migration loop detected at %s", truncateID(toID, 24))
+			break
+		}
+		visited[toID] = true
+
+		if !flagJSON {
+			printWarn(fmt.Sprintf("Migrated -> %s (hop %d)", truncateID(toID, 24), hop+1))
+		}
+
+		newDoc, err := client.FetchMetadata(resolvedHost, toID, tok)
+		if err != nil {
+			migrationErr = fmt.Errorf("could not follow migration to %s: %v", truncateID(toID, 24), err)
+			break
+		}
+
+		if !*noVerify {
+			newDocType, _ := newDoc["type"].(string)
+			if newDocType == "migration" {
+				err = verifyMigration(newDoc, toID)
+			} else {
+				err = verifyDocument(newDoc, toID)
+			}
+			if err != nil {
+				migrationErr = fmt.Errorf("migration target %s verification failed: %v", truncateID(toID, 24), err)
+				break
+			}
+		}
+
+		finalChannelID = toID
+		metadata = newDoc
+	}
+
+	// Check if still stuck on a migration document (exceeded 5 hops)
+	if migrationErr == nil {
+		if dt, _ := metadata["type"].(string); dt == "migration" {
+			migrationErr = fmt.Errorf("migration chain exceeded maximum of 5 hops")
+		}
+	}
+
+	// Fail clearly if migration chain is broken
+	if migrationErr != nil {
+		if flagJSON {
+			result := map[string]interface{}{
+				"error":         migrationErr.Error(),
+				"channel_id":    uri.ChannelID,
+				"resolved_host": resolvedHost,
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(result)
+			os.Exit(1)
+		}
+		printFail(migrationErr.Error())
+		fmt.Println()
+		os.Exit(1)
+	}
+
+	// Step 6: Check stream
+	docType, _ := metadata["type"].(string)
+	if docType != "migration" {
+		streamStatus, streamContentType, _, _ = client.CheckStream(resolvedHost, finalChannelID, tok)
+	}
+
+	// JSON output
+	if flagJSON {
+		result := map[string]interface{}{
+			"channel_id":    finalChannelID,
+			"resolved_host": resolvedHost,
+			"verified":      !*noVerify,
+			"document":      metadata,
+		}
+		if finalChannelID != uri.ChannelID {
+			result["migrated_from"] = uri.ChannelID
+		}
+		if docType != "migration" {
+			result["stream_status"] = streamStatus
+			result["stream_live"] = streamStatus == 200
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(result)
+		return
+	}
+
+	// Human output
+	if docType == "migration" {
+		printHeader("Migration")
+		printField("From", getString(metadata, "from"))
+		printField("To", getString(metadata, "to"))
+		printField("Reason", getString(metadata, "reason"))
+		printField("Migrated", getString(metadata, "migrated"))
+		printWarn("Channel has migrated to " + getString(metadata, "to"))
+	} else {
+		printHeader("Channel")
+		printField("Name", getString(metadata, "name"))
+		if desc := getString(metadata, "description"); desc != "" {
+			printField("Description", desc)
+		}
+		printField("Status", getStringDefault(metadata, "status", "active"))
+		printField("Access", getStringDefault(metadata, "access", "public"))
+		printField("Updated", getString(metadata, "updated"))
+		if tags := getStringSlice(metadata, "tags"); len(tags) > 0 {
+			printField("Tags", strings.Join(tags, ", "))
+		}
+
+		fmt.Println()
+		switch streamStatus {
+		case 200:
+			printOK("Stream is live (" + streamContentType + ")")
+		case 302:
+			printOK("Stream available (redirect)")
+		case 503:
+			printWarn("Stream unavailable (on-demand / idle)")
+		case 0:
+			printFail("Stream check failed")
+		default:
+			printFail(fmt.Sprintf("Stream HTTP %d", streamStatus))
+		}
+	}
+
+	if isTestChannel(uri.ChannelID) {
+		fmt.Println()
+		printWarn("This is the RFC 8032 test channel. Do NOT use in production.")
+	}
+
+	fmt.Println()
+}
+
+// ---------- XMLTV ----------
+
+// outputXMLTV writes a guide document as XMLTV XML to stdout.
+func outputXMLTV(channelID string, guide map[string]interface{}) {
+	fmt.Println(`<?xml version="1.0" encoding="UTF-8"?>`)
+	fmt.Printf("<tv generator-info-name=\"tltv-cli/%s\">\n", version)
+
+	fmt.Printf("  <channel id=\"%s\">\n", xmlEscape(channelID))
+	fmt.Printf("    <display-name>%s</display-name>\n", xmlEscape(channelID))
+	fmt.Println("  </channel>")
+
+	entries, _ := guide["entries"].([]interface{})
+	for _, e := range entries {
+		entry, _ := e.(map[string]interface{})
+		if entry == nil {
+			continue
+		}
+
+		start := toXMLTVTime(getString(entry, "start"))
+		stop := toXMLTVTime(getString(entry, "end"))
+		if start == "" || stop == "" {
+			continue
+		}
+
+		fmt.Printf("  <programme start=\"%s\" stop=\"%s\" channel=\"%s\">\n",
+			start, stop, xmlEscape(channelID))
+		fmt.Printf("    <title>%s</title>\n", xmlEscape(getString(entry, "title")))
+		if desc := getString(entry, "description"); desc != "" {
+			fmt.Printf("    <desc>%s</desc>\n", xmlEscape(desc))
+		}
+		if cat := getString(entry, "category"); cat != "" {
+			fmt.Printf("    <category>%s</category>\n", xmlEscape(cat))
+		}
+		fmt.Println("  </programme>")
+	}
+
+	fmt.Println("</tv>")
+}
+
+// toXMLTVTime converts ISO 8601 UTC to XMLTV timestamp format.
+func toXMLTVTime(iso string) string {
+	t, err := time.Parse("2006-01-02T15:04:05Z", iso)
+	if err != nil {
+		return ""
+	}
+	return t.Format("20060102150405 +0000")
+}
+
+// xmlEscape escapes special characters for XML output.
+func xmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	return s
 }
 
 // Helper functions for extracting typed values from map[string]interface{}

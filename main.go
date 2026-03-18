@@ -21,6 +21,7 @@ var (
 	flagJSON     bool
 	flagNoColor  bool
 	flagInsecure bool
+	flagLocal    bool
 )
 
 func usage() {
@@ -30,7 +31,8 @@ func usage() {
 	fmt.Fprintf(w, "Global Flags:\n")
 	fmt.Fprintf(w, "  --json        Machine-readable JSON output\n")
 	fmt.Fprintf(w, "  --no-color    Disable colored output\n")
-	fmt.Fprintf(w, "  --insecure    Skip TLS verification\n\n")
+	fmt.Fprintf(w, "  --insecure    Skip TLS verification\n")
+	fmt.Fprintf(w, "  --local       Allow local/private address hints\n\n")
 	fmt.Fprintf(w, "Identity & Keys:\n")
 	fmt.Fprintf(w, "  keygen                 Generate a new channel keypair\n")
 	fmt.Fprintf(w, "  vanity <pattern>       Mine vanity channel IDs\n")
@@ -43,6 +45,7 @@ func usage() {
 	fmt.Fprintf(w, "  parse <uri>            Parse a tltv:// URI\n")
 	fmt.Fprintf(w, "  format <channel-id>    Build a tltv:// URI\n\n")
 	fmt.Fprintf(w, "Network:\n")
+	fmt.Fprintf(w, "  resolve <uri>          Resolve a tltv:// URI end-to-end\n")
 	fmt.Fprintf(w, "  node <host>            Probe a TLTV node\n")
 	fmt.Fprintf(w, "  fetch <id@host>        Fetch channel metadata\n")
 	fmt.Fprintf(w, "  guide <id@host>        Fetch channel guide\n")
@@ -51,6 +54,7 @@ func usage() {
 	fmt.Fprintf(w, "  crawl <host>           Crawl the gossip network\n\n")
 	fmt.Fprintf(w, "Operations:\n")
 	fmt.Fprintf(w, "  migrate                Create a migration document\n")
+	fmt.Fprintf(w, "  completion <shell>     Generate shell completions (bash, zsh, fish)\n")
 	fmt.Fprintf(w, "  version                Show version\n\n")
 	fmt.Fprintf(w, "Use \"tltv <command> -h\" for help with a specific command.\n")
 }
@@ -75,6 +79,12 @@ func main() {
 			flagNoColor = true
 		case "--insecure":
 			flagInsecure = true
+		case "--local":
+			flagLocal = true
+		case "-v", "--version":
+			initColor()
+			cmdVersion()
+			os.Exit(0)
 		case "-h", "--help", "help":
 			if cmd == "" {
 				usage()
@@ -87,6 +97,11 @@ func main() {
 				cmd = arg
 				cmdArgs = os.Args[i+1:]
 				goto dispatch
+			}
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(os.Stderr, "unknown flag: %s\n\n", arg)
+				usage()
+				os.Exit(1)
 			}
 			globalArgs = append(globalArgs, arg)
 		}
@@ -113,6 +128,8 @@ dispatch:
 		cmdParse(cmdArgs)
 	case "format":
 		cmdFormat(cmdArgs)
+	case "resolve":
+		cmdResolve(cmdArgs)
 	case "node":
 		cmdNode(cmdArgs)
 	case "fetch":
@@ -127,6 +144,8 @@ dispatch:
 		cmdCrawl(cmdArgs)
 	case "migrate":
 		cmdMigrate(cmdArgs)
+	case "completion":
+		cmdCompletion(cmdArgs)
 	case "version":
 		cmdVersion()
 	case "":
@@ -143,7 +162,7 @@ dispatch:
 
 func cmdKeygen(args []string) {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
-	outFile := fs.String("out", "", "output file for seed (default: <channel-id>.key)")
+	outFile := fs.String("out", "", "output file for seed (- for stdout, default: <channel-id>.key)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Generate a new TLTV channel keypair\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv keygen [flags]\n\n")
@@ -165,6 +184,13 @@ func cmdKeygen(args []string) {
 	filename := *outFile
 	if filename == "" {
 		filename = channelID + ".key"
+	}
+
+	// Support --out - for writing seed to stdout
+	if filename == "-" {
+		os.Stdout.Write(seed)
+		fmt.Fprintf(os.Stderr, "%s\n", channelID)
+		return
 	}
 
 	// Check if file exists
@@ -344,8 +370,14 @@ func cmdSign(args []string) {
 
 	// Auto-set fields if requested
 	if *autoSeq {
-		doc["seq"] = json.Number(fmt.Sprintf("%d", time.Now().Unix()))
-		doc["updated"] = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+		now := time.Now().UTC()
+		doc["seq"] = json.Number(fmt.Sprintf("%d", now.Unix()))
+		doc["updated"] = now.Format("2006-01-02T15:04:05Z")
+	}
+
+	// Validate timestamp formats before signing (spec section 6.4)
+	if err := validateDocTimestamps(doc); err != nil {
+		fatal("timestamp validation: %v", err)
 	}
 
 	// Ensure id field matches the signing key
@@ -484,8 +516,9 @@ func cmdTemplate(args []string) {
 		os.Exit(1)
 	}
 
-	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	seq := time.Now().Unix()
+	t := time.Now().UTC()
+	now := t.Format("2006-01-02T15:04:05Z")
+	seq := t.Unix()
 
 	var doc map[string]interface{}
 
@@ -607,44 +640,50 @@ func cmdParse(args []string) {
 
 func cmdFormat(args []string) {
 	fs := flag.NewFlagSet("format", flag.ExitOnError)
-	token := fs.String("token", "", "access token for private channels")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Build a tltv:// URI\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv format <channel-id> [--hint host:port]... [--token value]\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv format TVMkVH... --hint example.com:443\n")
 		fmt.Fprintf(os.Stderr, "  tltv format TVMkVH... --token secret123\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
 	}
 
-	// Collect --hint flags (flag package doesn't support repeated flags natively)
+	// Manually extract --hint and --token (Go's flag package doesn't support
+	// repeated flags and stops parsing at the first positional argument).
 	var hints []string
+	var token string
 	var remaining []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--hint" || args[i] == "-hint" {
+		switch args[i] {
+		case "--hint", "-hint":
 			if i+1 < len(args) {
 				hints = append(hints, args[i+1])
 				i++
 			}
-		} else {
+		case "--token", "-token":
+			if i+1 < len(args) {
+				token = args[i+1]
+				i++
+			}
+		case "-h", "--help":
+			fs.Usage()
+			os.Exit(0)
+		default:
 			remaining = append(remaining, args[i])
 		}
 	}
 
-	fs.Parse(remaining)
-
-	if fs.NArg() < 1 {
+	if len(remaining) < 1 {
 		fs.Usage()
 		os.Exit(1)
 	}
 
-	channelID := fs.Arg(0)
+	channelID := remaining[0]
 	if err := validateChannelID(channelID); err != nil {
 		fatal("invalid channel ID: %v", err)
 	}
 
-	uri := formatTLTVUri(channelID, hints, *token)
+	uri := formatTLTVUri(channelID, hints, token)
 	fmt.Println(uri)
 }
 
@@ -692,14 +731,14 @@ func cmdMigrate(args []string) {
 	}
 
 	// Build migration document
-	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	t := time.Now().UTC()
 	doc := map[string]interface{}{
 		"v":        json.Number("1"),
-		"seq":      json.Number(fmt.Sprintf("%d", time.Now().Unix())),
+		"seq":      json.Number(fmt.Sprintf("%d", t.Unix())),
 		"type":     "migration",
 		"from":     oldChannelID,
 		"to":       *toID,
-		"migrated": now,
+		"migrated": t.Format("2006-01-02T15:04:05Z"),
 	}
 	if *reason != "" {
 		doc["reason"] = *reason
@@ -737,4 +776,151 @@ func cmdVersion() {
 		return
 	}
 	fmt.Printf("tltv %s (protocol v1, %s, %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
+
+// ---------- completion ----------
+
+var allCommands = []string{
+	"keygen", "vanity", "inspect",
+	"sign", "verify", "template",
+	"parse", "format",
+	"resolve", "node", "fetch", "guide", "peers", "stream", "crawl",
+	"migrate", "completion", "version",
+}
+
+func cmdCompletion(args []string) {
+	fs := flag.NewFlagSet("completion", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Generate shell completion scripts\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv completion <shell>\n\n")
+		fmt.Fprintf(os.Stderr, "Shells: bash, zsh, fish\n\n")
+		fmt.Fprintf(os.Stderr, "Install:\n")
+		fmt.Fprintf(os.Stderr, "  bash:  tltv completion bash > /etc/bash_completion.d/tltv\n")
+		fmt.Fprintf(os.Stderr, "  zsh:   tltv completion zsh > \"${fpath[1]}/_tltv\"\n")
+		fmt.Fprintf(os.Stderr, "  fish:  tltv completion fish > ~/.config/fish/completions/tltv.fish\n\n")
+	}
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	switch fs.Arg(0) {
+	case "bash":
+		fmt.Print(completionBash())
+	case "zsh":
+		fmt.Print(completionZsh())
+	case "fish":
+		fmt.Print(completionFish())
+	default:
+		fatal("unknown shell: %s (supported: bash, zsh, fish)", fs.Arg(0))
+	}
+}
+
+func completionBash() string {
+	cmds := strings.Join(allCommands, " ")
+	return `# tltv bash completion
+_tltv() {
+    local cur prev commands
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="` + cmds + `"
+
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
+        return 0
+    fi
+
+    case "${prev}" in
+        template)
+            COMPREPLY=( $(compgen -W "metadata guide migration" -- "${cur}") )
+            ;;
+        completion)
+            COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") )
+            ;;
+        -key|-in|-out|-from-key)
+            COMPREPLY=( $(compgen -f -- "${cur}") )
+            ;;
+        verify)
+            COMPREPLY=( $(compgen -f -- "${cur}") )
+            ;;
+    esac
+}
+complete -F _tltv tltv
+`
+}
+
+func completionZsh() string {
+	cmds := strings.Join(allCommands, " ")
+	return `#compdef tltv
+# tltv zsh completion
+
+_tltv() {
+    local -a commands
+    commands=(` + cmds + `)
+
+    _arguments -C \
+        '--json[JSON output]' \
+        '--no-color[Disable colors]' \
+        '--insecure[Skip TLS verification]' \
+        '--local[Allow local/private address hints]' \
+        '1:command:->cmd' \
+        '*::arg:->args'
+
+    case $state in
+        cmd)
+            _describe 'command' commands
+            ;;
+        args)
+            case $words[1] in
+                template)
+                    _values 'type' metadata guide migration
+                    ;;
+                completion)
+                    _values 'shell' bash zsh fish
+                    ;;
+                verify)
+                    _files
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_tltv "$@"
+`
+}
+
+func completionFish() string {
+	var sb strings.Builder
+	sb.WriteString("# tltv fish completion\n")
+	sb.WriteString("set -l commands ")
+	sb.WriteString(strings.Join(allCommands, " "))
+	sb.WriteString("\n\n")
+	sb.WriteString("complete -c tltv -e\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l json -d 'JSON output'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l no-color -d 'Disable colors'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l insecure -d 'Skip TLS'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l local -d 'Allow local addresses'\n")
+
+	descriptions := map[string]string{
+		"keygen": "Generate channel keypair", "vanity": "Mine vanity IDs",
+		"inspect": "Inspect channel ID", "sign": "Sign document",
+		"verify": "Verify document", "template": "Document template",
+		"parse": "Parse tltv:// URI", "format": "Build tltv:// URI",
+		"resolve": "Resolve URI end-to-end", "node": "Probe a node",
+		"fetch": "Fetch metadata", "guide": "Fetch guide",
+		"peers": "List peers", "stream": "Check stream",
+		"crawl": "Crawl network", "migrate": "Create migration",
+		"completion": "Shell completions", "version": "Show version",
+	}
+	for _, cmd := range allCommands {
+		desc := descriptions[cmd]
+		sb.WriteString(fmt.Sprintf("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -a %s -d '%s'\n", cmd, desc))
+	}
+	sb.WriteString("\ncomplete -c tltv -n \"__fish_seen_subcommand_from template\" -a 'metadata guide migration'\n")
+	sb.WriteString("complete -c tltv -n \"__fish_seen_subcommand_from completion\" -a 'bash zsh fish'\n")
+	return sb.String()
 }
