@@ -27,6 +27,8 @@ Makefile            Build targets: build, install, test, release, clean
 - **No `net/url` for URI parsing** -- The `tltv://` URI parser is hand-written to avoid `net/url` lowercasing the host component, which would corrupt base58 channel IDs.
 - **Localhost detection** -- Network commands auto-detect `localhost`/`127.0.0.1`/`[::1]` and default to HTTP instead of HTTPS for local development.
 - **Version prefix encoding constraint** -- The `0x1433` prefix constrains which base58 characters can appear at position 2 (after TV). Not all 58 characters are achievable there. The vanity miner documents this and suggests `--mode contains` as a fallback.
+- **Strict verification** -- `verifyDocument` and `verifyMigration` check protocol version (`v` must be 1), identity binding, future timestamps, and signature. `verifyMigration` additionally validates that `to` is a valid channel ID different from `from`. `fetch` and `guide` commands exit non-zero when verification fails.
+- **URI format uses `@` syntax** -- `formatTLTVUri` uses `@` for the first hint (spec-preferred) and `?via=` for additional hints. Single hint: `tltv://id@host:port`. Multiple: `tltv://id@host1:port?via=host2:port`.
 
 ## Protocol Alignment
 
@@ -51,10 +53,12 @@ The implementation tracks the TLTV Federation Protocol v1.0 spec at `git.plutoni
 make test    # or: go test -v ./...
 ```
 
-27 tests validate against all protocol test vectors:
+32 tests validate against all protocol test vectors:
 - C1: identity encoding, C2: signing, C3: complete document, C4: URI parsing, C5: guide, C6: invalid inputs, C7: migration
 - Plus base58 edge cases, canonical JSON ordering, signature hex verification
 - URI format/parse roundtrip, vanity pos-2 feasibility, future timestamp rejection
+- Protocol version validation, migration identity binding mismatch, migration `to` field validation
+- Future `updated` and `migrated` timestamp rejection (independent of `seq`)
 
 ## Building
 
@@ -105,7 +109,7 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 
 ### Adding a new flag to a command
 
-Use `flag.NewFlagSet` for the command. Flags must come before positional arguments (Go `flag` package convention).
+Use `flag.NewFlagSet` for the command. Flags must come before positional arguments (Go `flag` package convention). Exception: `cmdFormat` manually extracts `--hint` and `--token` from args to support repeatable flags and flags after positional arguments.
 
 ### GitHub Release Process
 

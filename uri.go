@@ -25,7 +25,9 @@ func parseTLTVUri(uri string) (*TLTVUri, error) {
 		return nil, fmt.Errorf("missing channel ID")
 	}
 
-	result := &TLTVUri{}
+	result := &TLTVUri{
+		Hints: []string{},
+	}
 
 	// Split off query string
 	var query string
@@ -87,18 +89,35 @@ func parseQuery(q string) map[string][]string {
 }
 
 // formatTLTVUri builds a tltv:// URI string.
+// Uses @ syntax for a single hint, via= for multiple hints.
 func formatTLTVUri(channelID string, hints []string, token string) string {
 	var sb strings.Builder
 	sb.WriteString(tltvScheme)
 	sb.WriteString(channelID)
 
 	var queryParts []string
+	var viaHints []string
+
+	// Single hint: use @ syntax; multiple: use via= query
+	if len(hints) == 1 && token == "" {
+		sb.WriteByte('@')
+		sb.WriteString(hints[0])
+	} else if len(hints) == 1 {
+		// With token, @ hint goes before query and via hints go in query
+		sb.WriteByte('@')
+		sb.WriteString(hints[0])
+	} else if len(hints) > 1 {
+		// First hint uses @, rest go in via=
+		sb.WriteByte('@')
+		sb.WriteString(hints[0])
+		viaHints = hints[1:]
+	}
 
 	if token != "" {
 		queryParts = append(queryParts, "token="+token)
 	}
-	if len(hints) > 0 {
-		queryParts = append(queryParts, "via="+strings.Join(hints, ","))
+	if len(viaHints) > 0 {
+		queryParts = append(queryParts, "via="+strings.Join(viaHints, ","))
 	}
 
 	if len(queryParts) > 0 {

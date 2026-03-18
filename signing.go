@@ -40,9 +40,35 @@ func signDocument(doc map[string]interface{}, privKey ed25519.PrivateKey) (map[s
 	return doc, nil
 }
 
+// checkVersion validates that the document's "v" field is 1 (the only supported protocol version).
+func checkVersion(doc map[string]interface{}) error {
+	vField, ok := doc["v"]
+	if !ok {
+		return fmt.Errorf("document missing 'v' field")
+	}
+	switch v := vField.(type) {
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil || n != 1 {
+			return fmt.Errorf("unsupported protocol version: %s", v.String())
+		}
+	case float64:
+		if v != 1 {
+			return fmt.Errorf("unsupported protocol version: %v", v)
+		}
+	default:
+		return fmt.Errorf("'v' field is not a number")
+	}
+	return nil
+}
+
 // verifyDocument verifies a signed TLTV document against its channel ID.
 // The channel ID is extracted from the "id" field by default.
 func verifyDocument(doc map[string]interface{}, channelID string) error {
+	if err := checkVersion(doc); err != nil {
+		return err
+	}
+
 	// Check identity binding
 	docID, ok := doc["id"]
 	if !ok {
@@ -69,6 +95,10 @@ func verifyDocument(doc map[string]interface{}, channelID string) error {
 // verifyMigration verifies a signed migration document.
 // Identity binding uses the "from" field instead of "id".
 func verifyMigration(doc map[string]interface{}, oldChannelID string) error {
+	if err := checkVersion(doc); err != nil {
+		return err
+	}
+
 	// Check type
 	docType, _ := doc["type"].(string)
 	if docType != "migration" {
@@ -89,6 +119,22 @@ func verifyMigration(doc map[string]interface{}, oldChannelID string) error {
 	}
 	if oldChannelID == "" {
 		oldChannelID = fromIDStr
+	}
+
+	// Validate "to" field: must be a valid channel ID, different from "from"
+	toID, ok := doc["to"]
+	if !ok {
+		return fmt.Errorf("migration document missing 'to' field")
+	}
+	toIDStr, ok := toID.(string)
+	if !ok {
+		return fmt.Errorf("'to' field is not a string")
+	}
+	if toIDStr == oldChannelID {
+		return fmt.Errorf("migration 'to' is the same as 'from'")
+	}
+	if err := validateChannelID(toIDStr); err != nil {
+		return fmt.Errorf("invalid migration target: %w", err)
 	}
 
 	if err := checkTimestamps(doc); err != nil {

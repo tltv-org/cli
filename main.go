@@ -354,8 +354,9 @@ func cmdSign(args []string) {
 
 	// Auto-set fields if requested
 	if *autoSeq {
-		doc["seq"] = json.Number(fmt.Sprintf("%d", time.Now().Unix()))
-		doc["updated"] = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+		now := time.Now().UTC()
+		doc["seq"] = json.Number(fmt.Sprintf("%d", now.Unix()))
+		doc["updated"] = now.Format("2006-01-02T15:04:05Z")
 	}
 
 	// Ensure id field matches the signing key
@@ -494,8 +495,9 @@ func cmdTemplate(args []string) {
 		os.Exit(1)
 	}
 
-	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	seq := time.Now().Unix()
+	t := time.Now().UTC()
+	now := t.Format("2006-01-02T15:04:05Z")
+	seq := t.Unix()
 
 	var doc map[string]interface{}
 
@@ -617,44 +619,50 @@ func cmdParse(args []string) {
 
 func cmdFormat(args []string) {
 	fs := flag.NewFlagSet("format", flag.ExitOnError)
-	token := fs.String("token", "", "access token for private channels")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Build a tltv:// URI\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv format <channel-id> [--hint host:port]... [--token value]\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv format TVMkVH... --hint example.com:443\n")
 		fmt.Fprintf(os.Stderr, "  tltv format TVMkVH... --token secret123\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
 	}
 
-	// Collect --hint flags (flag package doesn't support repeated flags natively)
+	// Manually extract --hint and --token (Go's flag package doesn't support
+	// repeated flags and stops parsing at the first positional argument).
 	var hints []string
+	var token string
 	var remaining []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--hint" || args[i] == "-hint" {
+		switch args[i] {
+		case "--hint", "-hint":
 			if i+1 < len(args) {
 				hints = append(hints, args[i+1])
 				i++
 			}
-		} else {
+		case "--token", "-token":
+			if i+1 < len(args) {
+				token = args[i+1]
+				i++
+			}
+		case "-h", "--help":
+			fs.Usage()
+			os.Exit(0)
+		default:
 			remaining = append(remaining, args[i])
 		}
 	}
 
-	fs.Parse(remaining)
-
-	if fs.NArg() < 1 {
+	if len(remaining) < 1 {
 		fs.Usage()
 		os.Exit(1)
 	}
 
-	channelID := fs.Arg(0)
+	channelID := remaining[0]
 	if err := validateChannelID(channelID); err != nil {
 		fatal("invalid channel ID: %v", err)
 	}
 
-	uri := formatTLTVUri(channelID, hints, *token)
+	uri := formatTLTVUri(channelID, hints, token)
 	fmt.Println(uri)
 }
 
@@ -702,14 +710,14 @@ func cmdMigrate(args []string) {
 	}
 
 	// Build migration document
-	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	t := time.Now().UTC()
 	doc := map[string]interface{}{
 		"v":        json.Number("1"),
-		"seq":      json.Number(fmt.Sprintf("%d", time.Now().Unix())),
+		"seq":      json.Number(fmt.Sprintf("%d", t.Unix())),
 		"type":     "migration",
 		"from":     oldChannelID,
 		"to":       *toID,
-		"migrated": now,
+		"migrated": t.Format("2006-01-02T15:04:05Z"),
 	}
 	if *reason != "" {
 		doc["reason"] = *reason

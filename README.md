@@ -12,7 +12,7 @@ go install github.com/tltv-org/cli@latest
 
 ### Pre-built binaries
 
-Download from the [releases page](https://github.com/tltv-org/cli/releases). Available for Linux, macOS, and Windows (amd64 + arm64).
+Download from the [releases page](https://github.com/tltv-org/cli/releases). Available for Linux and macOS (amd64 + arm64) and Windows (amd64).
 
 ### Build from source
 
@@ -75,7 +75,7 @@ tltv crawl example.com
 | Command | Description |
 |---|---|
 | `sign -key <file>` | Sign a JSON document with an Ed25519 seed. Reads from stdin or `-in` file. Use `-auto-seq` to set `seq` and `updated` to now. |
-| `verify [file]` | Verify a signed document's Ed25519 signature. Reads from stdin or file. Auto-detects metadata vs. migration documents. |
+| `verify [file]` | Verify a signed document's Ed25519 signature and protocol version. Reads from stdin or file. Auto-detects metadata vs. migration documents. Validates migration `to` field. |
 | `template <type>` | Output a JSON template (`metadata`, `guide`, or `migration`) with current timestamps. |
 
 ### URIs
@@ -83,7 +83,7 @@ tltv crawl example.com
 | Command | Description |
 |---|---|
 | `parse <uri>` | Parse a `tltv://` URI into its components: channel ID, peer hints, token. |
-| `format <id>` | Build a `tltv://` URI. Accepts `--hint host:port` (repeatable) and `--token value`. |
+| `format <id>` | Build a `tltv://` URI. Accepts `--hint host:port` (repeatable) and `--token value`. Uses `@` syntax for the first hint. |
 
 ### Network
 
@@ -91,8 +91,8 @@ tltv crawl example.com
 |---|---|
 | `resolve <uri>` | Resolve a `tltv://` URI end-to-end: try hints, verify metadata, check stream. |
 | `node <host>` | Fetch `/.well-known/tltv` from a node. Shows protocol version, channels, and relaying info. |
-| `fetch <id@host>` | Fetch channel metadata and verify its signature. Handles migration documents. |
-| `guide <id@host>` | Fetch a channel guide and verify its signature. Displays entries in a table. |
+| `fetch <id@host>` | Fetch channel metadata and verify its signature. Handles migration documents. Exits non-zero on verification failure. |
+| `guide <id@host>` | Fetch a channel guide and verify its signature. Displays entries in a table. Exits non-zero on verification failure. |
 | `peers <host>` | Fetch the peer exchange list from a node. |
 | `stream <id@host>` | Check HLS stream availability. Parses the manifest and reports segment count, target duration. |
 | `crawl <host>` | BFS-crawl the gossip network starting from a host. Discovers channels across nodes via peer exchange. |
@@ -157,7 +157,7 @@ The implementation is validated against all 7 test vector suites from the [proto
 - **C6** -- Invalid input rejection (malformed IDs, tampered docs, truncated sigs)
 - **C7** -- Key migration document signing and verification
 
-Run `make test` to verify.
+Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection. Run `make test` to verify (32 tests).
 
 ## Network Commands
 

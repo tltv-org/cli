@@ -105,16 +105,17 @@ func cmdFetch(args []string) {
 	}
 
 	// Verify signature
+	var sigErr error
 	if !*noVerify {
 		// Check if this is a migration document
 		docType, _ := doc["type"].(string)
 		if docType == "migration" {
-			err = verifyMigration(doc, channelID)
+			sigErr = verifyMigration(doc, channelID)
 		} else {
-			err = verifyDocument(doc, channelID)
+			sigErr = verifyDocument(doc, channelID)
 		}
-		if err != nil {
-			printFail("Signature: " + err.Error())
+		if sigErr != nil {
+			printFail("Signature: " + sigErr.Error())
 		} else {
 			printOK("Signature valid")
 		}
@@ -165,6 +166,10 @@ func cmdFetch(args []string) {
 		printWarn("This is the RFC 8032 test channel. Do NOT use in production.")
 	}
 	fmt.Println()
+
+	if sigErr != nil {
+		os.Exit(1)
+	}
 }
 
 func cmdGuide(args []string) {
@@ -203,10 +208,11 @@ func cmdGuide(args []string) {
 	}
 
 	// Verify signature
+	var sigErr error
 	if !*noVerify {
-		err = verifyDocument(doc, channelID)
-		if err != nil {
-			printFail("Signature: " + err.Error())
+		sigErr = verifyDocument(doc, channelID)
+		if sigErr != nil {
+			printFail("Signature: " + sigErr.Error())
 		} else {
 			printOK("Signature valid")
 		}
@@ -247,6 +253,10 @@ func cmdGuide(args []string) {
 		printTable([]string{"Time", "Title", "Category"}, rows)
 	}
 	fmt.Println()
+
+	if sigErr != nil {
+		os.Exit(1)
+	}
 }
 
 func cmdPeers(args []string) {
@@ -691,7 +701,7 @@ func cmdResolve(args []string) {
 		result := map[string]interface{}{
 			"channel_id":    uri.ChannelID,
 			"resolved_host": resolvedHost,
-			"verified":      true,
+			"verified":      !*noVerify,
 			"metadata":      metadata,
 		}
 		if docType != "migration" {
