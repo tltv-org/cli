@@ -88,7 +88,7 @@ jobs:
             "${API_BASE}/releases")
 
           # Extract release ID (works for both APIs -- "id" is always the first integer id field)
-          RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
 
           if [ -z "$RELEASE_ID" ]; then
             echo "ERROR: Failed to create release"
