@@ -44,6 +44,9 @@ tltv sign -key <channel-id>.key -auto-seq < meta.json > signed.json
 # Verify a signed document
 tltv verify signed.json
 
+# Resolve a tltv:// URI end-to-end
+tltv resolve "tltv://TVabc...@example.com:443"
+
 # Probe a node
 tltv node example.com
 

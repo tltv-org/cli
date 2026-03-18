@@ -4,8 +4,10 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Test vectors from tltv-protocol/test-vectors/
@@ -550,5 +552,116 @@ func TestCanonicalJSONCompact(t *testing.T) {
 	// Should have no whitespace
 	if strings.Contains(string(out), " ") || strings.Contains(string(out), "\n") {
 		t.Fatalf("canonical JSON should be compact: %q", string(out))
+	}
+}
+
+// URI format roundtrip
+func TestURIFormatRoundtrip(t *testing.T) {
+	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
+
+	cases := []struct {
+		name   string
+		hints  []string
+		token  string
+	}{
+		{"bare", nil, ""},
+		{"one hint", []string{"example.com:443"}, ""},
+		{"two hints", []string{"relay1.com:443", "relay2.com:8000"}, ""},
+		{"token only", nil, "secret123"},
+		{"token and hints", []string{"example.com:443"}, "mytoken"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uri := formatTLTVUri(channelID, tc.hints, tc.token)
+			parsed, err := parseTLTVUri(uri)
+			if err != nil {
+				t.Fatalf("roundtrip failed: format produced %q, parse error: %v", uri, err)
+			}
+			if parsed.ChannelID != channelID {
+				t.Errorf("channel ID: got %q, want %q", parsed.ChannelID, channelID)
+			}
+			if parsed.Token != tc.token {
+				t.Errorf("token: got %q, want %q", parsed.Token, tc.token)
+			}
+			// Hints come back via the via= param in format, so they roundtrip
+			if len(parsed.Hints) != len(tc.hints) {
+				t.Errorf("hints count: got %d, want %d", len(parsed.Hints), len(tc.hints))
+			}
+		})
+	}
+}
+
+// Position-2 feasibility
+func TestPos2Feasibility(t *testing.T) {
+	// Characters that ARE achievable at position 2
+	for _, ch := range pos2Chars {
+		mode, ok := checkPrefixFeasibility(string(ch), false)
+		if !ok || mode != "prefix" {
+			t.Errorf("char %q should be feasible at pos 2", string(ch))
+		}
+	}
+
+	// Characters that are NOT achievable at position 2
+	impossible := "abcdefghjkmnopqrstuvwxyz12345RSWXYZi"
+	for _, ch := range impossible {
+		if strings.ContainsRune(pos2Chars, ch) {
+			continue // skip if actually in pos2Chars
+		}
+		_, ok := checkPrefixFeasibility(string(ch), false)
+		if ok {
+			t.Errorf("char %q should NOT be feasible at pos 2", string(ch))
+		}
+	}
+}
+
+// Future timestamp rejection
+func TestFutureTimestampRejection(t *testing.T) {
+	seedHex := "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+	seed, _ := hex.DecodeString(seedHex)
+	priv, _ := keyFromSeed(seed)
+
+	// Create a document with seq 2 hours in the future
+	futureSeq := time.Now().Unix() + 7200
+	doc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number(fmt.Sprintf("%d", futureSeq)),
+		"id":      "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3",
+		"name":    "Future Channel",
+		"stream":  "/tltv/v1/channels/TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3/stream.m3u8",
+		"access":  "public",
+		"updated": "2026-03-14T12:00:00Z",
+	}
+
+	signed, _ := signDocument(doc, priv)
+	err := verifyDocument(signed, "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3")
+	if err == nil {
+		t.Fatal("verifyDocument should reject future seq")
+	}
+	if !strings.Contains(err.Error(), "future") {
+		t.Fatalf("expected future timestamp error, got: %v", err)
+	}
+}
+
+// Verify that current timestamps pass
+func TestCurrentTimestampAccepted(t *testing.T) {
+	seedHex := "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+	seed, _ := hex.DecodeString(seedHex)
+	priv, _ := keyFromSeed(seed)
+
+	doc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number(fmt.Sprintf("%d", time.Now().Unix())),
+		"id":      "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3",
+		"name":    "Current Channel",
+		"stream":  "/tltv/v1/channels/TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3/stream.m3u8",
+		"access":  "public",
+		"updated": time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	}
+
+	signed, _ := signDocument(doc, priv)
+	err := verifyDocument(signed, "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3")
+	if err != nil {
+		t.Fatalf("verifyDocument should accept current timestamps: %v", err)
 	}
 }

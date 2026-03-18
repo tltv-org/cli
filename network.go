@@ -105,7 +105,6 @@ func cmdFetch(args []string) {
 	}
 
 	// Verify signature
-	verified := false
 	if !*noVerify {
 		// Check if this is a migration document
 		docType, _ := doc["type"].(string)
@@ -117,7 +116,6 @@ func cmdFetch(args []string) {
 		if err != nil {
 			printFail("Signature: " + err.Error())
 		} else {
-			verified = true
 			printOK("Signature valid")
 		}
 	}
@@ -166,7 +164,6 @@ func cmdFetch(args []string) {
 		fmt.Println()
 		printWarn("This is the RFC 8032 test channel. Do NOT use in production.")
 	}
-	_ = verified
 	fmt.Println()
 }
 
@@ -569,29 +566,39 @@ func cmdResolve(args []string) {
 
 	client := newClient(flagInsecure)
 
-	printHeader("Resolving: " + fs.Arg(0))
-	printField("Channel ID", uri.ChannelID)
-	if tok != "" {
-		printField("Token", tok)
-	}
 	if len(uri.Hints) == 0 {
 		fatal("no peer hints in URI -- need at least one host to contact")
 	}
-	fmt.Println()
+
+	if !flagJSON {
+		printHeader("Resolving: " + fs.Arg(0))
+		printField("Channel ID", uri.ChannelID)
+		if tok != "" {
+			printField("Token", tok)
+		}
+		fmt.Println()
+	}
 
 	// Try each hint
 	var resolvedHost string
 	var metadata map[string]interface{}
+	var streamStatus int
+	var streamContentType string
 
 	for i, hint := range uri.Hints {
 		host := normalizeHost(hint)
-		label := fmt.Sprintf("Hint %d", i+1)
-		fmt.Printf("  %s  %s ... ", c(cDim, label), host)
+
+		if !flagJSON {
+			label := fmt.Sprintf("Hint %d", i+1)
+			fmt.Printf("  %s  %s ... ", c(cDim, label), host)
+		}
 
 		// Step 1: Fetch .well-known/tltv and check for channel
 		info, err := client.FetchNodeInfo(host)
 		if err != nil {
-			fmt.Printf("%s\n", c(cRed, "unreachable"))
+			if !flagJSON {
+				fmt.Printf("%s\n", c(cRed, "unreachable"))
+			}
 			continue
 		}
 
@@ -614,12 +621,12 @@ func cmdResolve(args []string) {
 			}
 		}
 
-		if !found && tok == "" {
-			// Private channels won't appear in .well-known/tltv
-			// Still try fetching metadata directly
-			fmt.Printf("%s", c(cYellow, "not listed"))
-		} else if found {
-			fmt.Printf("%s (%s)", c(cGreen, "found"), source)
+		if !flagJSON {
+			if !found && tok == "" {
+				fmt.Printf("%s", c(cYellow, "not listed"))
+			} else if found {
+				fmt.Printf("%s (%s)", c(cGreen, "found"), source)
+			}
 		}
 
 		// Step 2: Negotiate version
@@ -636,7 +643,9 @@ func cmdResolve(args []string) {
 		// Step 3: Fetch metadata
 		doc, err := client.FetchMetadata(host, uri.ChannelID, tok)
 		if err != nil {
-			fmt.Printf(" ... %s\n", c(cRed, "metadata: "+err.Error()))
+			if !flagJSON {
+				fmt.Printf(" ... %s\n", c(cRed, "metadata: "+err.Error()))
+			}
 			continue
 		}
 
@@ -649,24 +658,53 @@ func cmdResolve(args []string) {
 				err = verifyDocument(doc, uri.ChannelID)
 			}
 			if err != nil {
-				fmt.Printf(" ... %s\n", c(cRed, "signature: "+err.Error()))
+				if !flagJSON {
+					fmt.Printf(" ... %s\n", c(cRed, "signature: "+err.Error()))
+				}
 				continue
 			}
 		}
 
-		fmt.Printf(" ... %s\n", c(cGreen, "verified"))
+		if !flagJSON {
+			fmt.Printf(" ... %s\n", c(cGreen, "verified"))
+		}
 		resolvedHost = host
 		metadata = doc
 		break
 	}
 
 	if metadata == nil {
-		fmt.Println()
+		if !flagJSON {
+			fmt.Println()
+		}
 		fatal("could not resolve channel from any hint")
 	}
 
-	// Display metadata
+	// Step 5: Check stream
 	docType, _ := metadata["type"].(string)
+	if docType != "migration" {
+		streamStatus, streamContentType, _, _ = client.CheckStream(resolvedHost, uri.ChannelID, tok)
+	}
+
+	// JSON output
+	if flagJSON {
+		result := map[string]interface{}{
+			"channel_id":    uri.ChannelID,
+			"resolved_host": resolvedHost,
+			"verified":      true,
+			"metadata":      metadata,
+		}
+		if docType != "migration" {
+			result["stream_status"] = streamStatus
+			result["stream_live"] = streamStatus == 200
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(result)
+		return
+	}
+
+	// Human output
 	if docType == "migration" {
 		printHeader("Migration")
 		printField("From", getString(metadata, "from"))
@@ -686,43 +724,25 @@ func cmdResolve(args []string) {
 		if tags := getStringSlice(metadata, "tags"); len(tags) > 0 {
 			printField("Tags", strings.Join(tags, ", "))
 		}
-	}
 
-	// Step 5: Check stream
-	if docType != "migration" {
 		fmt.Println()
-		status, contentType, _, err := client.CheckStream(resolvedHost, uri.ChannelID, tok)
-		if err != nil {
-			printField("Stream", c(cRed, "error: "+err.Error()))
-		} else {
-			switch status {
-			case 200:
-				printOK("Stream is live (" + contentType + ")")
-			case 302:
-				printOK("Stream available (redirect)")
-			case 503:
-				printWarn("Stream unavailable (on-demand / idle)")
-			default:
-				printFail(fmt.Sprintf("Stream HTTP %d", status))
-			}
+		switch streamStatus {
+		case 200:
+			printOK("Stream is live (" + streamContentType + ")")
+		case 302:
+			printOK("Stream available (redirect)")
+		case 503:
+			printWarn("Stream unavailable (on-demand / idle)")
+		case 0:
+			printFail("Stream check failed")
+		default:
+			printFail(fmt.Sprintf("Stream HTTP %d", streamStatus))
 		}
 	}
 
 	if isTestChannel(uri.ChannelID) {
 		fmt.Println()
 		printWarn("This is the RFC 8032 test channel. Do NOT use in production.")
-	}
-
-	if flagJSON {
-		result := map[string]interface{}{
-			"channel_id":    uri.ChannelID,
-			"resolved_host": resolvedHost,
-			"metadata":      metadata,
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(result)
-		return
 	}
 
 	fmt.Println()

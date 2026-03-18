@@ -77,6 +77,10 @@ func main() {
 			flagNoColor = true
 		case "--insecure":
 			flagInsecure = true
+		case "-v", "--version":
+			initColor()
+			cmdVersion()
+			os.Exit(0)
 		case "-h", "--help", "help":
 			if cmd == "" {
 				usage()

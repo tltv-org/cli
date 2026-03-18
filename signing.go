@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
+
+// maxClockSkew is the maximum allowed future timestamp (spec section 7.2).
+const maxClockSkew = 3600 // seconds
 
 // canonicalJSON produces RFC 8785 (JCS) canonical JSON bytes for a document.
 // Go's json.Marshal sorts map keys alphabetically and uses compact format.
@@ -55,6 +59,10 @@ func verifyDocument(doc map[string]interface{}, channelID string) error {
 		channelID = docIDStr
 	}
 
+	if err := checkTimestamps(doc); err != nil {
+		return err
+	}
+
 	return verifySignatureOnly(doc, channelID)
 }
 
@@ -83,10 +91,56 @@ func verifyMigration(doc map[string]interface{}, oldChannelID string) error {
 		oldChannelID = fromIDStr
 	}
 
+	if err := checkTimestamps(doc); err != nil {
+		return err
+	}
+
 	return verifySignatureOnly(doc, oldChannelID)
 }
 
-// verifySignatureOnly checks the Ed25519 signature without identity binding checks.
+// checkTimestamps rejects documents with seq or updated more than 3600s in the future.
+// Per spec section 7.2: "reject if seq or updated is more than 3600 seconds ahead."
+func checkTimestamps(doc map[string]interface{}) error {
+	now := time.Now().Unix()
+
+	// Check seq (Unix timestamp)
+	if seqVal, ok := doc["seq"]; ok {
+		var seq int64
+		switch v := seqVal.(type) {
+		case json.Number:
+			n, err := v.Int64()
+			if err == nil {
+				seq = n
+			}
+		case float64:
+			seq = int64(v)
+		}
+		if seq > 0 && seq-now > maxClockSkew {
+			return fmt.Errorf("seq is %d seconds in the future (max allowed: %d)", seq-now, maxClockSkew)
+		}
+	}
+
+	// Check updated timestamp
+	if updStr, ok := doc["updated"].(string); ok {
+		if t, err := time.Parse("2006-01-02T15:04:05Z", updStr); err == nil {
+			if t.Unix()-now > maxClockSkew {
+				return fmt.Errorf("updated timestamp is %d seconds in the future", t.Unix()-now)
+			}
+		}
+	}
+
+	// Check migrated timestamp (for migration documents)
+	if migStr, ok := doc["migrated"].(string); ok {
+		if t, err := time.Parse("2006-01-02T15:04:05Z", migStr); err == nil {
+			if t.Unix()-now > maxClockSkew {
+				return fmt.Errorf("migrated timestamp is %d seconds in the future", t.Unix()-now)
+			}
+		}
+	}
+
+	return nil
+}
+
 func verifySignatureOnly(doc map[string]interface{}, channelID string) error {
 	// Extract signature
 	sigField, ok := doc["signature"]
