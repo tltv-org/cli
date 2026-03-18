@@ -147,23 +147,32 @@ GitHub gets a squashed single-commit release. Forgejo keeps the full history.
 
 1. Finalize all changes on `dev`, merge to `main`, push to `origin` (Forgejo).
 2. Run tests: `make test`
-3. Create an orphan branch for GitHub:
+3. **Privacy audit** -- grep the entire repo for private info before public release:
+   - Internal IPs, hostnames, credentials, tokens
+   - Forgejo URLs (`git.plutoniumtech.com`)
+   - Agent identities, email addresses not meant for public
+   - Any file that shouldn't be public (AGENTS.md, notes, drafts)
+   ```bash
+   grep -rn 'plutonium\|agent1\|10\.\|192\.168\|\.local' --include='*.go' --include='*.md' --include='*.yml'
+   ```
+4. Create an orphan branch for GitHub:
    ```bash
    git checkout --orphan github-release
    git reset
    git add .gitignore .github/ LICENSE README.md Makefile go.mod \
        *.go
    ```
-4. Do NOT include: AGENTS.md or anything not meant for public.
-5. Commit with a clean message:
+5. Do NOT include: AGENTS.md or anything not meant for public.
+6. Commit with a clean message (authored as Philo):
    ```bash
-   git commit -m "TLTV CLI vX.Y.Z
+   git commit --author="Philo Farnsworth <farnsworth27@protonmail.com>" \
+       -m "TLTV CLI vX.Y.Z
 
    <one paragraph summary>"
    ```
-6. Push and tag:
+7. Push and tag:
    ```bash
    git push github github-release:main --force
    git push github <commit-hash>:refs/tags/vX.Y.Z
    ```
-7. Switch back: `git checkout -f dev`
+8. Switch back: `git checkout -f dev`
