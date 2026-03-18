@@ -5,14 +5,14 @@ Command-line tool for the TLTV Federation Protocol. Single Go binary, zero exter
 ## Repo Structure
 
 ```
-main.go             Entry point, command dispatch, identity/document/URI commands
+main.go             Entry point, command dispatch, identity/document/URI/completion commands
 base58.go           Base58 encode/decode (Bitcoin alphabet, big.Int based)
 identity.go         Channel ID: make, parse, validate; version prefix 0x1433
-signing.go          Canonical JSON (RFC 8785 via json.Marshal), Ed25519 sign/verify
+signing.go          Canonical JSON (RFC 8785 via json.Marshal), Ed25519 sign/verify, timestamp checks
 uri.go              tltv:// URI parse and format (no net/url -- preserves channel ID case)
 client.go           HTTP client for TLTV nodes (node info, metadata, guide, peers, stream)
-network.go          Network command implementations (node, fetch, guide, peers, stream, crawl)
-vanity.go           Multi-threaded vanity miner (goroutines + crypto/rand)
+network.go          Network command implementations (resolve, node, fetch, guide, peers, stream, crawl)
+vanity.go           Multi-threaded vanity miner (goroutines + crypto/rand, pos-2 constraint detection)
 output.go           Terminal output helpers (colors, tables, field display)
 signal.go           OS signal handling (SIGINT/SIGTERM)
 main_test.go        Tests against all 7 protocol test vector suites (C1-C7)
@@ -39,7 +39,9 @@ The implementation tracks the TLTV Federation Protocol v1.0 spec at `git.plutoni
 | Canonical JSON | 4 |
 | Metadata signing | 5, 7 |
 | Guide documents | 6 |
+| Future timestamp rejection | 7.2 |
 | Protocol endpoints | 8 |
+| URI resolution procedure | 3.1, 8 |
 | Peer exchange | 11 |
 | Migration | 5.14 |
 
@@ -49,9 +51,10 @@ The implementation tracks the TLTV Federation Protocol v1.0 spec at `git.plutoni
 make test    # or: go test -v ./...
 ```
 
-22 tests validate against all protocol test vectors:
+27 tests validate against all protocol test vectors:
 - C1: identity encoding, C2: signing, C3: complete document, C4: URI parsing, C5: guide, C6: invalid inputs, C7: migration
 - Plus base58 edge cases, canonical JSON ordering, signature hex verification
+- URI format/parse roundtrip, vanity pos-2 feasibility, future timestamp rejection
 
 ## Building
 
