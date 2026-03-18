@@ -1,4 +1,4 @@
-# tltv
+# TLTV CLI
 
 Command-line tool for the [TLTV Federation Protocol](https://github.com/tltv-org/protocol). Generate channel identities, sign and verify documents, mine vanity IDs, probe nodes, crawl the gossip network, and inspect streams -- all from a single static binary with zero dependencies.
 
@@ -194,4 +194,4 @@ Zero external dependencies. Everything uses the Go standard library (`crypto/ed2
 
 ## License
 
-MIT
+MIT -- see [LICENSE](LICENSE).

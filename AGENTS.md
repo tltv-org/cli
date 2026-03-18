@@ -70,6 +70,19 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 - Author: `Philo Farnsworth <farnsworth27@protonmail.com>`
 - Do not include Co-Authored-By lines in commit messages
 - `origin` -- Forgejo (git.plutoniumtech.com/tltv/cli)
+- `github` -- GitHub (github.com/tltv-org/tltv-cli). Public release.
+
+### Branching
+
+- **`main`** -- Release branch. Only receives merges from `dev`. Tags (`v*`) trigger GitHub Actions release builds.
+- **`dev`** -- Integration branch. Ongoing work lands here. Feature branches merge to `dev` via PR.
+- **Feature branches** -- Branch off `dev`, merge back to `dev`. Name: `feature/<name>` or just descriptive (`vanity-optimization`, `add-resolve-command`).
+- **Release flow**: `dev` -> PR to `main` -> merge -> tag `vX.Y.Z` on `main` -> Actions builds binaries.
+
+### CI
+
+- `.github/workflows/ci.yml` -- Runs build + tests on push to `main`/`dev` and on PRs.
+- `.github/workflows/release.yml` -- Cross-compiles and creates GitHub Release when a `v*` tag is pushed to `main`.
 
 ## Common Tasks
 
