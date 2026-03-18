@@ -105,6 +105,11 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 
 - Author: `Philo Farnsworth <farnsworth27@protonmail.com>`
 - **All commits must be authored as Philo.** Do not commit as the agent identity. The GitHub release squash ensures only Philo appears in public history, but Forgejo history should also use the correct author.
+- **Both author AND committer must be Philo.** `--author` alone is not enough -- GitHub displays the committer too. Use `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` env vars:
+  ```bash
+  GIT_COMMITTER_NAME="Philo Farnsworth" GIT_COMMITTER_EMAIL="farnsworth27@protonmail.com" \
+      git commit --author="Philo Farnsworth <farnsworth27@protonmail.com>" -m "message"
+  ```
 - Do not include Co-Authored-By lines in commit messages
 - `origin` -- Forgejo (git.plutoniumtech.com/tltv/cli)
 - `github` -- GitHub (github.com/tltv-org/cli). Public release. Squashed history.
@@ -165,14 +170,19 @@ GitHub gets a squashed single-commit release. Forgejo keeps the full history.
 5. Do NOT include: AGENTS.md or anything not meant for public.
 6. Commit with a clean message (authored as Philo):
    ```bash
-   git commit --author="Philo Farnsworth <farnsworth27@protonmail.com>" \
+   GIT_COMMITTER_NAME="Philo Farnsworth" GIT_COMMITTER_EMAIL="farnsworth27@protonmail.com" \
+       git commit --author="Philo Farnsworth <farnsworth27@protonmail.com>" \
        -m "TLTV CLI vX.Y.Z
 
    <one paragraph summary>"
    ```
-7. Push and tag:
+7. **Verify** both author and committer before pushing:
+   ```bash
+   git log --format='Author: %an <%ae>%nCommitter: %cn <%ce>' -1
+   ```
+8. Push and tag:
    ```bash
    git push github github-release:main --force
    git push github <commit-hash>:refs/tags/vX.Y.Z
    ```
-8. Switch back: `git checkout -f dev`
+9. Switch back: `git checkout -f dev`
