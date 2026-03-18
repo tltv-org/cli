@@ -1,0 +1,10 @@
+# Binary
+tltv
+tltv.exe
+dist/
+
+# Key files (never commit secrets)
+*.key
+
+# Test artifacts
+*.test

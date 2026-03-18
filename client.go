@@ -1,0 +1,395 @@
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// NodeInfo represents the response from /.well-known/tltv
+type NodeInfo struct {
+	Protocol string       `json:"protocol"`
+	Versions []int        `json:"versions"`
+	Channels []ChannelRef `json:"channels"`
+	Relaying []ChannelRef `json:"relaying"`
+}
+
+// ChannelRef is a channel reference in node info or peer exchange.
+type ChannelRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// PeerExchange represents the response from /tltv/v1/peers
+type PeerExchange struct {
+	Peers []Peer `json:"peers"`
+}
+
+// Peer represents a single peer in the peer exchange.
+type Peer struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Hints    []string `json:"hints"`
+	LastSeen string   `json:"last_seen"`
+}
+
+// Client is an HTTP client for TLTV protocol operations.
+type Client struct {
+	http *http.Client
+}
+
+// newClient creates a new TLTV HTTP client.
+// Use for user-chosen targets (node, fetch, guide, peers, stream).
+func newClient(insecure bool) *Client {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: insecure,
+		},
+		DialContext: (&net.Dialer{
+			Timeout: 5 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: 5 * time.Second,
+	}
+
+	return &Client{
+		http: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: tr,
+		},
+	}
+}
+
+// newSSRFSafeClient creates a client that blocks connections to local/private
+// addresses at DNS resolution time, preventing SSRF via DNS rebinding.
+// Used for untrusted hints in resolve and crawl (spec section 3.1).
+func newSSRFSafeClient(insecure bool) *Client {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: insecure,
+		},
+		DialContext:         ssrfSafeDialContext,
+		TLSHandshakeTimeout: 5 * time.Second,
+	}
+
+	return &Client{
+		http: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: tr,
+		},
+	}
+}
+
+// ssrfSafeDialContext resolves hostnames and blocks connections to
+// local/private/loopback/link-local/CGN addresses. Connects directly to the
+// resolved IP to prevent TOCTOU between DNS lookup and connection.
+func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	var lastErr error
+	for _, ip := range ips {
+		if isLocalAddress(ip.IP.String() + ":0") {
+			lastErr = fmt.Errorf("hint resolves to local address %s (%s), blocked per spec section 3.1", host, ip.IP)
+			continue
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return conn, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no addresses found for %s", host)
+}
+
+// baseURL constructs the base URL for a host.
+// Defaults to HTTPS, but uses HTTP for localhost/loopback.
+func (c *Client) baseURL(host string) string {
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		return strings.TrimRight(host, "/")
+	}
+
+	// Normalize host: add default port if missing
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = host + ":443"
+	}
+
+	// Detect local addresses -> use HTTP
+	scheme := "https"
+	if isLocalAddress(host) {
+		scheme = "http"
+	}
+
+	return scheme + "://" + host
+}
+
+// get performs a GET request and returns the response body.
+func (c *Client) get(url string) ([]byte, int, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("User-Agent", "tltv-cli/"+version)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB max
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+
+	return body, resp.StatusCode, nil
+}
+
+// FetchNodeInfo fetches /.well-known/tltv from a host.
+func (c *Client) FetchNodeInfo(host string) (*NodeInfo, error) {
+	url := c.baseURL(host) + "/.well-known/tltv"
+	body, status, err := c.get(url)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, truncateBody(body))
+	}
+
+	var info NodeInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	return &info, nil
+}
+
+// FetchMetadata fetches and optionally verifies channel metadata.
+func (c *Client) FetchMetadata(host, channelID, token string) (map[string]interface{}, error) {
+	url := c.baseURL(host) + "/tltv/v1/channels/" + channelID
+	if token != "" {
+		url += "?token=" + token
+	}
+
+	body, status, err := c.get(url)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if status == 403 {
+		return nil, fmt.Errorf("access denied (token may be required)")
+	}
+	if status == 404 {
+		return nil, fmt.Errorf("channel not found")
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, truncateBody(body))
+	}
+
+	doc, err := readDocumentFromString(string(body))
+	if err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// FetchGuide fetches and optionally verifies a channel guide.
+func (c *Client) FetchGuide(host, channelID, token string) (map[string]interface{}, error) {
+	url := c.baseURL(host) + "/tltv/v1/channels/" + channelID + "/guide.json"
+	if token != "" {
+		url += "?token=" + token
+	}
+
+	body, status, err := c.get(url)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if status == 404 {
+		return nil, fmt.Errorf("guide not found")
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, truncateBody(body))
+	}
+
+	doc, err := readDocumentFromString(string(body))
+	if err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// FetchPeers fetches the peer exchange list from a host.
+func (c *Client) FetchPeers(host string) (*PeerExchange, error) {
+	url := c.baseURL(host) + "/tltv/v1/peers"
+	body, status, err := c.get(url)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, truncateBody(body))
+	}
+
+	var exchange PeerExchange
+	if err := json.Unmarshal(body, &exchange); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	return &exchange, nil
+}
+
+// CheckStream checks if a channel's HLS stream is available.
+// Returns the status code, content type, and first bytes of the manifest.
+func (c *Client) CheckStream(host, channelID, token string) (int, string, string, error) {
+	url := c.baseURL(host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
+	if token != "" {
+		url += "?token=" + token
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return 0, "", "", err
+	}
+	req.Header.Set("User-Agent", "tltv-cli/"+version)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, "", "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	contentType := resp.Header.Get("Content-Type")
+
+	return resp.StatusCode, contentType, string(body), nil
+}
+
+// isLocalAddress checks if a hint refers to a loopback, private, link-local,
+// unspecified, or CGN address. Per spec section 3.1, clients MUST NOT contact
+// such hints unless --local is set.
+func isLocalAddress(host string) bool {
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	// Strip IPv6 brackets
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+
+	if h == "localhost" {
+		return true
+	}
+
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false // DNS name, can't check without resolving
+	}
+
+	// Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1 -> 127.0.0.1)
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return true
+	}
+
+	// CGN/shared address space (100.64.0.0/10, RFC 6598)
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 100 && ip4[1]&0xc0 == 0x40 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// validateHint checks that a hint is a valid host[:port] and does not contain
+// URL components that could enable SSRF bypass (scheme, userinfo, path, etc.).
+func validateHint(hint string) error {
+	if hint == "" {
+		return fmt.Errorf("empty hint")
+	}
+	if strings.Contains(hint, "://") {
+		return fmt.Errorf("hint must be host[:port], not a URL")
+	}
+	if strings.Contains(hint, "@") {
+		return fmt.Errorf("hint must not contain userinfo (@)")
+	}
+	if strings.Contains(hint, "/") {
+		return fmt.Errorf("hint must not contain a path")
+	}
+	if strings.Contains(hint, "?") {
+		return fmt.Errorf("hint must not contain a query string")
+	}
+	if strings.Contains(hint, "#") {
+		return fmt.Errorf("hint must not contain a fragment")
+	}
+	// Validate bracketed IPv6
+	if strings.HasPrefix(hint, "[") {
+		if !strings.Contains(hint, "]") {
+			return fmt.Errorf("malformed IPv6 hint: missing closing bracket")
+		}
+	}
+	return nil
+}
+
+// normalizeHint validates and normalizes a hint from untrusted sources.
+// Rejects malformed hints and adds default port 443 if missing.
+func normalizeHint(s string) (string, error) {
+	if err := validateHint(s); err != nil {
+		return "", err
+	}
+	if _, _, err := net.SplitHostPort(s); err != nil {
+		return s + ":443", nil
+	}
+	return s, nil
+}
+
+// truncateBody returns the first 200 bytes of a response body for error display.
+func truncateBody(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
+}
+
+// parseTarget parses "channel_id@host:port" into components.
+func parseTarget(s string) (channelID, host string, err error) {
+	idx := strings.Index(s, "@")
+	if idx < 0 {
+		return "", "", fmt.Errorf("expected format: <channel_id>@<host[:port]>")
+	}
+	channelID = s[:idx]
+	host = s[idx+1:]
+	if host == "" {
+		return "", "", fmt.Errorf("empty host")
+	}
+	return channelID, host, nil
+}
+
+// normalizeHost ensures a host has a port.
+// Accepts full URLs for user-provided hosts (direct commands).
+func normalizeHost(s string) string {
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		return s
+	}
+	if _, _, err := net.SplitHostPort(s); err != nil {
+		return s + ":443"
+	}
+	return s
+}
