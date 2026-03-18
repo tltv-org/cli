@@ -58,8 +58,65 @@ jobs:
         working-directory: dist
         run: sha256sum * > checksums.txt
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: dist/*
+      - name: Create release and upload assets
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          # Detect API base (GitHub vs Forgejo/Gitea)
+          if echo "$SERVER" | grep -q "github\.com"; then
+            API_BASE="https://api.github.com/repos/${REPO}"
+            UPLOAD_MODE=github
+          else
+            API_BASE="${SERVER}/api/v1/repos/${REPO}"
+            UPLOAD_MODE=forgejo
+          fi
+
+          # Detect pre-release from tag name
+          PRERELEASE=false
+          if echo "$TAG" | grep -qE '(rc|alpha|beta)'; then
+            PRERELEASE=true
+          fi
+
+          # Create release
+          RESPONSE=$(curl -sS -X POST \
+            -H "Authorization: token ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"TLTV CLI ${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":${PRERELEASE}}" \
+            "${API_BASE}/releases")
+
+          # Extract release ID (works for both APIs -- "id" is always the first integer id field)
+          RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "ERROR: Failed to create release"
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          echo "Created release ${TAG} (id: ${RELEASE_ID}, prerelease: ${PRERELEASE})"
+
+          # Upload assets
+          for file in dist/*; do
+            filename=$(basename "$file")
+            echo "Uploading ${filename}..."
+
+            if [ "$UPLOAD_MODE" = "github" ]; then
+              # GitHub: raw binary body to uploads.github.com
+              curl -sS -X POST \
+                -H "Authorization: token ${TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary "@${file}" \
+                "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${filename}" > /dev/null
+            else
+              # Forgejo/Gitea: multipart form upload
+              curl -sS -X POST \
+                -H "Authorization: token ${TOKEN}" \
+                -F "attachment=@${file}" \
+                "${API_BASE}/releases/${RELEASE_ID}/assets?name=${filename}" > /dev/null
+            fi
+          done
+
+          echo "Uploaded $(ls dist/* | wc -l) assets"
