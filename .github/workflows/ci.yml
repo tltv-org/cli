@@ -27,5 +27,8 @@ jobs:
 
       - name: Verify static linkage
         run: |
-          ldd ./tltv 2>&1 | grep -q "not a dynamic executable" || \
-            (echo "ERROR: binary is dynamically linked" && ldd ./tltv && exit 1)
+          output=$(ldd ./tltv 2>&1 || true)
+          case "$output" in
+            *"not a dynamic executable"*) echo "OK: static binary" ;;
+            *) echo "ERROR: binary is dynamically linked"; echo "$output"; exit 1 ;;
+          esac
