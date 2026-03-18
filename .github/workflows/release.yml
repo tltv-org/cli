@@ -24,16 +24,35 @@ jobs:
       - name: Test
         run: go test -v -count=1 ./...
 
-      - name: Build binaries
+      - name: Build archives
         run: |
           VERSION=${GITHUB_REF_NAME}
           LDFLAGS="-s -w -X main.version=${VERSION}"
+          mkdir -p dist
 
-          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/tltv-linux-amd64 .
-          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/tltv-linux-arm64 .
-          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/tltv-darwin-amd64 .
-          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/tltv-darwin-arm64 .
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/tltv-windows-amd64.exe .
+          for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 freebsd/amd64; do
+            GOOS=${pair%/*}
+            GOARCH=${pair#*/}
+            BIN=tltv
+            if [ "$GOOS" = "windows" ]; then BIN=tltv.exe; fi
+
+            echo "Building ${GOOS}/${GOARCH}..."
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "dist/${BIN}" .
+
+            ARCHIVE="tltv-${VERSION}-${GOOS}-${GOARCH}"
+            tar -czf "dist/${ARCHIVE}.tar.gz" -C dist "$BIN"
+            rm "dist/${BIN}"
+          done
+
+      - name: Verify Linux amd64 is static
+        run: |
+          CGO_ENABLED=0 go build -ldflags "-s -w" -o tltv-check .
+          output=$(ldd ./tltv-check 2>&1 || true)
+          case "$output" in
+            *"not a dynamic executable"*) echo "OK: static binary" ;;
+            *) echo "ERROR: binary is dynamically linked"; echo "$output"; exit 1 ;;
+          esac
+          rm ./tltv-check
 
       - name: Create checksums
         working-directory: dist
@@ -43,10 +62,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            dist/tltv-linux-amd64
-            dist/tltv-linux-arm64
-            dist/tltv-darwin-amd64
-            dist/tltv-darwin-arm64
-            dist/tltv-windows-amd64.exe
-            dist/checksums.txt
+          files: dist/*

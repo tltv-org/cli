@@ -17,13 +17,21 @@ clean:
 	rm -f $(BINARY)
 	rm -rf dist/
 
-# Cross-compile for all major platforms (static binaries, no cgo)
+# Cross-compile for all major platforms (static binaries, no cgo).
+# Produces tar.gz archives plus checksums.
 release: clean
 	@mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o dist/$(BINARY)-linux-amd64 .
-	CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build $(LDFLAGS) -o dist/$(BINARY)-linux-arm64 .
-	CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o dist/$(BINARY)-darwin-amd64 .
-	CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o dist/$(BINARY)-darwin-arm64 .
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o dist/$(BINARY)-windows-amd64.exe .
-	@echo "Built binaries in dist/"
+	@for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 freebsd/amd64; do \
+		GOOS=$${pair%/*}; \
+		GOARCH=$${pair#*/}; \
+		BIN=$(BINARY); \
+		if [ "$$GOOS" = "windows" ]; then BIN=$(BINARY).exe; fi; \
+		echo "Building $$GOOS/$$GOARCH..."; \
+		CGO_ENABLED=0 GOOS=$$GOOS GOARCH=$$GOARCH go build $(LDFLAGS) -o dist/$$BIN .; \
+		ARCHIVE=$(BINARY)-$(VERSION)-$$GOOS-$$GOARCH; \
+		tar -czf dist/$$ARCHIVE.tar.gz -C dist $$BIN; \
+		rm dist/$$BIN; \
+	done
+	@cd dist && sha256sum * > checksums.txt
+	@echo "Release archives in dist/"
 	@ls -lh dist/
