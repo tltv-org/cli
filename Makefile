@@ -28,7 +28,7 @@ release: clean
 		if [ "$$GOOS" = "windows" ]; then BIN=$(BINARY).exe; fi; \
 		echo "Building $$GOOS/$$GOARCH..."; \
 		CGO_ENABLED=0 GOOS=$$GOOS GOARCH=$$GOARCH go build $(LDFLAGS) -o dist/$$BIN .; \
-		ARCHIVE=$(BINARY)-$(VERSION)-$$GOOS-$$GOARCH; \
+		ARCHIVE=$(BINARY)-cli_$(VERSION)_$$GOOS-$$GOARCH; \
 		tar -czf dist/$$ARCHIVE.tar.gz -C dist $$BIN; \
 		rm dist/$$BIN; \
 	done

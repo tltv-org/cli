@@ -39,7 +39,7 @@ jobs:
             echo "Building ${GOOS}/${GOARCH}..."
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "dist/${BIN}" .
 
-            ARCHIVE="tltv-${VERSION}-${GOOS}-${GOARCH}"
+            ARCHIVE="tltv-cli_${VERSION}_${GOOS}-${GOARCH}"
             tar -czf "dist/${ARCHIVE}.tar.gz" -C dist "$BIN"
             rm "dist/${BIN}"
           done
