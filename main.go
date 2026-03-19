@@ -17,28 +17,29 @@ import (
 var version = "dev"
 
 // readSeed reads an Ed25519 seed from a file, accepting either:
-//   - 64-byte hex-encoded text (new format)
+//   - 64-byte hex-encoded text (new format, with optional trailing newline)
 //   - 32-byte raw binary (old format, for backward compatibility)
 func readSeed(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	// Strip trailing newline from text files
-	data = []byte(strings.TrimSpace(string(data)))
 
-	if len(data) == ed25519.SeedSize*2 {
-		// Hex-encoded seed
-		seed, err := hex.DecodeString(string(data))
+	// Try hex first (trimmed -- text files may have trailing newline)
+	trimmed := strings.TrimSpace(string(data))
+	if len(trimmed) == ed25519.SeedSize*2 {
+		seed, err := hex.DecodeString(trimmed)
 		if err != nil {
 			return nil, fmt.Errorf("invalid hex in key file: %w", err)
 		}
 		return seed, nil
 	}
+
+	// Fall back to raw binary (use original data, not trimmed)
 	if len(data) == ed25519.SeedSize {
-		// Raw binary seed (backward compat)
 		return data, nil
 	}
+
 	return nil, fmt.Errorf("invalid key file: expected %d hex chars or %d raw bytes, got %d bytes",
 		ed25519.SeedSize*2, ed25519.SeedSize, len(data))
 }
