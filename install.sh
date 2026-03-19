@@ -37,7 +37,7 @@ main() {
     exit 1
   fi
 
-  INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+  INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
   ARCHIVE="tltv-cli_${VERSION}_${OS}-${ARCH}.tar.gz"
   URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 
@@ -53,16 +53,25 @@ main() {
     exit 1
   fi
 
-  # Install binary
-  if [ -w "$INSTALL_DIR" ]; then
-    mv "$tmpdir/$BINARY" "$INSTALL_DIR/$BINARY"
-  else
-    echo "Installing to ${INSTALL_DIR} (requires sudo)..."
-    sudo mv "$tmpdir/$BINARY" "$INSTALL_DIR/$BINARY"
-  fi
+  # Create install dir if needed
+  mkdir -p "$INSTALL_DIR"
 
+  # Install binary
+  mv "$tmpdir/$BINARY" "$INSTALL_DIR/$BINARY"
   chmod +x "$INSTALL_DIR/$BINARY"
+
   echo "Installed ${BINARY} ${VERSION} to ${INSTALL_DIR}/${BINARY}"
+
+  # Warn if not in PATH
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *)
+      echo ""
+      echo "NOTE: ${INSTALL_DIR} is not in your PATH."
+      echo "Add it to your shell profile:"
+      echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+      ;;
+  esac
 }
 
 main
