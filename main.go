@@ -26,7 +26,7 @@ var (
 
 func usage() {
 	w := os.Stderr
-	fmt.Fprintf(w, "tltv - TLTV Federation Protocol CLI (v%s, protocol v1)\n\n", version)
+	fmt.Fprintf(w, "tltv - TLTV Federation Protocol CLI (%s, protocol v1)\n\n", version)
 	fmt.Fprintf(w, "Usage: tltv [flags] <command> [options]\n\n")
 	fmt.Fprintf(w, "Global Flags:\n")
 	fmt.Fprintf(w, "  --json        Machine-readable JSON output\n")

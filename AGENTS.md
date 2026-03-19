@@ -12,9 +12,11 @@ signing.go          JCS canonical JSON (RFC 8785), Ed25519 sign/verify, strict v
 uri.go              tltv:// URI parse and format (no net/url -- preserves channel ID case)
 client.go           HTTP client, SSRF-safe client, hint validation, local address detection
 network.go          Network command implementations (resolve, node, fetch, guide, peers, stream, crawl)
+update.go           Self-update command (GitHub API, archive extraction, atomic binary replace)
 vanity.go           Multi-threaded vanity miner (goroutines + crypto/rand, pos-2 constraint detection)
 output.go           Terminal output helpers (colors, tables, field display)
 signal.go           OS signal handling (SIGINT/SIGTERM)
+install.sh          Curl one-liner installer (detects OS/arch, downloads latest from GitHub API)
 main_test.go        55 tests against all 7 protocol test vector suites (C1-C7) + security/edge cases
 Makefile            Build targets: build, install, test, release, clean (CGO_ENABLED=0)
 ```
@@ -117,15 +119,16 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 
 ### Branching
 
-- **`main`** -- Release branch. Only receives merges from `dev`. Tags (`v*`) trigger GitHub Actions release builds.
-- **`dev`** -- Integration branch. Do NOT commit directly to `dev`. Feature branches merge to `dev` via PR.
-- **Feature branches** -- Branch off `dev`, merge back to `dev`. Name: `feature/<name>` or just descriptive (`vanity-optimization`, `add-resolve-command`).
-- **Release flow**: `dev` -> PR to `main` -> merge -> tag `vX.Y.Z` on `main` -> Actions builds binaries.
+- **`main`** -- Release branch. Only receives merges from `dev`. Tags (`v*`) trigger release builds.
+- **`dev`** -- Integration branch. Feature branches merge to `dev` via PR. Direct commits OK for small fixes.
+- **`gh-push`** -- Local branch tracking `github/main`. Used to stage curated commits for GitHub.
+- **Feature branches** -- Branch off `dev`, merge back to `dev`. Name: `feature/<name>` or just descriptive.
+- **Release flow**: commit to `dev` -> merge `dev` to `main` -> tag `vX.Y.Z` on `main` -> push. Always commit to `dev` first, never directly to `main`.
 
 ### CI
 
 - `.github/workflows/ci.yml` -- Runs build + tests on push to `main`/`dev` and on PRs.
-- `.github/workflows/release.yml` -- Cross-compiles and creates GitHub Release when a `v*` tag is pushed to `main`.
+- `.github/workflows/release.yml` -- Cross-compiles, creates release, uploads assets when a `v*` tag is pushed. Runs on both Forgejo and GitHub. Produces `.tar.gz` for Linux/macOS/FreeBSD and `.zip` for Windows. Deletes stale releases from previous failed runs before creating a new one.
 
 ## Common Tasks
 
@@ -147,40 +150,65 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 
 Use `flag.NewFlagSet` for the command. Flags must come before positional arguments (Go `flag` package convention). Exception: `cmdFormat` manually extracts `--hint` and `--token` from args to support repeatable flags and flags after positional arguments.
 
+### Version Bumps
+
+- New features = minor bump (v1.1.0 -> v1.2.0)
+- Bug fixes = patch bump (v1.1.0 -> v1.1.1)
+- CI/workflow-only fixes do NOT get new versions. Re-tag the same version after fixing.
+
+### Forgejo Release Process
+
+Forgejo is the primary CI. Release notes are not needed here (private server).
+
+1. Commit to `dev`, merge `dev` to `main` (never commit directly to `main`).
+2. Tag on `main`: `git tag vX.Y.Z`
+3. Push: `git push origin main dev --tags`
+4. The release workflow builds archives, creates a Forgejo release, and uploads assets.
+5. If CI fails and a stale release was created, the workflow auto-deletes it on retry.
+   To manually re-trigger: delete the tag remotely, re-tag, and push.
+   ```bash
+   git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z
+   git tag vX.Y.Z && git push origin --tags
+   ```
+
 ### GitHub Release Process
 
 GitHub gets curated commits (no Forgejo history). Changes are overlaid onto GitHub's
-existing history as normal incremental commits.
-
-To push changes to GitHub:
+existing history as a single clean commit per release.
 
 1. Finalize all changes on `main` and push to `origin` (Forgejo).
 2. Run tests: `make test`
 3. Overlay current files onto GitHub's history:
    ```bash
    git checkout gh-push
-   git checkout main -- .gitignore .github/ LICENSE README.md Makefile go.mod *.go
+   git checkout main -- .gitignore .github/ LICENSE README.md Makefile go.mod *.go install.sh
    ```
+   **Note:** `*.go` may not glob correctly in `git checkout`. Explicitly list new `.go`
+   files (e.g. `update.go`) if they don't appear in `git status` after the checkout.
 4. Do NOT include: AGENTS.md or anything not meant for public.
    ```bash
    git reset HEAD AGENTS.md 2>/dev/null
    git checkout -- AGENTS.md 2>/dev/null
    ```
-5. Commit with author set to Philo:
+5. Commit with author set to Philo (amend the previous unpushed commit if adding to it):
    ```bash
    GIT_AUTHOR_NAME="Philo Farnsworth" GIT_AUTHOR_EMAIL="farnsworth27@protonmail.com" \
    GIT_COMMITTER_NAME="Philo Farnsworth" GIT_COMMITTER_EMAIL="farnsworth27@protonmail.com" \
    git commit -m "<description of changes>"
    ```
-6. Push (normal push, not force):
+6. Push code and tag:
    ```bash
    git push github gh-push:main
-   ```
-7. For version releases, also push a tag:
-   ```bash
    git push github <commit-hash>:refs/tags/vX.Y.Z
    ```
-8. Switch back:
+7. Wait for GitHub Actions to create the release and upload assets.
+8. Edit the release with proper notes (the CI creates it with a bare body):
+   ```bash
+   GH_TOKEN=<token> gh release edit vX.Y.Z --repo tltv-org/cli --notes "<markdown notes>"
+   ```
+   Or use `gh release edit --notes-file` with a file. Write the notes manually --
+   GitHub's `--generate-notes` produces poor output with single squashed commits.
+9. Switch back:
    ```bash
    git checkout dev
    ```
