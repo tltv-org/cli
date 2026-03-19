@@ -41,7 +41,7 @@ jobs:
 
             ARCHIVE="tltv-cli_${VERSION}_${GOOS}-${GOARCH}"
             if [ "$GOOS" = "windows" ]; then
-              (cd dist && zip "${ARCHIVE}.zip" "$BIN")
+              python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],sys.argv[3]); z.close()" "dist/${ARCHIVE}.zip" "dist/${BIN}" "$BIN"
             else
               tar -czf "dist/${ARCHIVE}.tar.gz" -C dist "$BIN"
             fi
