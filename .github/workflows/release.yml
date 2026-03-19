@@ -78,7 +78,7 @@ jobs:
             PRERELEASE=true
           fi
 
-          # Create release (edit release notes manually after)
+          # Create release
           RESPONSE=$(curl -sS -X POST \
             -H "Authorization: token ${TOKEN}" \
             -H "Content-Type: application/json" \
