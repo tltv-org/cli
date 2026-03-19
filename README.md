@@ -4,24 +4,33 @@ Command-line tool for the [TLTV Federation Protocol](https://github.com/tltv-org
 
 ## Install
 
+Pre-built static binaries are available for all platforms. No dependencies required.
+
+### Linux / macOS
+
+```bash
+curl -sSL https://raw.githubusercontent.com/tltv-org/cli/main/install.sh | sh
+```
+
+### Windows
+
+Download the latest `.zip` from the [releases page](https://github.com/tltv-org/cli/releases/latest) and add `tltv.exe` to your PATH.
+
 ### From source
+
+Requires [Go](https://go.dev/dl/) 1.22+:
 
 ```bash
 go install github.com/tltv-org/cli@latest
 ```
 
-### Pre-built binaries
-
-Download from the [releases page](https://github.com/tltv-org/cli/releases). Available for Linux and macOS (amd64 + arm64) and Windows (amd64).
-
-### Build from source
+Or clone and build:
 
 ```bash
 git clone https://github.com/tltv-org/cli.git tltv-cli
 cd tltv-cli
 make build      # builds ./tltv
 make install    # installs to $GOPATH/bin
-make release    # cross-compiles all platforms to dist/
 ```
 
 ## Quick Start
@@ -102,6 +111,7 @@ tltv crawl example.com
 | Command | Description |
 |---|---|
 | `migrate` | Create a signed key migration document. Requires `-from-key` (old seed) and `-to` (new channel ID). |
+| `update` | Update to the latest release from GitHub. Replaces the current binary in-place. |
 | `completion <shell>` | Generate shell completions for bash, zsh, or fish. |
 | `version` | Show version, protocol version, Go version, and platform. |
 
