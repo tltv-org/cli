@@ -78,11 +78,19 @@ jobs:
             PRERELEASE=true
           fi
 
+          # Read release notes from annotated tag message
+          BODY=$(git tag -l --format='%(contents)' "${TAG}" | sed 's/"/\\"/g')
+          if [ -z "$BODY" ]; then
+            BODY="Release ${TAG}"
+          fi
+
           # Create release
+          PAYLOAD=$(printf '{"tag_name":"%s","name":"tltv-cli %s","body":"%s","draft":false,"prerelease":%s}' \
+            "$TAG" "$TAG" "$BODY" "$PRERELEASE")
           RESPONSE=$(curl -sS -X POST \
             -H "Authorization: token ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${TAG}\",\"name\":\"tltv-cli ${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":${PRERELEASE}}" \
+            -d "$PAYLOAD" \
             "${API_BASE}/releases")
 
           # Extract release ID (works for both APIs -- "id" is always the first integer id field)
