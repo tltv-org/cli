@@ -37,7 +37,25 @@ main() {
     exit 1
   fi
 
-  INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+  # Pick install directory: use INSTALL_DIR if set, otherwise find a
+  # user-writable directory already in PATH. Fall back to ~/.local/bin.
+  if [ -n "$INSTALL_DIR" ]; then
+    : # user override, use as-is
+  else
+    INSTALL_DIR=""
+    for dir in "$HOME/.local/bin" "$HOME/bin" /usr/local/bin; do
+      case ":$PATH:" in
+        *":$dir:"*)
+          if [ -w "$dir" ] || [ ! -e "$dir" -a -w "$(dirname "$dir")" ]; then
+            INSTALL_DIR="$dir"
+            break
+          fi
+          ;;
+      esac
+    done
+    INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+  fi
+
   ARCHIVE="tltv-cli_${VERSION}_${OS}-${ARCH}.tar.gz"
   URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 
@@ -53,16 +71,48 @@ main() {
     exit 1
   fi
 
-  # Install binary
-  if [ -w "$INSTALL_DIR" ]; then
-    mv "$tmpdir/$BINARY" "$INSTALL_DIR/$BINARY"
-  else
-    echo "Installing to ${INSTALL_DIR} (requires sudo)..."
-    sudo mv "$tmpdir/$BINARY" "$INSTALL_DIR/$BINARY"
-  fi
+  # Create install dir if needed
+  mkdir -p "$INSTALL_DIR"
 
+  # Install binary
+  mv "$tmpdir/$BINARY" "$INSTALL_DIR/$BINARY"
   chmod +x "$INSTALL_DIR/$BINARY"
+
   echo "Installed ${BINARY} ${VERSION} to ${INSTALL_DIR}/${BINARY}"
+
+  # Add to PATH if needed
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *)
+      LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
+
+      # Detect shell profile
+      PROFILE=""
+      if [ -n "$ZSH_VERSION" ] || [ "$(basename "$SHELL")" = "zsh" ]; then
+        PROFILE="$HOME/.zshrc"
+      elif [ -n "$BASH_VERSION" ] || [ "$(basename "$SHELL")" = "bash" ]; then
+        PROFILE="$HOME/.bashrc"
+      elif [ -f "$HOME/.profile" ]; then
+        PROFILE="$HOME/.profile"
+      fi
+
+      if [ -n "$PROFILE" ]; then
+        # Don't add if already present
+        if ! grep -qF "$INSTALL_DIR" "$PROFILE" 2>/dev/null; then
+          echo "" >> "$PROFILE"
+          echo "# Added by tltv installer" >> "$PROFILE"
+          echo "$LINE" >> "$PROFILE"
+          echo "Added ${INSTALL_DIR} to PATH in ${PROFILE}"
+          echo "Restart your shell or run: source ${PROFILE}"
+        fi
+      else
+        echo ""
+        echo "NOTE: Could not detect shell profile."
+        echo "Add this to your shell config:"
+        echo "  $LINE"
+      fi
+      ;;
+  esac
 }
 
 main

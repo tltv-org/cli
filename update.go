@@ -159,11 +159,10 @@ func cmdUpdate(args []string) {
 		fatal("update: cannot resolve executable path: %v", err)
 	}
 
-	// Atomic replace: write to temp file in same directory, then rename.
-	dir := filepath.Dir(execPath)
-	tmp, err := os.CreateTemp(dir, ".tltv-update-*")
+	// Write new binary to system temp dir (always writable), then move into place.
+	tmp, err := os.CreateTemp("", ".tltv-update-*")
 	if err != nil {
-		fatal("update: cannot create temp file (do you have write permission to %s?): %v", dir, err)
+		fatal("update: cannot create temp file: %v", err)
 	}
 	tmpPath := tmp.Name()
 
@@ -191,9 +190,12 @@ func cmdUpdate(args []string) {
 		fatal("update: %v", err)
 	}
 
-	// Rename is atomic on the same filesystem.
+	// Try atomic rename (works when same filesystem).
 	if err := os.Rename(tmpPath, execPath); err != nil {
-		fatal("update: cannot replace binary (try running with sudo): %v", err)
+		// Cross-device or permission denied -- fall back to copy.
+		if err := copyFile(tmpPath, execPath); err != nil {
+			fatal("update: cannot replace %s: %v\n  try: sudo tltv update", execPath, err)
+		}
 	}
 	tmpPath = "" // Prevent deferred cleanup.
 
@@ -250,4 +252,22 @@ func extractFromZip(data []byte, name string) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("binary %q not found in archive", name)
+}
+
+// copyFile copies src to dst by reading and writing (works across filesystems).
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
