@@ -40,7 +40,11 @@ jobs:
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "dist/${BIN}" .
 
             ARCHIVE="tltv-cli_${VERSION}_${GOOS}-${GOARCH}"
-            tar -czf "dist/${ARCHIVE}.tar.gz" -C dist "$BIN"
+            if [ "$GOOS" = "windows" ]; then
+              (cd dist && zip "${ARCHIVE}.zip" "$BIN")
+            else
+              tar -czf "dist/${ARCHIVE}.tar.gz" -C dist "$BIN"
+            fi
             rm "dist/${BIN}"
           done
 
