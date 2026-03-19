@@ -56,72 +56,126 @@ jobs:
         working-directory: dist
         run: sha256sum * > checksums.txt
 
-      - name: Create release and upload assets
+      - name: Detect release target
+        id: detect
         env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
           SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          # Detect API base (GitHub vs Forgejo/Gitea)
           if echo "$SERVER" | grep -q "github\.com"; then
-            API_BASE="https://api.github.com/repos/${REPO}"
-            UPLOAD_MODE=github
+            echo "api_base=https://api.github.com/repos/${REPO}" >> "$GITHUB_OUTPUT"
+            echo "upload_mode=github" >> "$GITHUB_OUTPUT"
           else
-            API_BASE="${SERVER}/api/v1/repos/${REPO}"
-            UPLOAD_MODE=forgejo
+            echo "api_base=${SERVER}/api/v1/repos/${REPO}" >> "$GITHUB_OUTPUT"
+            echo "upload_mode=forgejo" >> "$GITHUB_OUTPUT"
           fi
 
-          # Detect pre-release from tag name
           PRERELEASE=false
           if echo "$TAG" | grep -qE '(rc|alpha|beta)'; then
             PRERELEASE=true
           fi
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "API base: $(echo "$SERVER" | grep -q 'github\.com' && echo 'GitHub' || echo 'Forgejo')"
+          echo "Tag: ${TAG}, Prerelease: ${PRERELEASE}"
 
-          # Delete existing release for this tag (from previous failed runs)
-          EXISTING=$(curl -sS -H "Authorization: token ${TOKEN}" "${API_BASE}/releases/tags/${TAG}" 2>/dev/null)
-          EXISTING_ID=$(echo "$EXISTING" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
-          if [ -n "$EXISTING_ID" ]; then
-            echo "Deleting stale release ${TAG} (id: ${EXISTING_ID})..."
-            curl -sS -X DELETE -H "Authorization: token ${TOKEN}" "${API_BASE}/releases/${EXISTING_ID}" > /dev/null
+      - name: Delete stale release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          API_BASE: ${{ steps.detect.outputs.api_base }}
+        run: |
+          echo "Checking for existing release at tag ${TAG}..."
+          EXISTING=$(curl -sS -w "\nHTTP_CODE:%{http_code}" \
+            -H "Authorization: token ${TOKEN}" \
+            "${API_BASE}/releases/tags/${TAG}" 2>&1)
+          HTTP_CODE=$(echo "$EXISTING" | grep -o 'HTTP_CODE:[0-9]*' | cut -d: -f2)
+          BODY=$(echo "$EXISTING" | sed '/^HTTP_CODE:/d')
+          echo "Lookup status: ${HTTP_CODE}"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            EXISTING_ID=$(echo "$BODY" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
+            if [ -n "$EXISTING_ID" ]; then
+              echo "Deleting stale release (id: ${EXISTING_ID})..."
+              curl -sS -w "\nHTTP_CODE:%{http_code}" -X DELETE \
+                -H "Authorization: token ${TOKEN}" \
+                "${API_BASE}/releases/${EXISTING_ID}" 2>&1
+            fi
+          else
+            echo "No existing release found (expected for first run)"
           fi
 
-          # Create release
-          RESPONSE=$(curl -sS -X POST \
-            -H "Authorization: token ${TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${TAG}\",\"name\":\"tltv-cli ${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":${PRERELEASE}}" \
-            "${API_BASE}/releases")
+      - name: Create release
+        id: release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          API_BASE: ${{ steps.detect.outputs.api_base }}
+          PRERELEASE: ${{ steps.detect.outputs.prerelease }}
+        run: |
+          echo "Creating release ${TAG}..."
+          echo "API: ${API_BASE}/releases"
+          echo "Token length: ${#TOKEN}"
 
-          # Extract release ID (works for both APIs -- "id" is always the first integer id field)
-          RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
-
-          if [ -z "$RELEASE_ID" ]; then
-            echo "ERROR: Failed to create release"
-            echo "$RESPONSE"
+          if [ -z "$TOKEN" ]; then
+            echo "ERROR: TOKEN is empty -- secrets.GITHUB_TOKEN not available"
             exit 1
           fi
 
-          echo "Created release ${TAG} (id: ${RELEASE_ID}, prerelease: ${PRERELEASE})"
+          RESPONSE=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST \
+            -H "Authorization: token ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"tltv-cli ${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":${PRERELEASE}}" \
+            "${API_BASE}/releases" 2>&1)
 
-          # Upload assets
+          HTTP_CODE=$(echo "$RESPONSE" | grep -o 'HTTP_CODE:[0-9]*' | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/^HTTP_CODE:/d')
+          echo "HTTP status: ${HTTP_CODE}"
+          echo "Response: ${BODY}"
+
+          RELEASE_ID=$(echo "$BODY" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
+          if [ -z "$RELEASE_ID" ]; then
+            echo "ERROR: Failed to create release (no id in response)"
+            exit 1
+          fi
+
+          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+          echo "Created release ${TAG} (id: ${RELEASE_ID})"
+
+      - name: Upload assets
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          API_BASE: ${{ steps.detect.outputs.api_base }}
+          UPLOAD_MODE: ${{ steps.detect.outputs.upload_mode }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          echo "Uploading assets to release ${RELEASE_ID}..."
+          ls -la dist/
+
           for file in dist/*; do
             filename=$(basename "$file")
-            echo "Uploading ${filename}..."
+            echo "Uploading ${filename} ($(stat -c%s "$file") bytes)..."
 
             if [ "$UPLOAD_MODE" = "github" ]; then
-              # GitHub: raw binary body to uploads.github.com
-              curl -sS -X POST \
+              UPLOAD_RESP=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST \
                 -H "Authorization: token ${TOKEN}" \
                 -H "Content-Type: application/octet-stream" \
                 --data-binary "@${file}" \
-                "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${filename}" > /dev/null
+                "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${filename}" 2>&1)
             else
-              # Forgejo/Gitea: multipart form upload
-              curl -sS -X POST \
+              UPLOAD_RESP=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST \
                 -H "Authorization: token ${TOKEN}" \
                 -F "attachment=@${file}" \
-                "${API_BASE}/releases/${RELEASE_ID}/assets?name=${filename}" > /dev/null
+                "${API_BASE}/releases/${RELEASE_ID}/assets?name=${filename}" 2>&1)
+            fi
+
+            HTTP_CODE=$(echo "$UPLOAD_RESP" | grep -o 'HTTP_CODE:[0-9]*' | cut -d: -f2)
+            if [ "$HTTP_CODE" != "201" ]; then
+              echo "WARNING: Upload ${filename} returned HTTP ${HTTP_CODE}"
+              echo "$UPLOAD_RESP" | sed '/^HTTP_CODE:/d'
+            else
+              echo "  OK: ${filename}"
             fi
           done
 
