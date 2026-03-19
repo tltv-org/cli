@@ -78,15 +78,17 @@ jobs:
             PRERELEASE=true
           fi
 
-          # Read release notes from annotated tag message
-          BODY=$(git tag -l --format='%(contents)' "${TAG}" | sed 's/"/\\"/g')
+          # Read release notes from annotated tag message (body only, skip subject line)
+          BODY=$(git tag -l --format='%(contents:body)' "${TAG}")
           if [ -z "$BODY" ]; then
             BODY="Release ${TAG}"
           fi
 
+          # Build JSON payload safely (handles newlines, backticks, quotes)
+          export BODY PRERELEASE
+          PAYLOAD=$(python3 -c 'import json,os; print(json.dumps({"tag_name":os.environ["TAG"],"name":"tltv-cli "+os.environ["TAG"],"body":os.environ["BODY"],"draft":False,"prerelease":os.environ["PRERELEASE"]=="true"}))')
+
           # Create release
-          PAYLOAD=$(printf '{"tag_name":"%s","name":"tltv-cli %s","body":"%s","draft":false,"prerelease":%s}' \
-            "$TAG" "$TAG" "$BODY" "$PRERELEASE")
           RESPONSE=$(curl -sS -X POST \
             -H "Authorization: token ${TOKEN}" \
             -H "Content-Type: application/json" \
