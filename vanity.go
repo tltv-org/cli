@@ -132,6 +132,15 @@ func runVanityMiner(pattern, mode string, ignoreCase bool, threads, maxCount int
 		threads = runtime.NumCPU()
 	}
 
+	// Validate output directory exists and is writable
+	info, err := os.Stat(outDir)
+	if err != nil {
+		fatal("output directory does not exist: %s", outDir)
+	}
+	if !info.IsDir() {
+		fatal("output path is not a directory: %s", outDir)
+	}
+
 	// Validate pattern characters against base58 alphabet
 	checkPattern := pattern
 	if ignoreCase {

@@ -316,7 +316,7 @@ func cmdInspect(args []string) {
 	fs := flag.NewFlagSet("inspect", flag.ExitOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Inspect and validate a TLTV channel ID\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv inspect <channel-id>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv inspect <channel-id | tltv:// URI>\n\n")
 	}
 	fs.Parse(args)
 
@@ -326,6 +326,14 @@ func cmdInspect(args []string) {
 	}
 
 	id := fs.Arg(0)
+	// Accept tltv:// URIs -- extract just the channel ID
+	if strings.HasPrefix(id, tltvScheme) {
+		uri, err := parseTLTVUri(id)
+		if err != nil {
+			fatal("invalid URI: %v", err)
+		}
+		id = uri.ChannelID
+	}
 	pubKey, err := parseChannelID(id)
 	if err != nil {
 		fatal("invalid channel ID: %v", err)
@@ -375,7 +383,9 @@ func cmdSign(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv sign -k channel.key < metadata.json\n")
 		fmt.Fprintf(os.Stderr, "  tltv sign -k channel.key -i doc.json --auto-seq\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -k, --key string      path to seed file (required)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --input string    input JSON file (default: stdin)\n")
+		fmt.Fprintf(os.Stderr, "      --auto-seq        set seq to current time and updated to now\n")
 	}
 	fs.Parse(args)
 
@@ -881,11 +891,11 @@ func cmdCompletion(args []string) {
 	// Ensure parent directory exists
 	dir := installPath[:strings.LastIndex(installPath, "/")]
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fatal("could not create directory %s: %v", dir, err)
+		fatal("could not create directory %s: %v\n  try: sudo tltv completion --install %s", dir, err, shell)
 	}
 
 	if err := os.WriteFile(installPath, []byte(script), 0644); err != nil {
-		fatal("could not write %s: %v", installPath, err)
+		fatal("could not write %s: %v\n  try: sudo tltv completion --install %s", installPath, err, shell)
 	}
 	fmt.Fprintf(os.Stderr, "Installed %s completions to %s\n", shell, installPath)
 }

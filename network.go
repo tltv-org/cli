@@ -79,7 +79,8 @@ func cmdFetch(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv fetch TVMkVH...@example.com\n")
 		fmt.Fprintf(os.Stderr, "  tltv fetch TVMkVH...@localhost:8000\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
+		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
 	}
 	fs.Parse(args)
 
@@ -212,7 +213,9 @@ func cmdGuide(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv guide \"tltv://TVMkVH...@example.com:443\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv guide TVMkVH...@example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
+		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
+		fmt.Fprintf(os.Stderr, "      --xmltv           output as XMLTV XML\n")
 	}
 	fs.Parse(args)
 
@@ -394,7 +397,7 @@ func cmdStream(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv stream \"tltv://TVMkVH...@example.com:443\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv stream TVMkVH...@example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
 	}
 	fs.Parse(args)
 
@@ -482,7 +485,7 @@ func cmdCrawl(args []string) {
 		fmt.Fprintf(os.Stderr, "Crawl the peer gossip network to discover channels\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv crawl <host[:port]>\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -d, --depth int       maximum crawl depth (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -652,7 +655,8 @@ func cmdResolve(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...@example.com:443\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...?via=relay1.com:443,relay2.com:443\"\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token (overrides URI token)\n")
+		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
 	}
 	fs.Parse(args)
 
