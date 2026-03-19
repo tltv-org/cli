@@ -62,6 +62,25 @@ The implementation tracks the TLTV Federation Protocol v1.0 spec at `git.plutoni
 | Peer exchange | 11 |
 | Migration + chain following | 5.14 |
 
+## Development Workflow
+
+1. Make changes, quick build check: `go build -o /dev/null .`
+2. Commit and push to `dev`
+3. Check Forgejo CI status:
+   ```bash
+   curl -sS -u "agent1:Tiptop-Refinery-Submarine8" \
+     "https://git.plutoniumtech.com/api/v1/repos/tltv/cli/actions/tasks?limit=4" \
+     | python3 -c "
+   import sys,json
+   for r in json.load(sys.stdin)['workflow_runs'][:4]:
+       s='OK' if r['status']=='success' else 'FAIL' if r['status']=='failure' else '..'
+       print(f\"{s:4s} {r['name']:8s} {r['head_branch']:6s} {r['status']:10s} {r['display_title'][:60]}\")"
+   ```
+4. Wait for `test` and `race` jobs to show `success` before merging to `main`
+
+Do NOT run the full test suite locally. Forgejo CI handles testing. Only do a quick
+`go build` to catch compile errors before pushing.
+
 ## Testing
 
 ```bash
