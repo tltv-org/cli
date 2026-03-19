@@ -78,6 +78,14 @@ jobs:
             PRERELEASE=true
           fi
 
+          # Delete existing release for this tag (from previous failed runs)
+          EXISTING=$(curl -sS -H "Authorization: token ${TOKEN}" "${API_BASE}/releases/tags/${TAG}" 2>/dev/null)
+          EXISTING_ID=$(echo "$EXISTING" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
+          if [ -n "$EXISTING_ID" ]; then
+            echo "Deleting stale release ${TAG} (id: ${EXISTING_ID})..."
+            curl -sS -X DELETE -H "Authorization: token ${TOKEN}" "${API_BASE}/releases/${EXISTING_ID}" > /dev/null
+          fi
+
           # Create release
           RESPONSE=$(curl -sS -X POST \
             -H "Authorization: token ${TOKEN}" \
