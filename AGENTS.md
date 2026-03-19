@@ -17,7 +17,7 @@ vanity.go           Multi-threaded vanity miner (goroutines + crypto/rand, pos-2
 output.go           Terminal output helpers (colors, tables, field display)
 signal.go           OS signal handling (SIGINT/SIGTERM)
 install.sh          Curl one-liner installer (detects OS/arch, downloads latest from GitHub API)
-main_test.go        55 tests against all 7 protocol test vector suites (C1-C7) + security/edge cases
+main_test.go        67 tests against all 7 protocol test vector suites (C1-C7) + security/edge cases
 Makefile            Build targets: build, install, test, release, clean (CGO_ENABLED=0)
 ```
 
@@ -32,6 +32,13 @@ Makefile            Build targets: build, install, test, release, clean (CGO_ENA
 - **SSRF-safe client** -- `newSSRFSafeClient()` uses a custom `DialContext` (`ssrfSafeDialContext`) that resolves DNS, checks all resolved IPs against `isLocalAddress()` before connecting, and connects directly to the resolved IP to prevent TOCTOU. Used by `resolve` and `crawl` for untrusted hints. `validateHint()` rejects hints containing scheme/userinfo/path/query/fragment. `normalizeHint()` validates and adds default port.
 - **Local address filtering** -- `resolve` and `crawl` skip hints pointing to private/loopback/link-local/CGN/unspecified addresses unless `--local` is set (spec section 3.1 SSRF protection). Defense is layered: string-level check via `isLocalAddress()` + DNS-level check at connection time via SSRF-safe dialer. Direct commands (`fetch`, `guide`, `node`) are not filtered since the user explicitly chose the target.
 - **Version prefix encoding constraint** -- The `0x1433` prefix constrains which base58 characters can appear at position 2 (after TV). Not all 58 characters are achievable there. The vanity miner documents this and suggests `--mode contains` as a fallback.
+- **`tltv://` URI acceptance** -- `parseTarget()` accepts both `tltv://` URIs and compact `id@host` format. When given a URI, it parses via `parseTLTVUri()` and uses the first hint as the host. Used by `fetch`, `guide`, `stream`.
+- **Full URLs in fetch output** -- `cmdFetch` combines the host's base URL with the document's relative `stream`/`guide` paths to show copy-pasteable URLs (e.g. `https://example.com:443/tltv/v1/channels/.../stream.m3u8`). JSON output includes `stream_url` and `guide_url` fields.
+- **No ID truncation** -- Channel IDs are always shown in full. The `truncateID` function was removed. Tables (node, peers, crawl) use full IDs.
+- **Now-playing indicator** -- `cmdGuide` compares each entry's start/end against `time.Now().UTC()` and marks the currently-airing entry with a `>` marker (green when color is enabled).
+- **Hex seed files** -- `.key` files are written as hex-encoded text (64 chars + newline). `readSeed()` auto-detects hex (64 chars) vs raw binary (32 bytes) on read for backward compatibility with old-format files. `writeSeed()` always writes hex.
+- **Short flag aliases** -- Common flags have single-letter aliases: `--output`/`-o`, `--key`/`-k`, `--input`/`-i`, `--count`/`-n`, `--mode`/`-m`, `--threads`/`-t`, `--token`/`-t`, `--depth`/`-d`. Implemented via `fs.StringVar`/`fs.IntVar` binding two names to the same pointer. Documentation defaults to long flags.
+- **Completion --install** -- `cmdCompletion` accepts `--install` to write completions directly to the standard shell location (e.g. `/usr/local/share/zsh/site-functions/_tltv`) instead of printing to stdout.
 - **Strict verification** -- `verifyDocument` and `verifyMigration` check protocol version (`v` must be 1), identity binding, future timestamps, and signature. `verifyMigration` additionally validates that `to` is a valid channel ID different from `from`. `fetch` and `guide` commands exit non-zero when verification fails (both human and JSON output modes). `checkTimestamps()` rejects malformed/wrongly-typed `seq`, `updated`, `migrated` instead of silently ignoring parse failures.
 - **Document size limit** -- `readDocument` enforces the 64 KB limit from spec section 5.6 using `io.LimitReader`. Also rejects trailing data after the JSON document (concatenated JSON, garbage bytes).
 - **Timestamp format validation** -- `cmdSign` validates `updated`, `migrated`, guide `from`/`until`, and guide entry `start`/`end` timestamps match the spec format (`YYYY-MM-DDTHH:MM:SSZ`) before signing. Uses roundtrip check to reject fractional seconds.
@@ -87,7 +94,7 @@ Do NOT run the full test suite locally. Forgejo CI handles testing. Only do a qu
 make test    # or: go test -v ./...
 ```
 
-55 unit tests + 7 integration tests validate against all protocol test vectors:
+60 unit tests + 7 integration tests validate against all protocol test vectors:
 - C1: identity encoding, C2: signing, C3: complete document, C4: URI parsing, C5: guide, C6: invalid inputs, C7: migration
 - Plus base58 edge cases, canonical JSON ordering, signature hex verification
 - URI format/parse roundtrip, vanity pos-2 feasibility, future timestamp rejection
@@ -99,6 +106,8 @@ make test    # or: go test -v ./...
 - JCS canonical JSON: special chars, Unicode separators, control chars, number formatting, nested, sign stability
 - SSRF hint validation: URL rejection, userinfo, path, query, fragment, normalizeHint
 - Strict validation: seq type/format, timestamp type/format, trailing JSON, guide entry timestamps
+- parseTarget: tltv:// URI acceptance, compact format, error cases
+- Seed files: hex write/read roundtrip, binary backward compat, invalid input rejection, sign roundtrip
 
 ### Integration tests
 

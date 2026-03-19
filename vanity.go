@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -126,7 +127,7 @@ func checkPrefixFeasibility(pattern string, ignoreCase bool) (newMode string, ok
 }
 
 // runVanityMiner runs the interactive vanity miner.
-func runVanityMiner(pattern, mode string, ignoreCase bool, threads, maxCount int) {
+func runVanityMiner(pattern, mode string, ignoreCase bool, threads, maxCount int, outDir string) {
 	if threads <= 0 {
 		threads = runtime.NumCPU()
 	}
@@ -208,8 +209,8 @@ func runVanityMiner(pattern, mode string, ignoreCase bool, threads, maxCount int
 			checked := atomic.LoadUint64(&vanityChecked)
 
 			// Save key file
-			filename := match.ChannelID + ".key"
-			if err := os.WriteFile(filename, match.Seed, 0600); err != nil {
+			filename := filepath.Join(outDir, match.ChannelID+".key")
+			if err := writeSeed(filename, match.Seed); err != nil {
 				fmt.Fprintf(os.Stderr, "  warning: could not save %s: %v\n", filename, err)
 			}
 

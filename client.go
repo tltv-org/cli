@@ -368,11 +368,25 @@ func truncateBody(body []byte) string {
 	return s
 }
 
-// parseTarget parses "channel_id@host:port" into components.
+// parseTarget parses a channel target, accepting either:
+//   - tltv://TVxxx@host:port  (URI format, uses first hint as host)
+//   - TVxxx@host:port         (compact format)
 func parseTarget(s string) (channelID, host string, err error) {
+	// Accept tltv:// URIs
+	if strings.HasPrefix(s, tltvScheme) {
+		uri, err := parseTLTVUri(s)
+		if err != nil {
+			return "", "", err
+		}
+		if len(uri.Hints) == 0 {
+			return "", "", fmt.Errorf("URI has no host hint -- use tltv://ID@host:port")
+		}
+		return uri.ChannelID, uri.Hints[0], nil
+	}
+
 	idx := strings.Index(s, "@")
 	if idx < 0 {
-		return "", "", fmt.Errorf("expected format: <channel_id>@<host[:port]>")
+		return "", "", fmt.Errorf("expected format: tltv://ID@host[:port] or ID@host[:port]")
 	}
 	channelID = s[:idx]
 	host = s[idx+1:]

@@ -40,7 +40,7 @@ make install    # installs to $GOPATH/bin
 tltv keygen
 
 # Mine a vanity channel ID
-tltv vanity -count 1 cool
+tltv vanity cool
 
 # Inspect a channel ID
 tltv inspect TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3
@@ -48,7 +48,7 @@ tltv inspect TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3
 # Sign a metadata document
 tltv template metadata > meta.json
 # (edit meta.json with your channel ID)
-tltv sign -key <channel-id>.key -auto-seq < meta.json > signed.json
+tltv sign --key <channel-id>.key --auto-seq < meta.json > signed.json
 
 # Verify a signed document
 tltv verify signed.json
@@ -59,14 +59,18 @@ tltv resolve "tltv://TVabc...@example.com:443"
 # Probe a node
 tltv node example.com
 
-# Fetch and verify channel metadata
+# Fetch and verify channel metadata (both formats work)
+tltv fetch "tltv://TVabc...@example.com:443"
 tltv fetch TVabc...@example.com:443
 
 # Check if a stream is live
-tltv stream TVabc...@example.com:443
+tltv stream "tltv://TVabc...@example.com:443"
 
 # Discover channels across the network
 tltv crawl example.com
+
+# Install shell completions
+tltv completion --install zsh
 ```
 
 ## Commands
@@ -75,15 +79,15 @@ tltv crawl example.com
 
 | Command | Description |
 |---|---|
-| `keygen` | Generate a new Ed25519 keypair and channel ID. Saves the 32-byte seed to `<channel-id>.key`. Use `--out -` to write seed to stdout. |
-| `vanity <pattern>` | Mine channel IDs matching a pattern. Multi-threaded (uses all cores). Modes: `prefix` (default, after TV), `contains`, `suffix`. |
+| `keygen` | Generate a new Ed25519 keypair and channel ID. Saves the seed as hex to `<channel-id>.key`. Use `--output -` (`-o`) to write seed to stdout. |
+| `vanity <pattern>` | Mine channel IDs matching a pattern. Multi-threaded (uses all cores). Modes: `--mode prefix` (default, after TV), `contains`, `suffix`. Defaults to 1 match; use `--count` (`-n`) for more. Use `--output` (`-o`) to set output directory. |
 | `inspect <id>` | Decode a channel ID. Shows the public key, validates format, warns if it's the RFC 8032 test key. |
 
 ### Documents
 
 | Command | Description |
 |---|---|
-| `sign -key <file>` | Sign a JSON document with an Ed25519 seed. Reads from stdin or `-in` file. Use `-auto-seq` to set `seq` and `updated` to now. Validates timestamp formats before signing. |
+| `sign --key <file>` | Sign a JSON document with an Ed25519 seed. Reads from stdin or `--input` file. Use `--auto-seq` to set `seq` and `updated` to now. Short flags: `-k`, `-i`. |
 | `verify [file]` | Verify a signed document's Ed25519 signature and protocol version. Reads from stdin or file. Auto-detects metadata vs. migration documents. Validates migration `to` field. Enforces 64 KB document size limit. |
 | `template <type>` | Output a JSON template (`metadata`, `guide`, or `migration`) with current timestamps. |
 
@@ -100,11 +104,11 @@ tltv crawl example.com
 |---|---|
 | `resolve <uri>` | Resolve a `tltv://` URI end-to-end: try hints, verify metadata, follow migration chains (max 5 hops), check stream. Filters local/private hints unless `--local`. |
 | `node <host>` | Fetch `/.well-known/tltv` from a node. Shows protocol version, channels, and relaying info. |
-| `fetch <id@host>` | Fetch channel metadata and verify its signature. Handles migration documents. Exits non-zero on verification failure. |
-| `guide <id@host>` | Fetch a channel guide and verify its signature. Displays entries in a table. Use `--xmltv` for XMLTV XML output. Exits non-zero on verification failure. |
+| `fetch <uri\|id@host>` | Fetch channel metadata and verify its signature. Accepts `tltv://` URIs or `id@host`. Shows full stream/guide URLs. Exits non-zero on verification failure. |
+| `guide <uri\|id@host>` | Fetch a channel guide and verify its signature. Marks the currently-airing entry. Use `--xmltv` for XMLTV XML output. Exits non-zero on verification failure. |
 | `peers <host>` | Fetch the peer exchange list from a node. |
-| `stream <id@host>` | Check HLS stream availability. Parses the manifest and reports segment count, target duration. |
-| `crawl <host>` | BFS-crawl the gossip network starting from a host. Discovers channels across nodes via peer exchange. |
+| `stream <uri\|id@host>` | Check HLS stream availability. Accepts `tltv://` URIs or `id@host`. Parses the manifest and reports segment count, target duration. |
+| `crawl <host>` | BFS-crawl the gossip network starting from a host. Discovers channels across nodes via peer exchange. Use `--depth` (`-d`) to set max depth. |
 
 ### Operations
 
@@ -112,7 +116,7 @@ tltv crawl example.com
 |---|---|
 | `migrate` | Create a signed key migration document. Requires `-from-key` (old seed) and `-to` (new channel ID). |
 | `update` | Update to the latest release from GitHub. Replaces the current binary in-place. |
-| `completion <shell>` | Generate shell completions for bash, zsh, or fish. |
+| `completion <shell>` | Generate shell completions for bash, zsh, or fish. Use `--install` to write directly to the standard location. |
 | `version` | Show version, protocol version, Go version, and platform. |
 
 ## Global Flags
@@ -126,25 +130,31 @@ tltv crawl example.com
 
 ## Vanity Mining
 
-Channel IDs always start with `TV`. The remaining 44 characters are determined by the Ed25519 public key. The vanity miner brute-forces keypairs until it finds IDs matching your pattern.
+Channel IDs always start with `TV`. Do not include the `TV` prefix in your pattern -- it is implied. The vanity miner brute-forces keypairs until it finds IDs matching your pattern.
 
 ```bash
-# Find IDs starting with TVcoo... (prefix mode, default)
+# Find an ID starting with TVcoo... (prefix mode, default)
 tltv vanity cool
+
+# Find 5 matches
+tltv vanity --count 5 cool
 
 # Find IDs containing "moon" anywhere
 tltv vanity --mode contains moon
 
-# Case-insensitive, stop after 5 matches
-tltv vanity -i -count 5 News
+# Case-insensitive
+tltv vanity -i News
 
-# Use fewer threads
-tltv vanity -threads 4 art
+# Run indefinitely (0 = unlimited)
+tltv vanity --count 0 art
+
+# Save keys to a specific directory
+tltv vanity --output ~/keys cool
 ```
 
 Due to the encoding math, only certain characters are achievable at position 2 (right after TV). Uppercase letters and digits work well for prefix mode. Use `--mode contains` if prefix matching doesn't find results.
 
-Matched keys are saved to `<channel-id>.key` in the current directory.
+Each match saves a hex-encoded `.key` file (the channel's private seed). Use `--output` to choose the output directory.
 
 ### Difficulty estimates (prefix mode, single character after TV)
 
@@ -168,7 +178,7 @@ The implementation is validated against all 7 test vector suites from the [proto
 - **C6** -- Invalid input rejection (malformed IDs, tampered docs, truncated sigs)
 - **C7** -- Key migration document signing and verification
 
-Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection, document size limits, timestamp format validation, local address detection, IPv6 hint parsing, XMLTV time conversion, JCS canonical JSON edge cases, SSRF hint validation, strict document field validation, trailing JSON rejection. Run `make test` to verify (55 tests).
+Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection, document size limits, timestamp format validation, local address detection, IPv6 hint parsing, XMLTV time conversion, JCS canonical JSON edge cases, SSRF hint validation, strict document field validation, trailing JSON rejection, `tltv://` URI target parsing, hex seed file round-trip with binary backward compatibility. Run `make test` to verify (67 tests).
 
 ## Network Commands
 
@@ -176,12 +186,13 @@ Network commands default to HTTPS (port 443). For local development, `localhost`
 
 The `resolve` and `crawl` commands use an SSRF-safe HTTP client that validates hints (rejecting URLs, userinfo, paths) and checks resolved DNS addresses against private/loopback/link-local ranges at connection time. Use `--local` to allow local addresses for development.
 
-The `<id@host>` format is used for commands that need both a channel ID and a host:
+Commands that need both a channel ID and a host accept either a `tltv://` URI or the compact `id@host` format:
 
 ```bash
-tltv fetch TVMkVH...@example.com           # HTTPS, port 443
-tltv fetch TVMkVH...@example.com:8443      # HTTPS, custom port
-tltv fetch TVMkVH...@localhost:8000        # HTTP (auto-detected)
+tltv fetch "tltv://TVMkVH...@example.com:443"   # tltv:// URI
+tltv fetch TVMkVH...@example.com                 # compact format, HTTPS port 443
+tltv fetch TVMkVH...@example.com:8443            # custom port
+tltv fetch TVMkVH...@localhost:8000              # HTTP (auto-detected)
 ```
 
 All network commands support `--json` for scripting:
@@ -204,7 +215,7 @@ network.go          Network commands (node, fetch, guide, peers, stream, crawl)
 vanity.go           Multi-threaded vanity channel ID miner
 output.go           Terminal output formatting and colors
 signal.go           OS signal handling
-main_test.go        55 tests against all protocol test vectors + edge cases
+main_test.go        67 tests against all protocol test vectors + edge cases
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 ```
 
