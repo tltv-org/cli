@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-go@v5
         with:
@@ -78,15 +81,16 @@ jobs:
             PRERELEASE=true
           fi
 
-          # Read release notes from annotated tag message (body only, skip subject line)
-          BODY=$(git tag -l --format='%(contents:body)' "${TAG}")
+          # Read release notes from annotated tag message
+          BODY=$(git tag -l --format='%(contents)' "${TAG}")
           if [ -z "$BODY" ]; then
             BODY="Release ${TAG}"
           fi
 
-          # Build JSON payload safely (handles newlines, backticks, quotes)
+          # Build JSON payload safely (handles newlines, backticks, quotes).
+          # Strips the subject line from the tag message if it doesn't start with #.
           export BODY PRERELEASE
-          PAYLOAD=$(python3 -c 'import json,os; print(json.dumps({"tag_name":os.environ["TAG"],"name":"tltv-cli "+os.environ["TAG"],"body":os.environ["BODY"],"draft":False,"prerelease":os.environ["PRERELEASE"]=="true"}))')
+          PAYLOAD=$(python3 -c 'import json,os; b=os.environ["BODY"]; l=b.split("\n"); b="\n".join(l[1:]).lstrip("\n") if l and not l[0].startswith("#") else b; print(json.dumps({"tag_name":os.environ["TAG"],"name":"tltv-cli "+os.environ["TAG"],"body":b,"draft":False,"prerelease":os.environ["PRERELEASE"]=="true"}))')
 
           # Create release
           RESPONSE=$(curl -sS -X POST \
