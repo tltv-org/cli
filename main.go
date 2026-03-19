@@ -54,6 +54,7 @@ func usage() {
 	fmt.Fprintf(w, "  crawl <host>           Crawl the gossip network\n\n")
 	fmt.Fprintf(w, "Operations:\n")
 	fmt.Fprintf(w, "  migrate                Create a migration document\n")
+	fmt.Fprintf(w, "  update                 Update to the latest release\n")
 	fmt.Fprintf(w, "  completion <shell>     Generate shell completions (bash, zsh, fish)\n")
 	fmt.Fprintf(w, "  version                Show version\n\n")
 	fmt.Fprintf(w, "Use \"tltv <command> -h\" for help with a specific command.\n")
@@ -146,6 +147,8 @@ dispatch:
 		cmdMigrate(cmdArgs)
 	case "completion":
 		cmdCompletion(cmdArgs)
+	case "update":
+		cmdUpdate(cmdArgs)
 	case "version":
 		cmdVersion()
 	case "":
@@ -785,7 +788,7 @@ var allCommands = []string{
 	"sign", "verify", "template",
 	"parse", "format",
 	"resolve", "node", "fetch", "guide", "peers", "stream", "crawl",
-	"migrate", "completion", "version",
+	"migrate", "update", "completion", "version",
 }
 
 func cmdCompletion(args []string) {

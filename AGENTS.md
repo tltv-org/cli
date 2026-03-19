@@ -105,9 +105,15 @@ Version injection: `-ldflags "-X main.version=X.Y.Z"`
 
 - Author: `Philo Farnsworth <farnsworth27@protonmail.com>`
 - **All commits must be authored as Philo.** Do not commit as the agent identity. The GitHub release squash ensures only Philo appears in public history, but Forgejo history should also use the correct author.
+- **Both author AND committer must be Philo.** `--author` alone is not enough -- GitHub displays the committer too. Use `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` env vars:
+  ```bash
+  GIT_COMMITTER_NAME="Philo Farnsworth" GIT_COMMITTER_EMAIL="farnsworth27@protonmail.com" \
+      git commit --author="Philo Farnsworth <farnsworth27@protonmail.com>" -m "message"
+  ```
 - Do not include Co-Authored-By lines in commit messages
-- `origin` -- Forgejo (git.plutoniumtech.com/tltv/cli)
-- `github` -- GitHub (github.com/tltv-org/cli). Public release. Squashed history.
+- `origin` -- Forgejo (git.plutoniumtech.com/tltv/cli). Full history. Push here normally.
+- `github` -- GitHub (github.com/tltv-org/cli). Public release. Curated history.
+- `gh-push` -- Local branch tracking `github/main`. Used to stage commits for GitHub.
 
 ### Branching
 
@@ -143,36 +149,38 @@ Use `flag.NewFlagSet` for the command. Flags must come before positional argumen
 
 ### GitHub Release Process
 
-GitHub gets a squashed single-commit release. Forgejo keeps the full history.
+GitHub gets curated commits (no Forgejo history). Changes are overlaid onto GitHub's
+existing history as normal incremental commits.
 
-1. Finalize all changes on `dev`, merge to `main`, push to `origin` (Forgejo).
+To push changes to GitHub:
+
+1. Finalize all changes on `main` and push to `origin` (Forgejo).
 2. Run tests: `make test`
-3. **Privacy audit** -- grep the entire repo for private info before public release:
-   - Internal IPs, hostnames, credentials, tokens
-   - Forgejo URLs (`git.plutoniumtech.com`)
-   - Agent identities, email addresses not meant for public
-   - Any file that shouldn't be public (AGENTS.md, notes, drafts)
+3. Overlay current files onto GitHub's history:
    ```bash
-   grep -rn 'plutonium\|agent1\|10\.\|192\.168\|\.local' --include='*.go' --include='*.md' --include='*.yml'
+   git checkout gh-push
+   git checkout main -- .gitignore .github/ LICENSE README.md Makefile go.mod *.go
    ```
-4. Create an orphan branch for GitHub:
+4. Do NOT include: AGENTS.md or anything not meant for public.
    ```bash
-   git checkout --orphan github-release
-   git reset
-   git add .gitignore .github/ LICENSE README.md Makefile go.mod \
-       *.go
+   git reset HEAD AGENTS.md 2>/dev/null
+   git checkout -- AGENTS.md 2>/dev/null
    ```
-5. Do NOT include: AGENTS.md or anything not meant for public.
-6. Commit with a clean message (authored as Philo):
+5. Commit with author set to Philo:
    ```bash
-   git commit --author="Philo Farnsworth <farnsworth27@protonmail.com>" \
-       -m "TLTV CLI vX.Y.Z
-
-   <one paragraph summary>"
+   GIT_AUTHOR_NAME="Philo Farnsworth" GIT_AUTHOR_EMAIL="farnsworth27@protonmail.com" \
+   GIT_COMMITTER_NAME="Philo Farnsworth" GIT_COMMITTER_EMAIL="farnsworth27@protonmail.com" \
+   git commit -m "<description of changes>"
    ```
-7. Push and tag:
+6. Push (normal push, not force):
    ```bash
-   git push github github-release:main --force
+   git push github gh-push:main
+   ```
+7. For version releases, also push a tag:
+   ```bash
    git push github <commit-hash>:refs/tags/vX.Y.Z
    ```
-8. Switch back: `git checkout -f dev`
+8. Switch back:
+   ```bash
+   git checkout dev
+   ```

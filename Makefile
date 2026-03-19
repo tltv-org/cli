@@ -21,7 +21,7 @@ clean:
 # Produces tar.gz archives plus checksums.
 release: clean
 	@mkdir -p dist
-	@for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 freebsd/amd64; do \
+	@	for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 freebsd/amd64; do \
 		GOOS=$${pair%/*}; \
 		GOARCH=$${pair#*/}; \
 		BIN=$(BINARY); \
@@ -29,7 +29,11 @@ release: clean
 		echo "Building $$GOOS/$$GOARCH..."; \
 		CGO_ENABLED=0 GOOS=$$GOOS GOARCH=$$GOARCH go build $(LDFLAGS) -o dist/$$BIN .; \
 		ARCHIVE=$(BINARY)-cli_$(VERSION)_$$GOOS-$$GOARCH; \
-		tar -czf dist/$$ARCHIVE.tar.gz -C dist $$BIN; \
+		if [ "$$GOOS" = "windows" ]; then \
+			(cd dist && zip $$ARCHIVE.zip $$BIN); \
+		else \
+			tar -czf dist/$$ARCHIVE.tar.gz -C dist $$BIN; \
+		fi; \
 		rm dist/$$BIN; \
 	done
 	@cd dist && sha256sum * > checksums.txt
