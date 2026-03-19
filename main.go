@@ -16,6 +16,38 @@ import (
 
 var version = "dev"
 
+// readSeed reads an Ed25519 seed from a file, accepting either:
+//   - 64-byte hex-encoded text (new format)
+//   - 32-byte raw binary (old format, for backward compatibility)
+func readSeed(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Strip trailing newline from text files
+	data = []byte(strings.TrimSpace(string(data)))
+
+	if len(data) == ed25519.SeedSize*2 {
+		// Hex-encoded seed
+		seed, err := hex.DecodeString(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("invalid hex in key file: %w", err)
+		}
+		return seed, nil
+	}
+	if len(data) == ed25519.SeedSize {
+		// Raw binary seed (backward compat)
+		return data, nil
+	}
+	return nil, fmt.Errorf("invalid key file: expected %d hex chars or %d raw bytes, got %d bytes",
+		ed25519.SeedSize*2, ed25519.SeedSize, len(data))
+}
+
+// writeSeed writes an Ed25519 seed as hex text with a trailing newline.
+func writeSeed(path string, seed []byte) error {
+	return os.WriteFile(path, []byte(hex.EncodeToString(seed)+"\n"), 0600)
+}
+
 // Global flags
 var (
 	flagJSON     bool
@@ -26,7 +58,7 @@ var (
 
 func usage() {
 	w := os.Stderr
-	fmt.Fprintf(w, "tltv - TLTV Federation Protocol CLI (v%s, protocol v1)\n\n", version)
+	fmt.Fprintf(w, "tltv - TLTV Federation Protocol CLI (%s, protocol v1)\n\n", version)
 	fmt.Fprintf(w, "Usage: tltv [flags] <command> [options]\n\n")
 	fmt.Fprintf(w, "Global Flags:\n")
 	fmt.Fprintf(w, "  --json        Machine-readable JSON output\n")
@@ -47,10 +79,10 @@ func usage() {
 	fmt.Fprintf(w, "Network:\n")
 	fmt.Fprintf(w, "  resolve <uri>          Resolve a tltv:// URI end-to-end\n")
 	fmt.Fprintf(w, "  node <host>            Probe a TLTV node\n")
-	fmt.Fprintf(w, "  fetch <id@host>        Fetch channel metadata\n")
-	fmt.Fprintf(w, "  guide <id@host>        Fetch channel guide\n")
+	fmt.Fprintf(w, "  fetch <uri|id@host>    Fetch channel metadata\n")
+	fmt.Fprintf(w, "  guide <uri|id@host>    Fetch channel guide\n")
 	fmt.Fprintf(w, "  peers <host>           List peers from a node\n")
-	fmt.Fprintf(w, "  stream <id@host>       Check stream availability\n")
+	fmt.Fprintf(w, "  stream <uri|id@host>   Check stream availability\n")
 	fmt.Fprintf(w, "  crawl <host>           Crawl the gossip network\n\n")
 	fmt.Fprintf(w, "Operations:\n")
 	fmt.Fprintf(w, "  migrate                Create a migration document\n")
@@ -165,12 +197,13 @@ dispatch:
 
 func cmdKeygen(args []string) {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
-	outFile := fs.String("out", "", "output file for seed (- for stdout, default: <channel-id>.key)")
+	outFile := fs.String("output", "", "output file for seed (- for stdout, default: <channel-id>.key)")
+	fs.StringVar(outFile, "o", "", "alias for --output")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Generate a new TLTV channel keypair\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv keygen [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -o, --output string   output file (- for stdout, default: <channel-id>.key)\n")
 	}
 	fs.Parse(args)
 
@@ -189,20 +222,20 @@ func cmdKeygen(args []string) {
 		filename = channelID + ".key"
 	}
 
-	// Support --out - for writing seed to stdout
+	// Support --output - for writing seed to stdout (hex)
 	if filename == "-" {
-		os.Stdout.Write(seed)
+		fmt.Fprintln(os.Stdout, hex.EncodeToString(seed))
 		fmt.Fprintf(os.Stderr, "%s\n", channelID)
 		return
 	}
 
 	// Check if file exists
 	if _, err := os.Stat(filename); err == nil {
-		fatal("file already exists: %s (use -out to specify a different path)", filename)
+		fatal("file already exists: %s (use -o to specify a different path)", filename)
 	}
 
-	// Write seed file
-	if err := os.WriteFile(filename, seed, 0600); err != nil {
+	// Write seed file (hex-encoded)
+	if err := writeSeed(filename, seed); err != nil {
 		fatal("could not write key file: %v", err)
 	}
 
@@ -238,21 +271,33 @@ func cmdKeygen(args []string) {
 func cmdVanity(args []string) {
 	fs := flag.NewFlagSet("vanity", flag.ExitOnError)
 	threads := fs.Int("threads", runtime.NumCPU(), "number of mining threads")
+	fs.IntVar(threads, "t", runtime.NumCPU(), "alias for --threads")
 	mode := fs.String("mode", "prefix", "match mode: prefix (after TV), contains, suffix")
+	fs.StringVar(mode, "m", "prefix", "alias for --mode")
 	ignoreCase := fs.Bool("i", false, "case-insensitive matching")
-	count := fs.Int("count", 0, "stop after N matches (0 = unlimited)")
+	count := fs.Int("count", 1, "number of matches to find (0 = unlimited)")
+	fs.IntVar(count, "n", 1, "alias for --count")
+	outDir := fs.String("output", ".", "directory to save .key files")
+	fs.StringVar(outDir, "o", ".", "alias for --output")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Mine vanity channel IDs matching a pattern\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv vanity [flags] <pattern>\n\n")
-		fmt.Fprintf(os.Stderr, "Channel IDs always start with \"TV\". By default, the pattern\n")
-		fmt.Fprintf(os.Stderr, "is matched against what follows TV (prefix mode).\n\n")
+		fmt.Fprintf(os.Stderr, "All channel IDs start with \"TV\". Do not include the TV prefix\n")
+		fmt.Fprintf(os.Stderr, "in your pattern -- it is implied. In prefix mode (default), the\n")
+		fmt.Fprintf(os.Stderr, "pattern is matched immediately after TV.\n\n")
+		fmt.Fprintf(os.Stderr, "Each match saves a .key file containing the channel's private key.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
-		fmt.Fprintf(os.Stderr, "  tltv vanity cool              Find TVcool...\n")
-		fmt.Fprintf(os.Stderr, "  tltv vanity --mode contains X  Find ...X... anywhere\n")
-		fmt.Fprintf(os.Stderr, "  tltv vanity -i MOON            Case-insensitive\n")
-		fmt.Fprintf(os.Stderr, "  tltv vanity -count 1 test      Stop after first match\n\n")
+		fmt.Fprintf(os.Stderr, "  tltv vanity cool                Find TVcool...\n")
+		fmt.Fprintf(os.Stderr, "  tltv vanity -n 5 cool           Find 5 matches\n")
+		fmt.Fprintf(os.Stderr, "  tltv vanity -m contains X       Find ...X... anywhere\n")
+		fmt.Fprintf(os.Stderr, "  tltv vanity -i MOON             Case-insensitive\n")
+		fmt.Fprintf(os.Stderr, "  tltv vanity -o ~/keys cool      Save keys to ~/keys/\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --threads int   number of mining threads (default %d)\n", runtime.NumCPU())
+		fmt.Fprintf(os.Stderr, "  -m, --mode string   match mode: prefix, contains, suffix (default \"prefix\")\n")
+		fmt.Fprintf(os.Stderr, "  -i                  case-insensitive matching\n")
+		fmt.Fprintf(os.Stderr, "  -n, --count int     number of matches to find, 0 = unlimited (default 1)\n")
+		fmt.Fprintf(os.Stderr, "  -o, --output string   directory to save .key files (default \".\")\n")
 	}
 	fs.Parse(args)
 
@@ -262,7 +307,7 @@ func cmdVanity(args []string) {
 	}
 
 	pattern := fs.Arg(0)
-	runVanityMiner(pattern, *mode, *ignoreCase, *threads, *count)
+	runVanityMiner(pattern, *mode, *ignoreCase, *threads, *count, *outDir)
 }
 
 // ---------- inspect ----------
@@ -271,7 +316,7 @@ func cmdInspect(args []string) {
 	fs := flag.NewFlagSet("inspect", flag.ExitOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Inspect and validate a TLTV channel ID\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv inspect <channel-id>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv inspect <channel-id | tltv:// URI>\n\n")
 	}
 	fs.Parse(args)
 
@@ -281,6 +326,14 @@ func cmdInspect(args []string) {
 	}
 
 	id := fs.Arg(0)
+	// Accept tltv:// URIs -- extract just the channel ID
+	if strings.HasPrefix(id, tltvScheme) {
+		uri, err := parseTLTVUri(id)
+		if err != nil {
+			fatal("invalid URI: %v", err)
+		}
+		id = uri.ChannelID
+	}
 	pubKey, err := parseChannelID(id)
 	if err != nil {
 		fatal("invalid channel ID: %v", err)
@@ -317,18 +370,22 @@ func cmdInspect(args []string) {
 func cmdSign(args []string) {
 	fs := flag.NewFlagSet("sign", flag.ExitOnError)
 	keyFile := fs.String("key", "", "path to seed file (required)")
-	inFile := fs.String("in", "", "input JSON file (default: stdin)")
+	fs.StringVar(keyFile, "k", "", "alias for --key")
+	inFile := fs.String("input", "", "input JSON file (default: stdin)")
+	fs.StringVar(inFile, "i", "", "alias for --input")
 	autoSeq := fs.Bool("auto-seq", false, "set seq to current time and updated to now")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Sign a TLTV JSON document\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv sign -key <seed-file> [flags]\n\n")
-		fmt.Fprintf(os.Stderr, "Reads a JSON document from stdin (or -in file), signs it,\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv sign -k <seed-file> [flags]\n\n")
+		fmt.Fprintf(os.Stderr, "Reads a JSON document from stdin (or --input file), signs it,\n")
 		fmt.Fprintf(os.Stderr, "and outputs the signed document to stdout.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
-		fmt.Fprintf(os.Stderr, "  tltv sign -key channel.key < metadata.json\n")
-		fmt.Fprintf(os.Stderr, "  tltv sign -key channel.key -in doc.json -auto-seq\n\n")
+		fmt.Fprintf(os.Stderr, "  tltv sign -k channel.key < metadata.json\n")
+		fmt.Fprintf(os.Stderr, "  tltv sign -k channel.key -i doc.json --auto-seq\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -k, --key string      path to seed file (required)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --input string    input JSON file (default: stdin)\n")
+		fmt.Fprintf(os.Stderr, "      --auto-seq        set seq to current time and updated to now\n")
 	}
 	fs.Parse(args)
 
@@ -337,12 +394,9 @@ func cmdSign(args []string) {
 	}
 
 	// Read seed
-	seed, err := os.ReadFile(*keyFile)
+	seed, err := readSeed(*keyFile)
 	if err != nil {
 		fatal("could not read key file: %v", err)
-	}
-	if len(seed) != ed25519.SeedSize {
-		fatal("invalid seed file: expected %d bytes, got %d", ed25519.SeedSize, len(seed))
 	}
 
 	priv, pub := keyFromSeed(seed)
@@ -713,12 +767,9 @@ func cmdMigrate(args []string) {
 	}
 
 	// Read old key
-	seed, err := os.ReadFile(*fromKey)
+	seed, err := readSeed(*fromKey)
 	if err != nil {
 		fatal("could not read key file: %v", err)
-	}
-	if len(seed) != ed25519.SeedSize {
-		fatal("invalid seed file: expected %d bytes, got %d", ed25519.SeedSize, len(seed))
 	}
 
 	priv, pub := keyFromSeed(seed)
@@ -793,14 +844,18 @@ var allCommands = []string{
 
 func cmdCompletion(args []string) {
 	fs := flag.NewFlagSet("completion", flag.ExitOnError)
+	install := fs.Bool("install", false, "write completions to the standard shell location")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Generate shell completion scripts\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv completion <shell>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv completion [--install] <shell>\n\n")
 		fmt.Fprintf(os.Stderr, "Shells: bash, zsh, fish\n\n")
-		fmt.Fprintf(os.Stderr, "Install:\n")
-		fmt.Fprintf(os.Stderr, "  bash:  tltv completion bash > /etc/bash_completion.d/tltv\n")
-		fmt.Fprintf(os.Stderr, "  zsh:   tltv completion zsh > \"${fpath[1]}/_tltv\"\n")
-		fmt.Fprintf(os.Stderr, "  fish:  tltv completion fish > ~/.config/fish/completions/tltv.fish\n\n")
+		fmt.Fprintf(os.Stderr, "Without --install, prints the script to stdout.\n")
+		fmt.Fprintf(os.Stderr, "With --install, writes to the standard location:\n")
+		fmt.Fprintf(os.Stderr, "  bash:  /etc/bash_completion.d/tltv\n")
+		fmt.Fprintf(os.Stderr, "  zsh:   /usr/local/share/zsh/site-functions/_tltv\n")
+		fmt.Fprintf(os.Stderr, "  fish:  ~/.config/fish/completions/tltv.fish\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
 	}
 	fs.Parse(args)
 
@@ -809,16 +864,40 @@ func cmdCompletion(args []string) {
 		os.Exit(1)
 	}
 
-	switch fs.Arg(0) {
+	shell := fs.Arg(0)
+	var script string
+	var installPath string
+
+	switch shell {
 	case "bash":
-		fmt.Print(completionBash())
+		script = completionBash()
+		installPath = "/etc/bash_completion.d/tltv"
 	case "zsh":
-		fmt.Print(completionZsh())
+		script = completionZsh()
+		installPath = "/usr/local/share/zsh/site-functions/_tltv"
 	case "fish":
-		fmt.Print(completionFish())
+		script = completionFish()
+		home, _ := os.UserHomeDir()
+		installPath = home + "/.config/fish/completions/tltv.fish"
 	default:
-		fatal("unknown shell: %s (supported: bash, zsh, fish)", fs.Arg(0))
+		fatal("unknown shell: %s (supported: bash, zsh, fish)", shell)
 	}
+
+	if !*install {
+		fmt.Print(script)
+		return
+	}
+
+	// Ensure parent directory exists
+	dir := installPath[:strings.LastIndex(installPath, "/")]
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fatal("could not create directory %s: %v\n  try: sudo tltv completion --install %s", dir, err, shell)
+	}
+
+	if err := os.WriteFile(installPath, []byte(script), 0644); err != nil {
+		fatal("could not write %s: %v\n  try: sudo tltv completion --install %s", installPath, err, shell)
+	}
+	fmt.Fprintf(os.Stderr, "Installed %s completions to %s\n", shell, installPath)
 }
 
 func completionBash() string {
@@ -843,7 +922,7 @@ _tltv() {
         completion)
             COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") )
             ;;
-        -key|-in|-out|-from-key)
+        -key|-k|-input|-i|-output|-o|-from-key)
             COMPREPLY=( $(compgen -f -- "${cur}") )
             ;;
         verify)

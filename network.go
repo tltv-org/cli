@@ -50,7 +50,7 @@ func cmdNode(args []string) {
 		printHeader("Channels")
 		var rows [][]string
 		for _, ch := range info.Channels {
-			rows = append(rows, []string{truncateID(ch.ID, 24), ch.Name})
+			rows = append(rows, []string{ch.ID, ch.Name})
 		}
 		printTable([]string{"ID", "Name"}, rows)
 	}
@@ -59,7 +59,7 @@ func cmdNode(args []string) {
 		printHeader("Relaying")
 		var rows [][]string
 		for _, ch := range info.Relaying {
-			rows = append(rows, []string{truncateID(ch.ID, 24), ch.Name})
+			rows = append(rows, []string{ch.ID, ch.Name})
 		}
 		printTable([]string{"ID", "Name"}, rows)
 	}
@@ -69,15 +69,18 @@ func cmdNode(args []string) {
 func cmdFetch(args []string) {
 	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
 	token := fs.String("token", "", "access token for private channels")
+	fs.StringVar(token, "t", "", "alias for --token")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Fetch and verify channel metadata\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv fetch <channel_id@host[:port]>\n\n")
-		fmt.Fprintf(os.Stderr, "Examples:\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv fetch <target>\n\n")
+		fmt.Fprintf(os.Stderr, "Target can be a tltv:// URI or compact ID@host format:\n")
+		fmt.Fprintf(os.Stderr, "  tltv fetch \"tltv://TVMkVH...@example.com:443\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv fetch TVMkVH...@example.com\n")
 		fmt.Fprintf(os.Stderr, "  tltv fetch TVMkVH...@localhost:8000\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
+		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
 	}
 	fs.Parse(args)
 
@@ -109,11 +112,18 @@ func cmdFetch(args []string) {
 	}
 
 	if flagJSON {
+		base := client.baseURL(host)
 		result := map[string]interface{}{
 			"channel_id": channelID,
 			"host":       host,
 			"verified":   !*noVerify && sigErr == nil,
 			"document":   doc,
+		}
+		if stream := getString(doc, "stream"); stream != "" {
+			result["stream_url"] = base + stream
+		}
+		if guide := getString(doc, "guide"); guide != "" {
+			result["guide_url"] = base + guide
 		}
 		if sigErr != nil {
 			result["verification_error"] = sigErr.Error()
@@ -151,9 +161,14 @@ func cmdFetch(args []string) {
 		}
 		printField("Status", getStringDefault(doc, "status", "active"))
 		printField("Access", getStringDefault(doc, "access", "public"))
-		printField("Stream", getString(doc, "stream"))
+
+		// Show full URLs so the user can paste them directly into a player
+		base := client.baseURL(host)
+		if stream := getString(doc, "stream"); stream != "" {
+			printField("Stream", base+stream)
+		}
 		if guide := getString(doc, "guide"); guide != "" {
-			printField("Guide", guide)
+			printField("Guide", base+guide)
 		}
 		printField("Updated", getString(doc, "updated"))
 		printField("Seq", getString(doc, "seq"))
@@ -188,13 +203,19 @@ func cmdFetch(args []string) {
 func cmdGuide(args []string) {
 	fs := flag.NewFlagSet("guide", flag.ExitOnError)
 	token := fs.String("token", "", "access token for private channels")
+	fs.StringVar(token, "t", "", "alias for --token")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
 	xmltv := fs.Bool("xmltv", false, "output as XMLTV XML")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Fetch and verify a channel guide\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv guide <channel_id@host[:port]>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv guide <target>\n\n")
+		fmt.Fprintf(os.Stderr, "Target can be a tltv:// URI or compact ID@host format:\n")
+		fmt.Fprintf(os.Stderr, "  tltv guide \"tltv://TVMkVH...@example.com:443\"\n")
+		fmt.Fprintf(os.Stderr, "  tltv guide TVMkVH...@example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
+		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
+		fmt.Fprintf(os.Stderr, "      --xmltv           output as XMLTV XML\n")
 	}
 	fs.Parse(args)
 
@@ -268,6 +289,7 @@ func cmdGuide(args []string) {
 
 	entries, _ := doc["entries"].([]interface{})
 	if len(entries) > 0 {
+		now := time.Now().UTC()
 		printHeader(fmt.Sprintf("Entries (%d)", len(entries)))
 		var rows [][]string
 		for _, e := range entries {
@@ -275,23 +297,37 @@ func cmdGuide(args []string) {
 			if entry == nil {
 				continue
 			}
-			start := getString(entry, "start")
-			end := getString(entry, "end")
+			startStr := getString(entry, "start")
+			endStr := getString(entry, "end")
 			title := getString(entry, "title")
 			cat := getString(entry, "category")
 
+			// Check if this entry is currently airing
+			startT, startErr := time.Parse("2006-01-02T15:04:05Z", startStr)
+			endT, endErr := time.Parse("2006-01-02T15:04:05Z", endStr)
+			nowPlaying := startErr == nil && endErr == nil && !now.Before(startT) && now.Before(endT)
+
 			// Format times more compactly
-			if t, err := time.Parse("2006-01-02T15:04:05Z", start); err == nil {
-				start = t.Format("Jan 02 15:04")
+			start := startStr
+			end := endStr
+			if startErr == nil {
+				start = startT.Format("Jan 02 15:04")
 			}
-			if t, err := time.Parse("2006-01-02T15:04:05Z", end); err == nil {
-				end = t.Format("15:04")
+			if endErr == nil {
+				end = endT.Format("15:04")
 			}
 
-			timeRange := start + " - " + end
+			marker := " "
+			if nowPlaying {
+				marker = ">"
+				if useColor {
+					marker = c(cGreen, ">")
+				}
+			}
+			timeRange := marker + " " + start + " - " + end
 			rows = append(rows, []string{timeRange, title, cat})
 		}
-		printTable([]string{"Time", "Title", "Category"}, rows)
+		printTable([]string{"  Time", "Title", "Category"}, rows)
 	}
 	fmt.Println()
 
@@ -339,7 +375,7 @@ func cmdPeers(args []string) {
 				hints = "-"
 			}
 			rows = append(rows, []string{
-				truncateID(p.ID, 24),
+				p.ID,
 				p.Name,
 				hints,
 				p.LastSeen,
@@ -353,11 +389,15 @@ func cmdPeers(args []string) {
 func cmdStream(args []string) {
 	fs := flag.NewFlagSet("stream", flag.ExitOnError)
 	token := fs.String("token", "", "access token for private channels")
+	fs.StringVar(token, "t", "", "alias for --token")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Check stream availability for a channel\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv stream <channel_id@host[:port]>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv stream <target>\n\n")
+		fmt.Fprintf(os.Stderr, "Target can be a tltv:// URI or compact ID@host format:\n")
+		fmt.Fprintf(os.Stderr, "  tltv stream \"tltv://TVMkVH...@example.com:443\"\n")
+		fmt.Fprintf(os.Stderr, "  tltv stream TVMkVH...@example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
 	}
 	fs.Parse(args)
 
@@ -393,7 +433,7 @@ func cmdStream(args []string) {
 		return
 	}
 
-	printHeader("Stream: " + truncateID(channelID, 24) + " @ " + host)
+	printHeader("Stream: " + channelID + " @ " + host)
 
 	switch status {
 	case 200:
@@ -440,11 +480,12 @@ func cmdStream(args []string) {
 func cmdCrawl(args []string) {
 	fs := flag.NewFlagSet("crawl", flag.ExitOnError)
 	depth := fs.Int("depth", 2, "maximum crawl depth")
+	fs.IntVar(depth, "d", 2, "alias for --depth")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Crawl the peer gossip network to discover channels\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv crawl <host[:port]>\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -d, --depth int       maximum crawl depth (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -589,7 +630,7 @@ func cmdCrawl(args []string) {
 		var rows [][]string
 		for _, ch := range channels {
 			rows = append(rows, []string{
-				truncateID(ch.ID, 24),
+				ch.ID,
 				ch.Name,
 				ch.Host,
 				ch.Source,
@@ -603,6 +644,7 @@ func cmdCrawl(args []string) {
 func cmdResolve(args []string) {
 	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
 	token := fs.String("token", "", "access token (overrides URI token)")
+	fs.StringVar(token, "t", "", "alias for --token")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Resolve a tltv:// URI end-to-end\n\n")
@@ -613,7 +655,8 @@ func cmdResolve(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...@example.com:443\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...?via=relay1.com:443,relay2.com:443\"\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -t, --token string    access token (overrides URI token)\n")
+		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
 	}
 	fs.Parse(args)
 
@@ -796,18 +839,18 @@ func cmdResolve(args []string) {
 
 		// Detect loops
 		if visited[toID] {
-			migrationErr = fmt.Errorf("migration loop detected at %s", truncateID(toID, 24))
+			migrationErr = fmt.Errorf("migration loop detected at %s", toID)
 			break
 		}
 		visited[toID] = true
 
 		if !flagJSON {
-			printWarn(fmt.Sprintf("Migrated -> %s (hop %d)", truncateID(toID, 24), hop+1))
+			printWarn(fmt.Sprintf("Migrated -> %s (hop %d)", toID, hop+1))
 		}
 
 		newDoc, err := client.FetchMetadata(resolvedHost, toID, tok)
 		if err != nil {
-			migrationErr = fmt.Errorf("could not follow migration to %s: %v", truncateID(toID, 24), err)
+			migrationErr = fmt.Errorf("could not follow migration to %s: %v", toID, err)
 			break
 		}
 
@@ -819,7 +862,7 @@ func cmdResolve(args []string) {
 				err = verifyDocument(newDoc, toID)
 			}
 			if err != nil {
-				migrationErr = fmt.Errorf("migration target %s verification failed: %v", truncateID(toID, 24), err)
+				migrationErr = fmt.Errorf("migration target %s verification failed: %v", toID, err)
 				break
 			}
 		}

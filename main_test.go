@@ -1368,6 +1368,252 @@ func TestGuideEntryTimestampValidation(t *testing.T) {
 	}
 }
 
+// ---------- parseTarget with tltv:// URI support ----------
+
+func TestParseTargetCompact(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		channelID string
+		host      string
+	}{
+		{
+			"basic",
+			"TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com",
+			"TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3",
+			"example.com",
+		},
+		{
+			"with port",
+			"TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:8443",
+			"TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3",
+			"example.com:8443",
+		},
+		{
+			"localhost",
+			"TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@localhost:8000",
+			"TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3",
+			"localhost:8000",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, host, err := parseTarget(tc.input)
+			if err != nil {
+				t.Fatalf("parseTarget(%q): %v", tc.input, err)
+			}
+			if id != tc.channelID {
+				t.Errorf("channelID: got %q, want %q", id, tc.channelID)
+			}
+			if host != tc.host {
+				t.Errorf("host: got %q, want %q", host, tc.host)
+			}
+		})
+	}
+}
+
+func TestParseTargetURI(t *testing.T) {
+	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
+
+	cases := []struct {
+		name      string
+		input     string
+		channelID string
+		host      string
+	}{
+		{
+			"basic URI",
+			"tltv://" + channelID + "@example.com:443",
+			channelID,
+			"example.com:443",
+		},
+		{
+			"URI with port",
+			"tltv://" + channelID + "@localhost:8000",
+			channelID,
+			"localhost:8000",
+		},
+		{
+			"URI with via hint uses first",
+			"tltv://" + channelID + "@origin.com:443?via=relay.com:8000",
+			channelID,
+			"origin.com:443",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, host, err := parseTarget(tc.input)
+			if err != nil {
+				t.Fatalf("parseTarget(%q): %v", tc.input, err)
+			}
+			if id != tc.channelID {
+				t.Errorf("channelID: got %q, want %q", id, tc.channelID)
+			}
+			if host != tc.host {
+				t.Errorf("host: got %q, want %q", host, tc.host)
+			}
+		})
+	}
+}
+
+func TestParseTargetErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"no @ or scheme", "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"},
+		{"empty host compact", "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@"},
+		{"URI without hint", "tltv://TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"},
+		{"bad URI scheme", "tltv://"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := parseTarget(tc.input)
+			if err == nil {
+				t.Fatalf("parseTarget(%q) should have failed", tc.input)
+			}
+		})
+	}
+}
+
+// ---------- Seed file format (hex + backward compat) ----------
+
+func TestWriteAndReadSeedHex(t *testing.T) {
+	// Generate a seed
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := priv.Seed()
+
+	// Write as hex
+	path := t.TempDir() + "/test.key"
+	if err := writeSeed(path, seed); err != nil {
+		t.Fatalf("writeSeed: %v", err)
+	}
+
+	// Read back
+	got, err := readSeed(path)
+	if err != nil {
+		t.Fatalf("readSeed: %v", err)
+	}
+	if hex.EncodeToString(got) != hex.EncodeToString(seed) {
+		t.Fatalf("seed mismatch: got %x, want %x", got, seed)
+	}
+
+	// Verify the file is hex text (not binary)
+	data, _ := os.ReadFile(path)
+	text := strings.TrimSpace(string(data))
+	if len(text) != ed25519.SeedSize*2 {
+		t.Fatalf("file should be %d hex chars, got %d bytes", ed25519.SeedSize*2, len(data))
+	}
+	// Verify all chars are valid hex
+	if _, err := hex.DecodeString(text); err != nil {
+		t.Fatalf("file content is not valid hex: %v", err)
+	}
+}
+
+func TestReadSeedBinaryBackwardCompat(t *testing.T) {
+	// Simulate old-format binary key file
+	_, priv, _ := ed25519.GenerateKey(nil)
+	seed := priv.Seed()
+
+	path := t.TempDir() + "/old.key"
+	os.WriteFile(path, seed, 0600) // raw 32 bytes
+
+	got, err := readSeed(path)
+	if err != nil {
+		t.Fatalf("readSeed should accept binary seed: %v", err)
+	}
+	if hex.EncodeToString(got) != hex.EncodeToString(seed) {
+		t.Fatalf("seed mismatch")
+	}
+}
+
+func TestReadSeedInvalid(t *testing.T) {
+	dir := t.TempDir()
+
+	// Wrong length
+	path := dir + "/bad.key"
+	os.WriteFile(path, []byte("too short"), 0600)
+	_, err := readSeed(path)
+	if err == nil {
+		t.Fatal("readSeed should reject wrong-length file")
+	}
+
+	// Invalid hex chars (right length but not hex)
+	path2 := dir + "/badhex.key"
+	os.WriteFile(path2, []byte(strings.Repeat("zz", 32)+"\n"), 0600)
+	_, err = readSeed(path2)
+	if err == nil {
+		t.Fatal("readSeed should reject invalid hex")
+	}
+
+	// File doesn't exist
+	_, err = readSeed(dir + "/missing.key")
+	if err == nil {
+		t.Fatal("readSeed should fail on missing file")
+	}
+}
+
+func TestReadSeedHexWithTrailingNewline(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	seed := priv.Seed()
+
+	// Write hex with trailing newline (as writeSeed does)
+	path := t.TempDir() + "/newline.key"
+	os.WriteFile(path, []byte(hex.EncodeToString(seed)+"\n"), 0600)
+
+	got, err := readSeed(path)
+	if err != nil {
+		t.Fatalf("readSeed should handle trailing newline: %v", err)
+	}
+	if hex.EncodeToString(got) != hex.EncodeToString(seed) {
+		t.Fatalf("seed mismatch")
+	}
+}
+
+func TestSeedSignRoundtrip(t *testing.T) {
+	// Generate key, write seed as hex, read it back, sign and verify
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	seed := priv.Seed()
+	channelID := makeChannelID(pub)
+
+	path := t.TempDir() + "/roundtrip.key"
+	writeSeed(path, seed)
+
+	readBack, err := readSeed(path)
+	if err != nil {
+		t.Fatalf("readSeed: %v", err)
+	}
+
+	restoredPriv, restoredPub := keyFromSeed(readBack)
+	if makeChannelID(restoredPub) != channelID {
+		t.Fatal("restored key produces different channel ID")
+	}
+
+	doc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number(fmt.Sprintf("%d", time.Now().Unix())),
+		"id":      channelID,
+		"name":    "Roundtrip Test",
+		"stream":  "/test",
+		"access":  "public",
+		"updated": time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	}
+
+	signed, err := signDocument(doc, restoredPriv)
+	if err != nil {
+		t.Fatalf("signDocument: %v", err)
+	}
+	if err := verifyDocument(signed, channelID); err != nil {
+		t.Fatalf("verifyDocument after hex roundtrip: %v", err)
+	}
+}
+
 // ---------- Integration Tests ----------
 //
 // These tests require a live TLTV node. Set TLTV_TEST_NODE to a host:port

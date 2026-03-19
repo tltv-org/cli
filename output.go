@@ -102,15 +102,6 @@ func fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
-// truncateID shortens a channel ID for display: TVaBcDe...xYz
-func truncateID(id string, maxLen int) string {
-	if len(id) <= maxLen {
-		return id
-	}
-	half := (maxLen - 3) / 2
-	return id[:half+2] + "..." + id[len(id)-half:]
-}
-
 // printTable prints rows with aligned columns.
 func printTable(headers []string, rows [][]string) {
 	if len(rows) == 0 {
