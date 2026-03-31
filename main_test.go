@@ -1831,3 +1831,225 @@ func TestIntegrationCrawlJSON(t *testing.T) {
 
 	t.Logf("crawl result: %d channels, %d peers", len(info.Channels), len(exchange.Peers))
 }
+
+func TestStreamURL(t *testing.T) {
+	client := newClient(false)
+	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
+
+	cases := []struct {
+		name     string
+		host     string
+		token    string
+		expected string
+	}{
+		{
+			"default port",
+			"example.com",
+			"",
+			"https://example.com:443/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"custom port",
+			"example.com:8443",
+			"",
+			"https://example.com:8443/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"with token",
+			"example.com",
+			"secret123",
+			"https://example.com:443/tltv/v1/channels/" + channelID + "/stream.m3u8?token=secret123",
+		},
+		{
+			"localhost uses http",
+			"localhost:8000",
+			"",
+			"http://localhost:8000/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"127.0.0.1 uses http",
+			"127.0.0.1:8000",
+			"",
+			"http://127.0.0.1:8000/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			url := client.baseURL(tc.host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
+			if tc.token != "" {
+				url += "?token=" + tc.token
+			}
+			if url != tc.expected {
+				t.Fatalf("got %q, want %q", url, tc.expected)
+			}
+		})
+	}
+}
+
+// demoNode tries to reach the public TLTV demo server.
+// Returns the host or skips the test if the demo is unreachable.
+func demoNode(t *testing.T) string {
+	t.Helper()
+	const host = "demo.timelooptv.org:443"
+	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
+	if err != nil {
+		t.Skipf("demo node %s unreachable: %v", host, err)
+	}
+	conn.Close()
+	return host
+}
+
+const demoChannelID = "TVLoopRRV7V41vERa1n5xyMibevWCP7zVSnxGJq8va8MvU"
+
+func TestDemoNodeInfo(t *testing.T) {
+	host := demoNode(t)
+	client := newClient(false)
+	info, err := client.FetchNodeInfo(host)
+	if err != nil {
+		t.Fatalf("FetchNodeInfo: %v", err)
+	}
+	if info.Protocol != "tltv" {
+		t.Errorf("protocol: got %q, want %q", info.Protocol, "tltv")
+	}
+	if len(info.Versions) == 0 {
+		t.Error("node reported no protocol versions")
+	}
+	if len(info.Channels) == 0 {
+		t.Error("node has no channels")
+	}
+	// Demo must list the known channel
+	found := false
+	for _, ch := range info.Channels {
+		if ch.ID == demoChannelID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("demo channel %s not found in node info", demoChannelID)
+	}
+	t.Logf("demo node: %d channels, versions %v", len(info.Channels), info.Versions)
+}
+
+func TestDemoFetchAndVerify(t *testing.T) {
+	host := demoNode(t)
+	client := newClient(false)
+
+	doc, err := client.FetchMetadata(host, demoChannelID, "")
+	if err != nil {
+		t.Fatalf("FetchMetadata: %v", err)
+	}
+	if err := verifyDocument(doc, demoChannelID); err != nil {
+		t.Fatalf("verifyDocument failed on demo metadata: %v", err)
+	}
+	if getString(doc, "id") != demoChannelID {
+		t.Errorf("id mismatch: got %q, want %q", getString(doc, "id"), demoChannelID)
+	}
+	t.Logf("demo metadata verified: seq=%v", doc["seq"])
+}
+
+func TestDemoGuideAndVerify(t *testing.T) {
+	host := demoNode(t)
+	client := newClient(false)
+
+	doc, err := client.FetchGuide(host, demoChannelID, "")
+	if err != nil {
+		t.Skipf("guide not available on demo: %v", err)
+	}
+	if err := verifyDocument(doc, demoChannelID); err != nil {
+		t.Fatalf("verifyDocument failed on demo guide: %v", err)
+	}
+	if getString(doc, "from") == "" {
+		t.Error("guide missing 'from' field")
+	}
+	if getString(doc, "until") == "" {
+		t.Error("guide missing 'until' field")
+	}
+	t.Logf("demo guide verified: from=%s until=%s", getString(doc, "from"), getString(doc, "until"))
+}
+
+func TestDemoPeers(t *testing.T) {
+	host := demoNode(t)
+	client := newClient(false)
+
+	exchange, err := client.FetchPeers(host)
+	if err != nil {
+		t.Fatalf("FetchPeers: %v", err)
+	}
+	if exchange == nil {
+		t.Fatal("FetchPeers returned nil")
+	}
+	t.Logf("demo peers: %d", len(exchange.Peers))
+}
+
+func TestDemoStream(t *testing.T) {
+	host := demoNode(t)
+	client := newClient(false)
+
+	status, contentType, body, err := client.CheckStream(host, demoChannelID, "")
+	if err != nil {
+		t.Fatalf("CheckStream: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if !strings.Contains(contentType, "mpegurl") {
+		t.Fatalf("unexpected content-type: %s", contentType)
+	}
+
+	// Verify HLS manifest has segments
+	segments := 0
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, ".ts") || strings.HasSuffix(line, ".m4s") {
+			segments++
+		}
+	}
+	if segments == 0 {
+		t.Fatal("manifest has no segments")
+	}
+	t.Logf("demo stream live: %d segments, %d bytes", segments, len(body))
+}
+
+func TestDemoStreamURL(t *testing.T) {
+	host := demoNode(t)
+	client := newClient(false)
+
+	// Build URL the same way cmdStream --url does
+	streamURL := client.baseURL(host) + "/tltv/v1/channels/" + demoChannelID + "/stream.m3u8"
+
+	if !strings.HasPrefix(streamURL, "https://") {
+		t.Fatalf("expected https URL, got %s", streamURL)
+	}
+	if !strings.Contains(streamURL, demoChannelID) {
+		t.Fatalf("URL missing channel ID: %s", streamURL)
+	}
+	if !strings.HasSuffix(streamURL, "/stream.m3u8") {
+		t.Fatalf("URL missing stream.m3u8 suffix: %s", streamURL)
+	}
+	t.Logf("demo stream URL: %s", streamURL)
+}
+
+func TestDemoResolveEndToEnd(t *testing.T) {
+	host := demoNode(t)
+	client := newClient(false)
+
+	// Full resolve flow: node info -> metadata -> verify -> stream check
+	doc, err := client.FetchMetadata(host, demoChannelID, "")
+	if err != nil {
+		t.Fatalf("FetchMetadata: %v", err)
+	}
+	if err := verifyDocument(doc, demoChannelID); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	status, _, _, err := client.CheckStream(host, demoChannelID, "")
+	if err != nil {
+		t.Fatalf("CheckStream transport error: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("expected stream 200, got %d", status)
+	}
+	t.Logf("demo resolve: metadata verified, stream %d", status)
+}

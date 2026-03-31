@@ -390,6 +390,7 @@ func cmdStream(args []string) {
 	fs := flag.NewFlagSet("stream", flag.ExitOnError)
 	token := fs.String("token", "", "access token for private channels")
 	fs.StringVar(token, "t", "", "alias for --token")
+	urlOnly := fs.Bool("url", false, "print only the stream URL")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Check stream availability for a channel\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv stream <target>\n\n")
@@ -398,6 +399,7 @@ func cmdStream(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv stream TVMkVH...@example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
+		fmt.Fprintf(os.Stderr, "      --url             print only the stream URL\n")
 	}
 	fs.Parse(args)
 
@@ -412,6 +414,17 @@ func cmdStream(args []string) {
 	}
 
 	client := newClient(flagInsecure)
+
+	streamURL := client.baseURL(host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
+	if *token != "" {
+		streamURL += "?token=" + *token
+	}
+
+	if *urlOnly {
+		fmt.Println(streamURL)
+		return
+	}
+
 	status, contentType, body, err := client.CheckStream(host, channelID, *token)
 	if err != nil {
 		fatal("stream check failed: %v", err)
@@ -422,6 +435,7 @@ func cmdStream(args []string) {
 			"status":       status,
 			"content_type": contentType,
 			"available":    status == 200,
+			"stream_url":   streamURL,
 		}
 		if status == 200 {
 			result["manifest_lines"] = strings.Count(body, "\n")
@@ -433,7 +447,7 @@ func cmdStream(args []string) {
 		return
 	}
 
-	printHeader("Stream: " + channelID + " @ " + host)
+	printHeader("Stream: " + streamURL)
 
 	switch status {
 	case 200:

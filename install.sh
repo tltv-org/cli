@@ -84,7 +84,12 @@ main() {
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)
-      LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
+      # Use $HOME-relative path so the line is portable
+      case "$INSTALL_DIR" in
+        "$HOME"/*) PATH_EXPR="\$HOME${INSTALL_DIR#$HOME}" ;;
+        *)         PATH_EXPR="$INSTALL_DIR" ;;
+      esac
+      LINE="export PATH=${PATH_EXPR}:\$PATH"
 
       # Detect shell profile
       PROFILE=""
@@ -100,7 +105,7 @@ main() {
         # Don't add if already present
         if ! grep -qF "$INSTALL_DIR" "$PROFILE" 2>/dev/null; then
           echo "" >> "$PROFILE"
-          echo "# Added by tltv installer" >> "$PROFILE"
+          echo "# tltv" >> "$PROFILE"
           echo "$LINE" >> "$PROFILE"
           echo "Added ${INSTALL_DIR} to PATH in ${PROFILE}"
           echo "Restart your shell or run: source ${PROFILE}"

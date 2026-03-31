@@ -111,29 +111,56 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           API_BASE: ${{ steps.detect.outputs.api_base }}
+          UPLOAD_MODE: ${{ steps.detect.outputs.upload_mode }}
           PRERELEASE: ${{ steps.detect.outputs.prerelease }}
         run: |
           echo "Creating release ${TAG}..."
-          echo "API: ${API_BASE}/releases"
-          echo "Token length: ${#TOKEN}"
 
           if [ -z "$TOKEN" ]; then
             echo "ERROR: TOKEN is empty -- secrets.GITHUB_TOKEN not available"
             exit 1
           fi
 
+          BODY="## tltv-cli ${TAG}
+
+          Single static binary. Zero dependencies.
+
+          \`\`\`bash
+          curl -sSL https://raw.githubusercontent.com/tltv-org/cli/main/install.sh | sh
+          \`\`\`
+
+          Pre-built for Linux, macOS, Windows (amd64 + arm64) and FreeBSD (amd64)."
+
+          # Auto-generate changelog on GitHub
+          if [ "$UPLOAD_MODE" = "github" ]; then
+            AUTO_NOTES=$(curl -sS -X POST \
+              -H "Authorization: token ${TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"tag_name\":\"${TAG}\"}" \
+              "${API_BASE}/releases/generate-notes" 2>/dev/null \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('body',''))" 2>/dev/null || true)
+            if [ -n "$AUTO_NOTES" ]; then
+              BODY="${BODY}
+
+          ---
+
+          ${AUTO_NOTES}"
+            fi
+          fi
+
+          BODY_JSON=$(echo "$BODY" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+
           RESPONSE=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST \
             -H "Authorization: token ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${TAG}\",\"name\":\"tltv-cli ${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":${PRERELEASE}}" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"tltv-cli ${TAG}\",\"body\":${BODY_JSON},\"draft\":false,\"prerelease\":${PRERELEASE}}" \
             "${API_BASE}/releases" 2>&1)
 
           HTTP_CODE=$(echo "$RESPONSE" | grep -o 'HTTP_CODE:[0-9]*' | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | sed '/^HTTP_CODE:/d')
+          BODY_RESP=$(echo "$RESPONSE" | sed '/^HTTP_CODE:/d')
           echo "HTTP status: ${HTTP_CODE}"
-          echo "Response: ${BODY}"
 
-          RELEASE_ID=$(echo "$BODY" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
+          RELEASE_ID=$(echo "$BODY_RESP" | grep -o '"id" *: *[0-9]*' | head -1 | grep -o '[0-9]*')
           if [ -z "$RELEASE_ID" ]; then
             echo "ERROR: Failed to create release (no id in response)"
             exit 1

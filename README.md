@@ -107,7 +107,7 @@ tltv completion --install zsh
 | `fetch <uri\|id@host>` | Fetch channel metadata and verify its signature. Accepts `tltv://` URIs or `id@host`. Shows full stream/guide URLs. Exits non-zero on verification failure. |
 | `guide <uri\|id@host>` | Fetch a channel guide and verify its signature. Marks the currently-airing entry. Use `--xmltv` for XMLTV XML output. Exits non-zero on verification failure. |
 | `peers <host>` | Fetch the peer exchange list from a node. |
-| `stream <uri\|id@host>` | Check HLS stream availability. Accepts `tltv://` URIs or `id@host`. Parses the manifest and reports segment count, target duration. |
+| `stream <uri\|id@host>` | Check HLS stream availability. Shows stream URL, segment count, target duration. Use `--url` to print only the stream URL for piping. |
 | `crawl <host>` | BFS-crawl the gossip network starting from a host. Discovers channels across nodes via peer exchange. Use `--depth` (`-d`) to set max depth. |
 
 ### Operations
@@ -178,7 +178,7 @@ The implementation is validated against all 7 test vector suites from the [proto
 - **C6** -- Invalid input rejection (malformed IDs, tampered docs, truncated sigs)
 - **C7** -- Key migration document signing and verification
 
-Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection, document size limits, timestamp format validation, local address detection, IPv6 hint parsing, XMLTV time conversion, JCS canonical JSON edge cases, SSRF hint validation, strict document field validation, trailing JSON rejection, `tltv://` URI target parsing, hex seed file round-trip with binary backward compatibility. Run `make test` to verify (67 tests).
+Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection, document size limits, timestamp format validation, local address detection, IPv6 hint parsing, XMLTV time conversion, JCS canonical JSON edge cases, SSRF hint validation, strict document field validation, trailing JSON rejection, `tltv://` URI target parsing, hex seed file round-trip with binary backward compatibility, stream URL construction. Optional tests against the public demo node (`demo.timelooptv.org`) exercise the full network stack end-to-end and skip gracefully when the demo is unreachable. Run `make test` to verify (75 tests).
 
 ## Network Commands
 
@@ -193,6 +193,19 @@ tltv fetch "tltv://TVMkVH...@example.com:443"   # tltv:// URI
 tltv fetch TVMkVH...@example.com                 # compact format, HTTPS port 443
 tltv fetch TVMkVH...@example.com:8443            # custom port
 tltv fetch TVMkVH...@localhost:8000              # HTTP (auto-detected)
+```
+
+The `stream` command's `--url` flag outputs just the bare stream URL, making it composable with other tools:
+
+```bash
+# Extract a single frame from a live stream (requires ffmpeg)
+ffmpeg -i "$(tltv stream --url <target>)" -vframes 1 frame.png
+
+# Play a stream directly (requires mpv, vlc, or ffplay)
+mpv "$(tltv stream --url <target>)"
+
+# Record 30 seconds of a stream to a file
+ffmpeg -i "$(tltv stream --url <target>)" -t 30 -c copy clip.ts
 ```
 
 All network commands support `--json` for scripting:
@@ -215,7 +228,7 @@ network.go          Network commands (node, fetch, guide, peers, stream, crawl)
 vanity.go           Multi-threaded vanity channel ID miner
 output.go           Terminal output formatting and colors
 signal.go           OS signal handling
-main_test.go        67 tests against all protocol test vectors + edge cases
+main_test.go        75 tests against all protocol test vectors + edge cases
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 ```
 
