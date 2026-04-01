@@ -16,6 +16,18 @@ curl -sSL https://raw.githubusercontent.com/tltv-org/cli/main/install.sh | sh
 
 Download the latest `.zip` from the [releases page](https://github.com/tltv-org/cli/releases/latest) and add `tltv.exe` to your PATH.
 
+### Docker
+
+```bash
+docker run --rm -v tltv-keys:/data -p 8000:8000 tltv bridge \
+  --stream http://provider.example.com/channels.m3u
+
+docker run --rm -v tltv-data:/data -p 8000:8000 tltv relay \
+  --node origin.example.com:443
+```
+
+Or build locally: `docker build -t tltv .`
+
 ### From source
 
 Requires [Go](https://go.dev/dl/) 1.22+:
@@ -69,6 +81,12 @@ tltv stream "tltv://TVabc...@example.com:443"
 # Discover channels across the network
 tltv crawl example.com
 
+# Bridge external streams as TLTV channels
+tltv bridge --stream http://provider.com/channels.m3u --guide http://provider.com/guide.xml
+
+# Relay channels from another TLTV node
+tltv relay --node origin.example.com:443
+
 # Install shell completions
 tltv completion --install zsh
 ```
@@ -109,6 +127,13 @@ tltv completion --install zsh
 | `peers <host>` | Fetch the peer exchange list from a node. |
 | `stream <uri\|id@host>` | Check HLS stream availability. Shows stream URL, segment count, target duration. Use `--url` to print only the stream URL for piping. |
 | `crawl <host>` | BFS-crawl the gossip network starting from a host. Discovers channels across nodes via peer exchange. Use `--depth` (`-d`) to set max depth. |
+
+### Server
+
+| Command | Description |
+|---|---|
+| `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
+| `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
 
 ### Operations
 
@@ -215,6 +240,94 @@ tltv --json peers example.com | jq '.peers[].id'
 tltv --json crawl example.com | jq '.channels | length'
 ```
 
+## Bridge
+
+The bridge is a long-running origin server that takes external streaming sources and publishes them as first-class TLTV channels with Ed25519 identities, signed metadata, and the full protocol HTTP API.
+
+```bash
+# Bridge a single HLS stream
+tltv bridge --stream http://example.com/live.m3u8 --name "My Channel"
+
+# Bridge an M3U playlist with XMLTV guide
+tltv bridge --stream http://provider.com/channels.m3u --guide http://provider.com/guide.xml
+
+# Bridge a directory of .m3u8 files (with optional sidecar .json metadata)
+tltv bridge --stream /media/hls
+
+# With on-demand channels and custom settings
+tltv bridge --stream http://mediaserver:8000/api/channels.m3u \
+  --guide http://mediaserver:8000/api/xmltv.xml --on-demand \
+  --listen :8000 --hostname origin.example.com:443
+```
+
+Source formats are auto-detected: M3U playlists (with tvg-id/tvg-name attributes), JSON channel arrays, local directories with sidecar `.json` files, or single HLS streams. Guide data can be XMLTV or JSON.
+
+All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`.
+
+Docker Compose example:
+```yaml
+services:
+  bridge:
+    image: tltv
+    command: bridge
+    ports: ["8000:8000"]
+    volumes: [bridge-keys:/data]
+    environment:
+      STREAM: http://mediaserver:8000/api/channels.m3u
+      GUIDE: http://mediaserver:8000/api/xmltv.xml
+      HOSTNAME: bridge.example.com:443
+volumes:
+  bridge-keys:
+```
+
+Mount `/data` to persist channel keys across restarts. Set `HOSTNAME` explicitly -- Docker's default `HOSTNAME` is the container ID.
+
+Private channels (`access: "token"`) are supported: hidden from node info and peers, token required on all endpoints, token injected into every URI in the HLS playlist graph.
+
+## Relay
+
+The relay is a long-running node that re-serves existing TLTV channels from upstream nodes with full signature verification. It does not have channel private keys and cannot modify signed documents.
+
+```bash
+# Relay specific channels
+tltv relay --channels "tltv://TVabc...@origin.example.com:443"
+
+# Relay all public channels from a node
+tltv relay --node origin.example.com:443
+
+# Relay with a config file
+tltv relay --config relay.json --hostname relay.example.com:443
+```
+
+The relay verifies every metadata and guide document against the channel's Ed25519 public key before caching. Documents are served verbatim (raw bytes preserved, unknown fields intact). Private, on-demand, and retired channels are refused per spec. If a channel transitions to any of these states, the relay stops immediately.
+
+Migration chains are followed automatically (up to 5 hops). Peer exchange participates in gossip with validated entries, 7-day staleness cutoff, and 100-entry limit.
+
+Config file format:
+```json
+{
+  "channels": ["tltv://TVabc...@origin.example.com:443"],
+  "nodes": ["origin.example.com:443"]
+}
+```
+
+Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`.
+
+Docker Compose example:
+```yaml
+services:
+  relay:
+    image: tltv
+    command: relay
+    ports: ["8000:8000"]
+    volumes: [relay-data:/data]
+    environment:
+      NODE: origin.example.com:443
+      HOSTNAME: relay.example.com:443
+volumes:
+  relay-data:
+```
+
 ## Project Structure
 
 ```
@@ -228,11 +341,16 @@ network.go          Network commands (node, fetch, guide, peers, stream, crawl)
 vanity.go           Multi-threaded vanity channel ID miner
 output.go           Terminal output formatting and colors
 signal.go           OS signal handling
+bridge*.go          Bridge origin server (source parsing, identity, HLS rewriting, HTTP)
+relay*.go           Relay node (upstream fetch+verify, caching, gossip, HTTP)
 main_test.go        75 tests against all protocol test vectors + edge cases
+bridge_test.go      58 bridge tests (source parsing, manifest rewriting, endpoints)
+relay_test.go       26 relay tests (fetch+verify, access checks, migration, endpoints)
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
+Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`).
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 159 tests.
 
 ## License
 

@@ -1,0 +1,5 @@
+dist/
+tltv
+*.key
+AGENTS.md
+.git

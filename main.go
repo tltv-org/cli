@@ -85,6 +85,9 @@ func usage() {
 	fmt.Fprintf(w, "  peers <host>           List peers from a node\n")
 	fmt.Fprintf(w, "  stream <uri|id@host>   Check stream availability\n")
 	fmt.Fprintf(w, "  crawl <host>           Crawl the gossip network\n\n")
+	fmt.Fprintf(w, "Server:\n")
+	fmt.Fprintf(w, "  bridge                 Start a bridge origin server\n")
+	fmt.Fprintf(w, "  relay                  Start a relay node\n\n")
 	fmt.Fprintf(w, "Operations:\n")
 	fmt.Fprintf(w, "  migrate                Create a migration document\n")
 	fmt.Fprintf(w, "  update                 Update to the latest release\n")
@@ -176,6 +179,10 @@ dispatch:
 		cmdStream(cmdArgs)
 	case "crawl":
 		cmdCrawl(cmdArgs)
+	case "bridge":
+		cmdBridge(cmdArgs)
+	case "relay":
+		cmdRelay(cmdArgs)
 	case "migrate":
 		cmdMigrate(cmdArgs)
 	case "completion":
@@ -840,6 +847,7 @@ var allCommands = []string{
 	"sign", "verify", "template",
 	"parse", "format",
 	"resolve", "node", "fetch", "guide", "peers", "stream", "crawl",
+	"bridge", "relay",
 	"migrate", "update", "completion", "version",
 }
 
@@ -996,7 +1004,9 @@ func completionFish() string {
 		"resolve": "Resolve URI end-to-end", "node": "Probe a node",
 		"fetch": "Fetch metadata", "guide": "Fetch guide",
 		"peers": "List peers", "stream": "Check stream",
-		"crawl": "Crawl network", "migrate": "Create migration",
+		"crawl": "Crawl network",
+		"bridge": "Bridge origin server", "relay": "Relay node",
+		"migrate": "Create migration",
 		"completion": "Shell completions", "version": "Show version",
 	}
 	for _, cmd := range allCommands {

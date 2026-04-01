@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -66,9 +67,14 @@ jobs:
           if echo "$SERVER" | grep -q "github\.com"; then
             echo "api_base=https://api.github.com/repos/${REPO}" >> "$GITHUB_OUTPUT"
             echo "upload_mode=github" >> "$GITHUB_OUTPUT"
+            echo "registry=ghcr.io" >> "$GITHUB_OUTPUT"
+            echo "image=ghcr.io/${REPO}" >> "$GITHUB_OUTPUT"
           else
+            HOST="${FORGEJO_REGISTRY:-$(echo "$SERVER" | sed 's|https\?://||' | sed 's|:[0-9]*$||')}"
             echo "api_base=${SERVER}/api/v1/repos/${REPO}" >> "$GITHUB_OUTPUT"
             echo "upload_mode=forgejo" >> "$GITHUB_OUTPUT"
+            echo "registry=${HOST}" >> "$GITHUB_OUTPUT"
+            echo "image=${HOST}/${REPO}" >> "$GITHUB_OUTPUT"
           fi
 
           PRERELEASE=false
@@ -121,31 +127,15 @@ jobs:
             exit 1
           fi
 
-          BODY="## tltv-cli ${TAG}
+          # Use the tagged commit message body as release notes.
+          # First line is the title (ignored), rest is the body.
+          BODY=$(git log -1 --format='%b' "${TAG}")
 
-          Single static binary. Zero dependencies.
+          # Fallback if commit has no body
+          if [ -z "$(echo "$BODY" | tr -d '[:space:]')" ]; then
+            BODY="## What's New
 
-          \`\`\`bash
-          curl -sSL https://raw.githubusercontent.com/tltv-org/cli/main/install.sh | sh
-          \`\`\`
-
-          Pre-built for Linux, macOS, Windows (amd64 + arm64) and FreeBSD (amd64)."
-
-          # Auto-generate changelog on GitHub
-          if [ "$UPLOAD_MODE" = "github" ]; then
-            AUTO_NOTES=$(curl -sS -X POST \
-              -H "Authorization: token ${TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"tag_name\":\"${TAG}\"}" \
-              "${API_BASE}/releases/generate-notes" 2>/dev/null \
-              | python3 -c "import sys,json; print(json.load(sys.stdin).get('body',''))" 2>/dev/null || true)
-            if [ -n "$AUTO_NOTES" ]; then
-              BODY="${BODY}
-
-          ---
-
-          ${AUTO_NOTES}"
-            fi
+          See commit history for details."
           fi
 
           BODY_JSON=$(echo "$BODY" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
@@ -207,3 +197,33 @@ jobs:
           done
 
           echo "Uploaded $(ls dist/* | wc -l) assets"
+
+      - name: Setup Docker
+        run: |
+          if ! command -v docker >/dev/null 2>&1; then
+            curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+              | tar xz --strip-components=1 -C /usr/local/bin docker/docker
+          fi
+          if ! docker info >/dev/null 2>&1; then
+            export DOCKER_HOST=tcp://docker-proxy:2375
+            echo "DOCKER_HOST=tcp://docker-proxy:2375" >> "$GITHUB_ENV"
+          fi
+          docker info >/dev/null
+
+      - name: Login to registry
+        run: |
+          TOKEN="${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}"
+          echo "${TOKEN}" | \
+            docker login "${{ steps.detect.outputs.registry }}" \
+              -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Build and push Docker image
+        env:
+          TAG: ${{ github.ref_name }}
+          IMAGE: ${{ steps.detect.outputs.image }}
+        run: |
+          docker build --build-arg VERSION=${TAG} \
+            -t "${IMAGE}:${TAG}" \
+            -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
