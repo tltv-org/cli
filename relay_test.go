@@ -661,3 +661,190 @@ func TestRelayExtractGuideEntries(t *testing.T) {
 		t.Errorf("entry 1: %+v", entries[1])
 	}
 }
+
+// ---------- appendUnique ----------
+
+func TestAppendUnique(t *testing.T) {
+	s := []string{"a", "b"}
+	s = appendUnique(s, "c")
+	if len(s) != 3 || s[2] != "c" {
+		t.Errorf("should append new: %v", s)
+	}
+	s = appendUnique(s, "b")
+	if len(s) != 3 {
+		t.Errorf("should not duplicate: %v", s)
+	}
+	s = appendUnique(s, "a")
+	if len(s) != 3 {
+		t.Errorf("should not duplicate first: %v", s)
+	}
+}
+
+// ---------- StoreMigration ----------
+
+func TestRelayStoreMigration(t *testing.T) {
+	r := newRelayRegistry("", nil, 100, 7)
+	r.UpdateChannel("TVold123", []byte(`{"name":"Old"}`), map[string]interface{}{"name": "Old"}, nil)
+
+	// Store migration
+	migDoc := []byte(`{"from":"TVold123","to":"TVnew456"}`)
+	r.StoreMigration("TVold123", migDoc)
+
+	// Channel still in registry but as migrated
+	ch := r.GetChannel("TVold123")
+	if ch == nil {
+		t.Fatal("migrated channel should still be in registry")
+	}
+	if ch.Name != "(migrated)" {
+		t.Errorf("name = %q, want (migrated)", ch.Name)
+	}
+	if string(ch.Metadata) != string(migDoc) {
+		t.Error("migration doc should be served as metadata")
+	}
+
+	// Verify it serves through the HTTP endpoint
+	srv := newRelayServer(r, newClient(false))
+	req := httptest.NewRequest("GET", "/tltv/v1/channels/TVold123", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("migration doc should be served, got %d", w.Code)
+	}
+}
+
+// ---------- MergePeers ----------
+
+func TestRelayMergePeers(t *testing.T) {
+	r := newRelayRegistry("", nil, 100, 7)
+
+	// Add peers
+	r.MergePeers([]relayPeerInfo{
+		{ChannelID: "TVa", Name: "A", Hints: []string{"a.example.com:443"}, LastSeen: time.Now()},
+		{ChannelID: "TVb", Name: "B", Hints: []string{"b.example.com:443"}, LastSeen: time.Now()},
+	})
+
+	peers := r.ListPeers()
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(peers))
+	}
+
+	// Merge with overlap (should update, not duplicate)
+	r.MergePeers([]relayPeerInfo{
+		{ChannelID: "TVa", Name: "A Updated", Hints: []string{"a2.example.com:443"}, LastSeen: time.Now()},
+	})
+	peers = r.ListPeers()
+	if len(peers) != 2 {
+		t.Fatalf("should still have 2 peers after overlap, got %d", len(peers))
+	}
+}
+
+func TestRelayMergePeers_Staleness(t *testing.T) {
+	r := newRelayRegistry("", nil, 100, 1) // 1-day staleness
+
+	staleTime := time.Now().Add(-48 * time.Hour)
+	r.MergePeers([]relayPeerInfo{
+		{ChannelID: "TVstale", Name: "Stale", Hints: []string{"old.com:443"}, LastSeen: staleTime},
+		{ChannelID: "TVfresh", Name: "Fresh", Hints: []string{"new.com:443"}, LastSeen: time.Now()},
+	})
+
+	peers := r.ListPeers()
+	if len(peers) != 1 {
+		t.Fatalf("stale peer should be pruned, got %d peers", len(peers))
+	}
+	if peers[0].ChannelID != "TVfresh" {
+		t.Errorf("remaining peer = %q, want TVfresh", peers[0].ChannelID)
+	}
+}
+
+// ---------- Relay Server Peers ----------
+
+func TestRelayServerPeers(t *testing.T) {
+	r := newRelayRegistry("relay.example.com:443", nil, 100, 7)
+	r.UpdateChannel("TVtest1", []byte(`{"name":"Test"}`), map[string]interface{}{"name": "Test"}, []string{"origin.com:443"})
+	r.MergePeers([]relayPeerInfo{
+		{ChannelID: "TVpeer1", Name: "Peer Channel", Hints: []string{"peer.com:443"}, LastSeen: time.Now()},
+	})
+
+	srv := newRelayServer(r, newClient(false))
+	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("peers status = %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	peers := resp["peers"].([]interface{})
+	if len(peers) < 1 {
+		t.Error("should have at least 1 peer")
+	}
+
+	// Check Cache-Control header
+	if cc := w.Header().Get("Cache-Control"); cc != "max-age=300" {
+		t.Errorf("Cache-Control = %q, want max-age=300", cc)
+	}
+}
+
+// ---------- relayFollowMigration ----------
+
+func TestRelayFollowMigration(t *testing.T) {
+	now := time.Now().UTC()
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	oldID := makeChannelID(pub)
+
+	pub2, priv2, _ := ed25519.GenerateKey(rand.Reader)
+	newID := makeChannelID(pub2)
+
+	// Create signed migration doc (old -> new)
+	migDoc := map[string]interface{}{
+		"v":        json.Number("1"),
+		"type":     "migration",
+		"from":     oldID,
+		"to":       newID,
+		"migrated": now.Format(timestampFormat),
+	}
+	migSigned, _ := signDocument(migDoc, priv)
+	migBytes, _ := json.Marshal(migSigned)
+
+	// Create signed metadata doc for new channel
+	metaDoc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number(fmt.Sprintf("%d", now.Unix())),
+		"id":      newID,
+		"name":    "New Channel",
+		"stream":  "stream.m3u8",
+		"access":  "public",
+		"status":  "active",
+		"updated": now.Format(timestampFormat),
+	}
+	metaSigned, _ := signDocument(metaDoc, priv2)
+	metaBytes, _ := json.Marshal(metaSigned)
+
+	// Mock server with exact path routing
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /tltv/v1/channels/"+oldID, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(migBytes)
+	})
+	mux.HandleFunc("GET /tltv/v1/channels/"+newID, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(metaBytes)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	client := newClient(false)
+	finalID, result, err := relayFollowMigration(client, oldID, []string{host}, 5)
+	if err != nil {
+		t.Fatalf("relayFollowMigration: %v", err)
+	}
+	if finalID != newID {
+		t.Errorf("finalID = %q, want %q", finalID, newID)
+	}
+	if result.IsMigration {
+		t.Error("final result should not be a migration")
+	}
+}

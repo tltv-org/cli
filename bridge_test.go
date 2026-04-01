@@ -1315,3 +1315,219 @@ func TestBridgeUpstreamStream(t *testing.T) {
 		t.Errorf("segment body = %q", w.Body.String())
 	}
 }
+
+// ---------- Source Polling ----------
+
+func TestBridgeResolveStreamURL(t *testing.T) {
+	tests := []struct {
+		name, raw, source, want string
+	}{
+		{"absolute http", "http://cdn.example.com/stream.m3u8", "http://any.com/list.m3u", "http://cdn.example.com/stream.m3u8"},
+		{"absolute https", "https://cdn.example.com/stream.m3u8", "http://any.com/list.m3u", "https://cdn.example.com/stream.m3u8"},
+		{"relative to http source", "live/stream.m3u8", "http://example.com/api/channels.m3u", "http://example.com/api/live/stream.m3u8"},
+		{"absolute local path", "/media/hls/stream.m3u8", "/data/channels.m3u", "/media/hls/stream.m3u8"},
+		{"relative to local source", "stream.m3u8", "/data/hls/channels.m3u", "/data/hls/stream.m3u8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bridgeResolveStreamURL(tt.raw, tt.source)
+			if got != tt.want {
+				t.Errorf("bridgeResolveStreamURL(%q, %q) = %q, want %q", tt.raw, tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBridgeFetchContent_HTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("hello from server"))
+	}))
+	defer srv.Close()
+
+	data, err := bridgeFetchContent(srv.URL + "/test")
+	if err != nil {
+		t.Fatalf("bridgeFetchContent: %v", err)
+	}
+	if string(data) != "hello from server" {
+		t.Errorf("got %q", string(data))
+	}
+}
+
+func TestBridgeFetchContent_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	_, err := bridgeFetchContent(srv.URL + "/fail")
+	if err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention status code: %v", err)
+	}
+}
+
+func TestBridgeFetchContent_LocalFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "test.txt")
+	os.WriteFile(f, []byte("local data"), 0644)
+
+	data, err := bridgeFetchContent(f)
+	if err != nil {
+		t.Fatalf("bridgeFetchContent: %v", err)
+	}
+	if string(data) != "local data" {
+		t.Errorf("got %q", string(data))
+	}
+}
+
+func TestBridgePollSource_SingleStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("#EXTM3U\n#EXT-X-TARGETDURATION:2\n"))
+	}))
+	defer srv.Close()
+
+	// Without name -> error
+	_, _, err := bridgePollSource(srv.URL+"/stream.m3u8", "", false)
+	if err == nil || !strings.Contains(err.Error(), "--name") {
+		t.Errorf("expected --name error, got: %v", err)
+	}
+
+	// With name -> single channel
+	channels, _, err := bridgePollSource(srv.URL+"/stream.m3u8", "Test Channel", false)
+	if err != nil {
+		t.Fatalf("bridgePollSource: %v", err)
+	}
+	if len(channels) != 1 {
+		t.Fatalf("expected 1 channel, got %d", len(channels))
+	}
+	if channels[0].Name != "Test Channel" {
+		t.Errorf("name = %q", channels[0].Name)
+	}
+}
+
+func TestBridgePollSource_M3UFile(t *testing.T) {
+	m3u := "#EXTM3U\n#EXTINF:-1 tvg-id=\"ch1\" tvg-name=\"Channel One\",Channel One\nhttp://example.com/stream1.m3u8\n"
+	f := filepath.Join(t.TempDir(), "channels.m3u")
+	os.WriteFile(f, []byte(m3u), 0644)
+
+	channels, _, err := bridgePollSource(f, "", false)
+	if err != nil {
+		t.Fatalf("bridgePollSource: %v", err)
+	}
+	if len(channels) != 1 {
+		t.Fatalf("expected 1 channel, got %d", len(channels))
+	}
+	if channels[0].ID != "ch1" || channels[0].Name != "Channel One" {
+		t.Errorf("channel: %+v", channels[0])
+	}
+}
+
+func TestBridgePollSource_JSONFile(t *testing.T) {
+	js := `[{"id":"j1","name":"JSON Channel","stream":"http://example.com/live.m3u8"}]`
+	f := filepath.Join(t.TempDir(), "channels.json")
+	os.WriteFile(f, []byte(js), 0644)
+
+	channels, _, err := bridgePollSource(f, "", false)
+	if err != nil {
+		t.Fatalf("bridgePollSource: %v", err)
+	}
+	if len(channels) != 1 {
+		t.Fatalf("expected 1 channel, got %d", len(channels))
+	}
+	if channels[0].ID != "j1" {
+		t.Errorf("id = %q", channels[0].ID)
+	}
+}
+
+func TestBridgePollSource_OnDemand(t *testing.T) {
+	js := `[{"id":"od1","name":"On Demand","stream":"http://example.com/od.m3u8"}]`
+	f := filepath.Join(t.TempDir(), "channels.json")
+	os.WriteFile(f, []byte(js), 0644)
+
+	channels, _, err := bridgePollSource(f, "", true)
+	if err != nil {
+		t.Fatalf("bridgePollSource: %v", err)
+	}
+	if !channels[0].OnDemand {
+		t.Error("expected OnDemand=true")
+	}
+}
+
+func TestBridgePollGuide_XMLTV(t *testing.T) {
+	xmltv := `<?xml version="1.0"?>
+<tv>
+  <programme start="20260315120000 +0000" stop="20260315130000 +0000" channel="ch1">
+    <title>Test Show</title>
+    <desc>A test</desc>
+  </programme>
+</tv>`
+	f := filepath.Join(t.TempDir(), "guide.xml")
+	os.WriteFile(f, []byte(xmltv), 0644)
+
+	guide, err := bridgePollGuide(f)
+	if err != nil {
+		t.Fatalf("bridgePollGuide: %v", err)
+	}
+	entries, ok := guide["ch1"]
+	if !ok || len(entries) != 1 {
+		t.Fatalf("expected 1 entry for ch1, got %v", guide)
+	}
+	if entries[0].Title != "Test Show" {
+		t.Errorf("title = %q", entries[0].Title)
+	}
+}
+
+func TestBridgePollGuide_JSON(t *testing.T) {
+	js := `[{"channel":"ch1","start":"2026-03-15T12:00:00Z","end":"2026-03-15T13:00:00Z","title":"JSON Show"}]`
+	f := filepath.Join(t.TempDir(), "guide.json")
+	os.WriteFile(f, []byte(js), 0644)
+
+	guide, err := bridgePollGuide(f)
+	if err != nil {
+		t.Fatalf("bridgePollGuide: %v", err)
+	}
+	if guide["ch1"][0].Title != "JSON Show" {
+		t.Errorf("title = %q", guide["ch1"][0].Title)
+	}
+}
+
+func TestBridgePollGuide_BadFormat(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "guide.txt")
+	os.WriteFile(f, []byte("this is not xml or json"), 0644)
+
+	_, err := bridgePollGuide(f)
+	if err == nil || !strings.Contains(err.Error(), "unrecognized") {
+		t.Errorf("expected format error, got: %v", err)
+	}
+}
+
+// ---------- UpdateGuide ----------
+
+func TestBridgeUpdateGuide(t *testing.T) {
+	dir := t.TempDir()
+	r := newBridgeRegistry(dir, "", nil)
+	r.UpdateChannels([]bridgeChannel{
+		{ID: "src1", Name: "Test Channel", Stream: "http://example.com/stream.m3u8"},
+	})
+
+	// Update with guide entries
+	r.UpdateGuide(map[string][]bridgeGuideEntry{
+		"src1": {
+			{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "Show A"},
+			{Start: "2026-03-15T13:00:00Z", End: "2026-03-15T14:00:00Z", Title: "Show B"},
+		},
+	})
+
+	// Verify guide is in the signed document
+	ch := r.ListChannels()[0]
+	if ch.guideDoc == nil {
+		t.Fatal("guideDoc should not be nil after UpdateGuide")
+	}
+	if len(ch.Guide) != 2 {
+		t.Fatalf("expected 2 guide entries, got %d", len(ch.Guide))
+	}
+	if ch.Guide[0].Title != "Show A" {
+		t.Errorf("entry 0 title = %q", ch.Guide[0].Title)
+	}
+}

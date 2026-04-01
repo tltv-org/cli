@@ -343,14 +343,14 @@ output.go           Terminal output formatting and colors
 signal.go           OS signal handling
 bridge*.go          Bridge origin server (source parsing, identity, HLS rewriting, HTTP)
 relay*.go           Relay node (upstream fetch+verify, caching, gossip, HTTP)
-main_test.go        75 tests against all protocol test vectors + edge cases
-bridge_test.go      58 bridge tests (source parsing, manifest rewriting, endpoints)
-relay_test.go       26 relay tests (fetch+verify, access checks, migration, endpoints)
+main_test.go        82 tests against all protocol test vectors + edge cases
+bridge_test.go      73 bridge tests (source parsing, manifest rewriting, endpoints)
+relay_test.go       37 relay tests (fetch+verify, access checks, migration, endpoints)
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 159 tests.
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 192 tests.
 
 ## License
 

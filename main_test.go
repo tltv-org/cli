@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -2052,4 +2054,118 @@ func TestDemoResolveEndToEnd(t *testing.T) {
 		t.Errorf("expected stream 200, got %d", status)
 	}
 	t.Logf("demo resolve: metadata verified, stream %d", status)
+}
+
+// ---------- Client methods via httptest ----------
+
+func TestClientFetchMetadata(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	id := makeChannelID(pub)
+
+	doc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number(fmt.Sprintf("%d", time.Now().Unix())),
+		"id":      id,
+		"name":    "Mock Channel",
+		"stream":  "stream.m3u8",
+		"updated": time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	signed, _ := signDocument(doc, priv)
+	signedBytes, _ := json.Marshal(signed)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(signedBytes)
+	}))
+	defer srv.Close()
+
+	client := newClient(false)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	result, err := client.FetchMetadata(host, id, "")
+	if err != nil {
+		t.Fatalf("FetchMetadata: %v", err)
+	}
+	if result["name"] != "Mock Channel" {
+		t.Errorf("name = %v", result["name"])
+	}
+}
+
+func TestClientFetchMetadata_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"error":"not_found"}`))
+	}))
+	defer srv.Close()
+
+	client := newClient(false)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	_, err := client.FetchMetadata(host, "TVfake", "")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not found error, got: %v", err)
+	}
+}
+
+func TestClientFetchPeers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"peers":[{"id":"TVabc","name":"Test","hints":["a.com:443"],"last_seen":"2026-01-01T00:00:00Z"}]}`))
+	}))
+	defer srv.Close()
+
+	client := newClient(false)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	exchange, err := client.FetchPeers(host)
+	if err != nil {
+		t.Fatalf("FetchPeers: %v", err)
+	}
+	if len(exchange.Peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(exchange.Peers))
+	}
+	if exchange.Peers[0].ID != "TVabc" {
+		t.Errorf("peer id = %q", exchange.Peers[0].ID)
+	}
+}
+
+func TestClientCheckStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Write([]byte("#EXTM3U\n#EXT-X-TARGETDURATION:2\n"))
+	}))
+	defer srv.Close()
+
+	client := newClient(false)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	status, ct, body, err := client.CheckStream(host, "TVtest", "")
+	if err != nil {
+		t.Fatalf("CheckStream: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d", status)
+	}
+	if !strings.Contains(ct, "mpegurl") {
+		t.Errorf("content-type = %q", ct)
+	}
+	if !strings.Contains(body, "#EXTM3U") {
+		t.Errorf("body should contain #EXTM3U")
+	}
+}
+
+// ---------- documentToJSON ----------
+
+func TestDocumentToJSON(t *testing.T) {
+	doc := map[string]interface{}{
+		"name":  "Test",
+		"value": json.Number("42"),
+		"html":  "<b>bold</b>",
+	}
+	out, err := documentToJSON(doc)
+	if err != nil {
+		t.Fatalf("documentToJSON: %v", err)
+	}
+
+	// Should NOT html-escape < and >
+	if strings.Contains(string(out), `\u003c`) {
+		t.Error("should not HTML-escape angle brackets")
+	}
+	if !strings.Contains(string(out), "<b>bold</b>") {
+		t.Error("should preserve literal angle brackets")
+	}
 }
