@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -52,6 +51,9 @@ func cmdBridge(args []string) {
 	peersStr := fs.String("peers", os.Getenv("PEERS"), "comma-separated peer host:port hints")
 	fs.StringVar(peersStr, "P", os.Getenv("PEERS"), "alias for --peers")
 
+	// --- Logging ---
+	logLvl, logFmt, logPath := addLogFlags(fs)
+
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Start a TLTV bridge origin server\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv bridge [flags]\n\n")
@@ -69,8 +71,13 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins field\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         comma-separated peer host:port hints\n\n")
+		fmt.Fprintf(os.Stderr, "Logging:\n")
+		fmt.Fprintf(os.Stderr, "      --log-level LEVEL    log level: debug, info, error (default: info)\n")
+		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
+		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: STREAM, GUIDE, NAME, ON_DEMAND=1, POLL,\n")
-		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS. Flags override env vars.\n\n")
+		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
+		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://example.com/live.m3u8 --name \"My Channel\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://provider.com/channels.m3u --guide http://provider.com/guide.xml\n")
@@ -78,6 +85,12 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://tunarr:8000/api/channels.m3u --guide http://tunarr:8000/api/xmltv.xml --on-demand\n")
 	}
 	fs.Parse(args)
+
+	// Set up logging
+	if err := setupLogging(*logLvl, *logFmt, *logPath, "bridge"); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	if *streamArg == "" {
 		fmt.Fprintf(os.Stderr, "error: --stream is required (or set STREAM env var)\n\n")
@@ -114,7 +127,7 @@ func cmdBridge(args []string) {
 	registry := newBridgeRegistry(*keysDir, *hostnameArg, peers)
 
 	// Initial source poll
-	log.Printf("discovering channels from %s", *streamArg)
+	logInfof("discovering channels from %s", *streamArg)
 	channels, sidecarGuide, err := bridgePollSource(*streamArg, *nameArg, *onDemand)
 	if err != nil {
 		fatal("source discovery failed: %v", err)
@@ -153,9 +166,9 @@ func cmdBridge(args []string) {
 		if ch.IsPrivate() {
 			vis = "private"
 		}
-		log.Printf("  %s  %s  (%s)", ch.ChannelID, ch.Name, vis)
+		logInfof("  %s  %s  (%s)", ch.ChannelID, ch.Name, vis)
 	}
-	log.Printf("%d channels registered", len(channels))
+	logInfof("%d channels registered", len(channels))
 
 	// Start HTTP server
 	server := newBridgeServer(registry)
@@ -165,11 +178,11 @@ func cmdBridge(args []string) {
 	if err != nil {
 		fatal("listen %s: %v", *listenAddr, err)
 	}
-	log.Printf("listening on %s", ln.Addr())
+	logInfof("listening on %s", displayListenAddr(ln.Addr().String()))
 
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			logFatalf("server error: %v", err)
 		}
 	}()
 
@@ -186,7 +199,7 @@ func cmdBridge(args []string) {
 	signalNotify(sigCh)
 	<-sigCh
 
-	log.Printf("shutting down...")
+	logInfof("shutting down...")
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -213,12 +226,12 @@ func bridgePollLoop(ctx context.Context, interval time.Duration, streamArg, guid
 func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *bridgeRegistry) {
 	channels, sidecarGuide, err := bridgePollSource(streamArg, nameArg, onDemand)
 	if err != nil {
-		log.Printf("poll error: %v", err)
+		logErrorf("poll error: %v", err)
 		return
 	}
 
 	if err := registry.UpdateChannels(channels); err != nil {
-		log.Printf("update error: %v", err)
+		logErrorf("update error: %v", err)
 		return
 	}
 
@@ -229,7 +242,7 @@ func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *
 	if guideArg != "" {
 		externalGuide, err := bridgePollGuide(guideArg)
 		if err != nil {
-			log.Printf("guide poll error: %v", err)
+			logErrorf("guide poll error: %v", err)
 		} else {
 			for id, entries := range externalGuide {
 				if _, ok := guide[id]; !ok {
@@ -242,5 +255,5 @@ func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *
 		registry.UpdateGuide(guide)
 	}
 
-	log.Printf("poll: %d channels", len(channels))
+	logDebugf("poll: %d channels", len(channels))
 }

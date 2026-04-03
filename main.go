@@ -86,6 +86,7 @@ func usage() {
 	fmt.Fprintf(w, "  stream <uri|id@host>   Check stream availability\n")
 	fmt.Fprintf(w, "  crawl <host>           Crawl the gossip network\n\n")
 	fmt.Fprintf(w, "Server:\n")
+	fmt.Fprintf(w, "  server test            Start a test signal generator (pure Go video)\n")
 	fmt.Fprintf(w, "  bridge                 Start a bridge origin server\n")
 	fmt.Fprintf(w, "  relay                  Start a relay node\n\n")
 	fmt.Fprintf(w, "Operations:\n")
@@ -179,6 +180,8 @@ dispatch:
 		cmdStream(cmdArgs)
 	case "crawl":
 		cmdCrawl(cmdArgs)
+	case "server":
+		cmdServer(cmdArgs)
 	case "bridge":
 		cmdBridge(cmdArgs)
 	case "relay":
@@ -847,7 +850,7 @@ var allCommands = []string{
 	"sign", "verify", "template",
 	"parse", "format",
 	"resolve", "node", "fetch", "guide", "peers", "stream", "crawl",
-	"bridge", "relay",
+	"server", "bridge", "relay",
 	"migrate", "update", "completion", "version",
 }
 
@@ -928,6 +931,9 @@ _tltv() {
         template)
             COMPREPLY=( $(compgen -W "metadata guide migration" -- "${cur}") )
             ;;
+        server)
+            COMPREPLY=( $(compgen -W "test" -- "${cur}") )
+            ;;
         completion)
             COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") )
             ;;
@@ -966,6 +972,9 @@ _tltv() {
             ;;
         args)
             case $words[1] in
+                server)
+                    _values 'subcommand' test
+                    ;;
                 template)
                     _values 'type' metadata guide migration
                     ;;
@@ -1005,7 +1014,7 @@ func completionFish() string {
 		"fetch": "Fetch metadata", "guide": "Fetch guide",
 		"peers": "List peers", "stream": "Check stream",
 		"crawl": "Crawl network",
-		"bridge": "Bridge origin server", "relay": "Relay node",
+		"server": "Content server", "bridge": "Bridge origin server", "relay": "Relay node",
 		"migrate": "Create migration",
 		"completion": "Shell completions", "version": "Show version",
 	}
@@ -1013,7 +1022,8 @@ func completionFish() string {
 		desc := descriptions[cmd]
 		sb.WriteString(fmt.Sprintf("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -a %s -d '%s'\n", cmd, desc))
 	}
-	sb.WriteString("\ncomplete -c tltv -n \"__fish_seen_subcommand_from template\" -a 'metadata guide migration'\n")
+	sb.WriteString("\ncomplete -c tltv -n \"__fish_seen_subcommand_from server\" -a 'test'\n")
+	sb.WriteString("complete -c tltv -n \"__fish_seen_subcommand_from template\" -a 'metadata guide migration'\n")
 	sb.WriteString("complete -c tltv -n \"__fish_seen_subcommand_from completion\" -a 'bash zsh fish'\n")
 	return sb.String()
 }

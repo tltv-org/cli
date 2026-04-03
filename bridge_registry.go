@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -210,7 +209,7 @@ func (r *bridgeRegistry) UpdateGuide(guide map[string][]bridgeGuideEntry) {
 		}
 		// Re-sign guide and metadata
 		if err := r.signChannel(updated); err != nil {
-			log.Printf("guide signing error for %s: %v", upstreamID, err)
+			logErrorf("guide signing error for %s: %v", upstreamID, err)
 			continue
 		}
 		r.channels[tltvID] = updated

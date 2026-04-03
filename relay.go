@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -60,6 +59,9 @@ func cmdRelay(args []string) {
 	maxPeers := fs.Int("max-peers", 100, "max peers in exchange")
 	staleDays := fs.Int("stale-days", 7, "drop peers not seen in N days")
 
+	// --- Logging ---
+	logLvl, logFmt, logPath := addLogFlags(fs)
+
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Start a TLTV relay node\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv relay [flags]\n\n")
@@ -79,14 +81,25 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --peer-poll DUR      peer poll interval (default: 30m)\n")
 		fmt.Fprintf(os.Stderr, "      --max-peers INT      max peers in exchange (default: 100)\n")
 		fmt.Fprintf(os.Stderr, "      --stale-days INT     drop peers not seen in N days (default: 7)\n\n")
+		fmt.Fprintf(os.Stderr, "Logging:\n")
+		fmt.Fprintf(os.Stderr, "      --log-level LEVEL    log level: debug, info, error (default: info)\n")
+		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
+		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: CHANNELS, NODE, CONFIG, LISTEN, HOSTNAME,\n")
-		fmt.Fprintf(os.Stderr, "PEERS, META_POLL, GUIDE_POLL, PEER_POLL. Flags override env vars.\n\n")
+		fmt.Fprintf(os.Stderr, "PEERS, META_POLL, GUIDE_POLL, PEER_POLL, LOG_LEVEL, LOG_FORMAT,\n")
+		fmt.Fprintf(os.Stderr, "LOG_FILE. Flags override env vars.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv relay --channels \"tltv://TVabc...@origin.example.com:443\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv relay --node origin.example.com:443\n")
 		fmt.Fprintf(os.Stderr, "  tltv relay --config relay.json\n")
 	}
 	fs.Parse(args)
+
+	// Set up logging
+	if err := setupLogging(*logLvl, *logFmt, *logPath, "relay"); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Parse durations
 	metaPoll, err := time.ParseDuration(*metaPollStr)
@@ -155,7 +168,7 @@ func cmdRelay(args []string) {
 	client := newClient(flagInsecure)
 
 	// Discover relay targets
-	log.Printf("discovering channels...")
+	logInfof("discovering channels...")
 	targets, err := relayDiscoverTargets(client, channels, nodes)
 	if err != nil {
 		fatal("target discovery: %v", err)
@@ -172,16 +185,16 @@ func cmdRelay(args []string) {
 	for _, t := range targets {
 		res, err := relayFetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
 		if err != nil {
-			log.Printf("  skip %s: %v", t.ChannelID, err)
+			logErrorf("skip %s: %v", t.ChannelID, err)
 			continue
 		}
 
 		if res.IsMigration {
 			// Follow migration chain
-			log.Printf("  %s migrated, following chain...", t.ChannelID)
+			logInfof("%s migrated, following chain...", t.ChannelID)
 			finalID, finalRes, err := relayFollowMigration(client, t.ChannelID, t.Hints, relayMaxMigrationHops)
 			if err != nil {
-				log.Printf("  skip %s: migration: %v", t.ChannelID, err)
+				logErrorf("skip %s: migration: %v", t.ChannelID, err)
 				continue
 			}
 			// Store migration doc at old ID
@@ -193,7 +206,7 @@ func cmdRelay(args []string) {
 
 		// Check access restrictions
 		if err := relayCheckAccess(res.Doc); err != nil {
-			log.Printf("  skip %s: %v", t.ChannelID, err)
+			logErrorf("skip %s: %v", t.ChannelID, err)
 			continue
 		}
 
@@ -201,7 +214,7 @@ func cmdRelay(args []string) {
 		relayTargets = append(relayTargets, t)
 
 		name := getString(res.Doc, "name")
-		log.Printf("  %s  %s", t.ChannelID, name)
+		logInfof("  %s  %s", t.ChannelID, name)
 	}
 
 	if len(relayTargets) == 0 {
@@ -212,7 +225,7 @@ func cmdRelay(args []string) {
 	for _, t := range relayTargets {
 		raw, entries, err := relayFetchAndVerifyGuide(client, t.ChannelID, t.Hints)
 		if err != nil {
-			log.Printf("  guide %s: %v", t.ChannelID, err)
+			logErrorf("guide %s: %v", t.ChannelID, err)
 			continue
 		}
 		if raw != nil {
@@ -220,7 +233,7 @@ func cmdRelay(args []string) {
 		}
 	}
 
-	log.Printf("%d channels relaying", len(relayTargets))
+	logInfof("%d channels relaying", len(relayTargets))
 
 	// Start HTTP server
 	server := newRelayServer(registry, client)
@@ -230,11 +243,11 @@ func cmdRelay(args []string) {
 	if err != nil {
 		fatal("listen %s: %v", *listenAddr, err)
 	}
-	log.Printf("listening on %s", ln.Addr())
+	logInfof("listening on %s", displayListenAddr(ln.Addr().String()))
 
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			logFatalf("server error: %v", err)
 		}
 	}()
 
@@ -257,7 +270,7 @@ func cmdRelay(args []string) {
 	signalNotify(sigCh)
 	<-sigCh
 
-	log.Printf("shutting down...")
+	logInfof("shutting down...")
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -286,12 +299,12 @@ func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *
 
 				res, err := relayFetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
 				if err != nil {
-					log.Printf("meta poll %s: %v", t.ChannelID, err)
+					logErrorf("meta poll %s: %v", t.ChannelID, err)
 					continue
 				}
 
 				if res.IsMigration {
-					log.Printf("channel %s has migrated to %s, stopping relay", t.ChannelID, res.MigratedTo)
+					logInfof("channel %s has migrated to %s, stopping relay", t.ChannelID, res.MigratedTo)
 					registry.StoreMigration(t.ChannelID, res.Raw)
 					stopped[t.ChannelID] = true
 					continue
@@ -299,7 +312,7 @@ func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *
 
 				// Re-check access (channel may have gone private/on-demand/retired)
 				if err := relayCheckAccess(res.Doc); err != nil {
-					log.Printf("channel %s now %s, stopping relay", t.ChannelID, err)
+					logInfof("channel %s now %s, stopping relay", t.ChannelID, err)
 					registry.RemoveChannel(t.ChannelID)
 					stopped[t.ChannelID] = true
 					continue
@@ -327,7 +340,7 @@ func relayGuidePollLoop(ctx context.Context, interval time.Duration, client *Cli
 				}
 				raw, entries, err := relayFetchAndVerifyGuide(client, ch.ChannelID, ch.Hints)
 				if err != nil {
-					log.Printf("guide poll %s: %v", ch.ChannelID, err)
+					logErrorf("guide poll %s: %v", ch.ChannelID, err)
 					continue
 				}
 				if raw != nil {
@@ -352,7 +365,7 @@ func relayPeerPollLoop(ctx context.Context, interval time.Duration, client *Clie
 				node = normalizeHost(node)
 				exchange, err := client.FetchPeers(node)
 				if err != nil {
-					log.Printf("peer poll %s: %v", node, err)
+					logErrorf("peer poll %s: %v", node, err)
 					continue
 				}
 

@@ -8,3 +8,5 @@ dist/
 
 # Test artifacts
 *.test
+*.264
+*.png

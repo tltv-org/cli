@@ -132,6 +132,7 @@ tltv completion --install zsh
 
 | Command | Description |
 |---|---|
+| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name and wall clock, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
 | `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
 | `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
 
@@ -203,7 +204,7 @@ The implementation is validated against all 7 test vector suites from the [proto
 - **C6** -- Invalid input rejection (malformed IDs, tampered docs, truncated sigs)
 - **C7** -- Key migration document signing and verification
 
-Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection, document size limits, timestamp format validation, local address detection, IPv6 hint parsing, XMLTV time conversion, JCS canonical JSON edge cases, SSRF hint validation, strict document field validation, trailing JSON rejection, `tltv://` URI target parsing, hex seed file round-trip with binary backward compatibility, stream URL construction. Optional tests against the public demo node (`demo.timelooptv.org`) exercise the full network stack end-to-end and skip gracefully when the demo is unreachable. Run `make test` to verify (75 tests).
+Plus additional coverage: protocol version validation, migration identity binding, migration `to` field validation, future `updated`/`migrated` timestamp rejection, document size limits, timestamp format validation, local address detection, IPv6 hint parsing, XMLTV time conversion, JCS canonical JSON edge cases, SSRF hint validation, strict document field validation, trailing JSON rejection, `tltv://` URI target parsing, hex seed file round-trip with binary backward compatibility, stream URL construction. Optional tests against the public demo node (`demo.timelooptv.org`) exercise the full network stack end-to-end and skip gracefully when the demo is unreachable. Run `make test` to verify.
 
 ## Network Commands
 
@@ -240,6 +241,44 @@ tltv --json peers example.com | jq '.peers[].id'
 tltv --json crawl example.com | jq '.channels | length'
 ```
 
+## Server
+
+`tltv server` is the content origination subsystem. Subcommands generate or serve media as TLTV channels with full protocol endpoints.
+
+### Test Signal Generator
+
+A self-contained test signal generator that produces live HLS video entirely in pure Go -- no ffmpeg, no C libraries, no external dependencies. One command gives you a full TLTV channel with live video and signed protocol endpoints.
+
+```bash
+# Start with defaults (640x360 @ 30fps)
+tltv server test --name "My Channel" -k channel.key
+
+# HD resolution
+tltv server test --name "TLTV Test" --width 1920 --height 1080 --fps 30
+
+# Custom listen address and HLS settings
+tltv server test --name "Test" --listen :9000 --hostname test.example.com:443
+
+# Show local time instead of UTC
+tltv server test --name "Test" --timezone America/New_York
+
+# Adjust HLS segment timing
+tltv server test --name "Test" --segment-duration 4 --segment-count 3
+
+# Docker with environment variables
+docker run -e NAME=TEST -e WIDTH=1280 -e HEIGHT=720 tltv server test
+```
+
+Generates a full SMPTE EG 1-1990 color bar test pattern (3-row: 75% bars, reverse castellations, PLUGE) with "TLTV" branding, channel name, and wall clock overlay. Text size auto-scales with resolution (overridable via `--font-scale`). Any resolution is accepted -- non-16-aligned dimensions are rounded up internally with SPS frame cropping.
+
+The H.264 encoder uses adaptive I_16x16/I_4x4 prediction with CAVLC entropy coding -- Baseline profile, all-IDR frames. Frame caching re-encodes only when the clock tick changes (once per second), reducing CPU usage by 30× at 30fps. Level is auto-selected from resolution and frame rate.
+
+The MPEG-TS muxer wraps encoded frames into 188-byte transport stream packets with PAT/PMT tables, PES headers, and PCR timestamps. The HLS segmenter maintains a configurable sliding-window playlist (default: 2-second segments, 5-segment window).
+
+Full TLTV protocol endpoints are served: `/.well-known/tltv`, signed metadata, signed guide, HLS stream, and peers. Documents are re-signed every 5 minutes. If no `--key` is provided, an ephemeral key is generated. Use `--timezone` with an IANA timezone name (e.g. `America/New_York`) to display local time on the clock overlay. All flags also accept environment variables for Docker deployment.
+
+All three long-running commands (server, bridge, relay) support structured logging: `--log-level` (debug/info/error), `--log-format` (human/json), `--log-file` (path). Environment variables: `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+
 ## Bridge
 
 The bridge is a long-running origin server that takes external streaming sources and publishes them as first-class TLTV channels with Ed25519 identities, signed metadata, and the full protocol HTTP API.
@@ -262,7 +301,7 @@ tltv bridge --stream http://mediaserver:8000/api/channels.m3u \
 
 Source formats are auto-detected: M3U playlists (with tvg-id/tvg-name attributes), JSON channel arrays, local directories with sidecar `.json` files, or single HLS streams. Guide data can be XMLTV or JSON.
 
-All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`.
+All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml
@@ -311,7 +350,7 @@ Config file format:
 }
 ```
 
-Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`.
+Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml
@@ -341,16 +380,24 @@ network.go          Network commands (node, fetch, guide, peers, stream, crawl)
 vanity.go           Multi-threaded vanity channel ID miner
 output.go           Terminal output formatting and colors
 signal.go           OS signal handling
+logging.go          Structured logging: levels, human + JSON format, file output
+server.go           Server entry point, flags, key management, frame loop, shutdown
+server_h264.go      H.264 Baseline encoder (I_16x16 + I_4x4, ~2400 lines, pure Go)
+server_mpegts.go    MPEG-TS muxer (188-byte packets, PAT/PMT, PES, PCR)
+server_hls.go       HLS segmenter (ring buffer, sliding window m3u8)
+server_pattern.go   SMPTE EG 1-1990 bars (3-row + PLUGE), 8x8 bitmap font, frame rendering
+server_serve.go     HTTP handlers (TLTV protocol + direct HLS)
 bridge*.go          Bridge origin server (source parsing, identity, HLS rewriting, HTTP)
 relay*.go           Relay node (upstream fetch+verify, caching, gossip, HTTP)
 main_test.go        82 tests against all protocol test vectors + edge cases
 bridge_test.go      73 bridge tests (source parsing, manifest rewriting, endpoints)
 relay_test.go       37 relay tests (fetch+verify, access checks, migration, endpoints)
+server_gen_test.go  11 tests (raw H.264, solid gray, multi-resolution, text overlay, I_4x4, font specimen)
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 192 tests.
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 201 tests.
 
 ## License
 

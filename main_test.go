@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -2167,5 +2168,244 @@ func TestDocumentToJSON(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "<b>bold</b>") {
 		t.Error("should preserve literal angle brackets")
+	}
+}
+
+// ---------- Logging Tests ----------
+
+func TestDisplayListenAddr(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"[::]:8000", "0.0.0.0:8000"},
+		{"[::]:443", "0.0.0.0:443"},
+		{"0.0.0.0:8000", "0.0.0.0:8000"},
+		{"127.0.0.1:8000", "127.0.0.1:8000"},
+		{"[::1]:8000", "[::1]:8000"}, // loopback, not wildcard
+		{":8000", ":8000"},
+	}
+	for _, tt := range tests {
+		got := displayListenAddr(tt.in)
+		if got != tt.want {
+			t.Errorf("displayListenAddr(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestSetupLogging_Levels(t *testing.T) {
+	// Reset to defaults after test
+	defer func() {
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	tests := []struct {
+		level string
+		want  logLevel
+	}{
+		{"debug", levelDebug},
+		{"info", levelInfo},
+		{"error", levelError},
+		{"DEBUG", levelDebug},
+		{"INFO", levelInfo},
+		{"", levelInfo}, // default
+	}
+	for _, tt := range tests {
+		if err := setupLogging(tt.level, "", "", "test"); err != nil {
+			t.Errorf("setupLogging(%q): %v", tt.level, err)
+			continue
+		}
+		if logMinLevel != tt.want {
+			t.Errorf("setupLogging(%q): logMinLevel = %d, want %d", tt.level, logMinLevel, tt.want)
+		}
+	}
+
+	// Invalid level
+	if err := setupLogging("bogus", "", "", "test"); err == nil {
+		t.Error("setupLogging('bogus') should return error")
+	}
+}
+
+func TestSetupLogging_Formats(t *testing.T) {
+	defer func() {
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	if err := setupLogging("", "json", "", "test"); err != nil {
+		t.Fatalf("setupLogging json: %v", err)
+	}
+	if !logJSON {
+		t.Error("expected logJSON = true after format=json")
+	}
+
+	if err := setupLogging("", "human", "", "test"); err != nil {
+		t.Fatalf("setupLogging human: %v", err)
+	}
+	if logJSON {
+		t.Error("expected logJSON = false after format=human")
+	}
+
+	if err := setupLogging("", "bogus", "", "test"); err == nil {
+		t.Error("setupLogging format='bogus' should return error")
+	}
+}
+
+func TestSetupLogging_File(t *testing.T) {
+	defer func() {
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	path := filepath.Join(t.TempDir(), "test.log")
+	if err := setupLogging("", "", path, "test"); err != nil {
+		t.Fatalf("setupLogging with file: %v", err)
+	}
+
+	logInfof("hello from test")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "hello from test") {
+		t.Errorf("log file missing message, got: %s", data)
+	}
+	if !strings.Contains(string(data), "INFO") {
+		t.Errorf("log file missing level, got: %s", data)
+	}
+	if !strings.Contains(string(data), "test:") {
+		t.Errorf("log file missing component, got: %s", data)
+	}
+}
+
+func TestLogLevelFiltering(t *testing.T) {
+	defer func() {
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	path := filepath.Join(t.TempDir(), "filter.log")
+	if err := setupLogging("error", "", path, "test"); err != nil {
+		t.Fatalf("setupLogging: %v", err)
+	}
+
+	logDebugf("debug message")
+	logInfof("info message")
+	logErrorf("error message")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "debug message") {
+		t.Error("debug message should be filtered at error level")
+	}
+	if strings.Contains(content, "info message") {
+		t.Error("info message should be filtered at error level")
+	}
+	if !strings.Contains(content, "error message") {
+		t.Error("error message should pass at error level")
+	}
+}
+
+func TestLogJSONFormat(t *testing.T) {
+	defer func() {
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	path := filepath.Join(t.TempDir(), "json.log")
+	if err := setupLogging("info", "json", path, "mycomp"); err != nil {
+		t.Fatalf("setupLogging: %v", err)
+	}
+
+	logInfof("test message %d", 42)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	var entry map[string]string
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("JSON parse failed: %v\nraw: %s", err, data)
+	}
+
+	if entry["level"] != "info" {
+		t.Errorf("level = %q, want info", entry["level"])
+	}
+	if entry["component"] != "mycomp" {
+		t.Errorf("component = %q, want mycomp", entry["component"])
+	}
+	if entry["msg"] != "test message 42" {
+		t.Errorf("msg = %q, want 'test message 42'", entry["msg"])
+	}
+	if entry["time"] == "" {
+		t.Error("time field is empty")
+	}
+	// Verify time parses as RFC3339
+	if _, err := time.Parse(time.RFC3339, entry["time"]); err != nil {
+		t.Errorf("time %q is not valid RFC3339: %v", entry["time"], err)
+	}
+}
+
+func TestLogHumanFormat(t *testing.T) {
+	defer func() {
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	path := filepath.Join(t.TempDir(), "human.log")
+	if err := setupLogging("debug", "human", path, "srv"); err != nil {
+		t.Fatalf("setupLogging: %v", err)
+	}
+
+	logDebugf("debug msg")
+	logInfof("info msg")
+	logErrorf("error msg")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(data)
+
+	// Check all three lines are present with correct level prefixes
+	if !strings.Contains(content, "DEBUG srv: debug msg") {
+		t.Errorf("missing DEBUG line in: %s", content)
+	}
+	if !strings.Contains(content, "INFO  srv: info msg") {
+		t.Errorf("missing INFO line in: %s", content)
+	}
+	if !strings.Contains(content, "ERROR srv: error msg") {
+		t.Errorf("missing ERROR line in: %s", content)
+	}
+}
+
+func TestSetupLogging_InvalidFile(t *testing.T) {
+	defer func() {
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	err := setupLogging("", "", "/nonexistent/dir/file.log", "test")
+	if err == nil {
+		t.Error("expected error for invalid log file path")
 	}
 }
