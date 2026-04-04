@@ -27,12 +27,13 @@ func serveSegment(w http.ResponseWriter, r *http.Request, seg *hlsSegmenter, num
 
 // serverHTTP sets up HTTP handlers for the server command.
 // Serves HLS stream and TLTV protocol endpoints.
-func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID string, metadata, guide []byte) {
+func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName string, metadata, guide []byte) {
 	// Store initial docs atomically
 	serverDocsState.Store(&serverDocs{
-		channelID: channelID,
-		metadata:  metadata,
-		guide:     guide,
+		channelID:   channelID,
+		channelName: channelName,
+		metadata:    metadata,
+		guide:       guide,
 	})
 
 	// --- TLTV Protocol Endpoints ---
@@ -48,7 +49,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID string, metadat
 			"channels": []interface{}{
 				map[string]interface{}{
 					"id":   docs.channelID,
-					"name": "",
+					"name": docs.channelName,
 				},
 			},
 			"relaying": []interface{}{},

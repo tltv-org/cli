@@ -145,10 +145,11 @@ func cmdServerTest(args []string) {
 		os.Exit(1)
 	}
 
-	channelName := strings.ToUpper(*nameArg)
+	channelName := *nameArg
 	if channelName == "" {
 		channelName = "TLTV"
 	}
+	displayName := strings.ToUpper(channelName) // for video overlay only
 
 	// Validate settings
 	if *widthArg < 16 || *widthArg > maxWidth {
@@ -281,7 +282,7 @@ func cmdServerTest(args []string) {
 
 	// HTTP server
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, metadata, guide)
+	serverHTTP(mux, seg, channelID, channelName, metadata, guide)
 
 	ln, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
@@ -310,7 +311,7 @@ func cmdServerTest(args []string) {
 		aud:          aud,
 		frame:        newFrame(h264.width, h264.height),
 		h264:         h264,
-		channelName:  channelName,
+		channelName:  displayName,
 		showUptime:   *showUptime,
 		fontScale:    *fontScale,
 		startTime:    time.Now().UTC(),
@@ -342,7 +343,7 @@ func cmdServerTest(args []string) {
 			state.generateSegment()
 		case <-resignTicker.C:
 			metadata, guide = serverSignDocs(channelID, channelName, hostname, privKey)
-			serverUpdateDocs(channelID, metadata, guide)
+			serverUpdateDocs(channelID, channelName, metadata, guide)
 		}
 	}
 }
@@ -493,9 +494,10 @@ func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.Pri
 
 // serverDocs holds the signed documents, swapped atomically.
 type serverDocs struct {
-	channelID string
-	metadata  []byte
-	guide     []byte
+	channelID   string
+	channelName string
+	metadata    []byte
+	guide       []byte
 }
 
 // serverDocsState is shared between the main goroutine (writer) and HTTP handlers
@@ -503,10 +505,11 @@ type serverDocs struct {
 var serverDocsState atomic.Pointer[serverDocs]
 
 // serverUpdateDocs atomically swaps the signed documents read by HTTP handlers.
-func serverUpdateDocs(channelID string, metadata, guide []byte) {
+func serverUpdateDocs(channelID, channelName string, metadata, guide []byte) {
 	serverDocsState.Store(&serverDocs{
-		channelID: channelID,
-		metadata:  metadata,
-		guide:     guide,
+		channelID:   channelID,
+		channelName: channelName,
+		metadata:    metadata,
+		guide:       guide,
 	})
 }
