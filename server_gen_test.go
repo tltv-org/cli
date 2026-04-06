@@ -437,6 +437,7 @@ func TestServerState_TimezoneDisplay(t *testing.T) {
 		framesPerSeg: 60,
 		ptsPerFrame:  3000,
 		segDuration:  2.0,
+		segDurationI: 2,
 	}
 
 	// Generate a segment at UTC — should not panic
@@ -455,4 +456,169 @@ func TestServerState_TimezoneDisplay(t *testing.T) {
 	if state.frameNum != 120 {
 		t.Errorf("frameNum = %d, want 120 after second segment", state.frameNum)
 	}
+}
+
+// TestAudioToneLoop verifies the embedded AAC ADTS loop is well-formed.
+func TestAudioToneLoop(t *testing.T) {
+	// Verify all 48 frames parse correctly
+	for i := 0; i < aacLoopFrames; i++ {
+		entry := &aacLoopIndex[i]
+		frame := aacToneLoop[entry.off : entry.off+entry.len]
+
+		if frame[0] != 0xFF || (frame[1]&0xF0) != 0xF0 {
+			t.Fatalf("frame %d: ADTS sync word missing", i)
+		}
+
+		profile := (frame[2] >> 6) & 3
+		sfi := (frame[2] >> 2) & 0xF
+		chConfig := ((frame[2] & 1) << 2) | ((frame[3] >> 6) & 3)
+
+		if profile != 1 {
+			t.Errorf("frame %d: profile = %d, want 1 (AAC-LC)", i, profile)
+		}
+		if sfi != 3 {
+			t.Errorf("frame %d: sampling_frequency_index = %d, want 3 (48kHz)", i, sfi)
+		}
+		if chConfig != 1 {
+			t.Errorf("frame %d: channel_configuration = %d, want 1 (mono)", i, chConfig)
+		}
+	}
+	t.Logf("AAC tone loop: %d frames, %d bytes, MPEG-4 AAC-LC, 48kHz, mono",
+		aacLoopFrames, len(aacToneLoop))
+}
+
+// TestAudioFramesForSegment verifies frame count calculations.
+func TestAudioFramesForSegment(t *testing.T) {
+	tests := []struct {
+		dur  int
+		want int
+	}{
+		{1, 47},  // ceil(48000/1024) = 47
+		{2, 94},  // ceil(96000/1024) = 94
+		{4, 188}, // ceil(192000/1024) = 188
+		{10, 469},
+	}
+	for _, tt := range tests {
+		got := audioFramesForSegment(tt.dur)
+		if got != tt.want {
+			t.Errorf("audioFramesForSegment(%d) = %d, want %d", tt.dur, got, tt.want)
+		}
+	}
+}
+
+// TestGenerateAudioData verifies audio data generation produces valid ADTS.
+func TestGenerateAudioData(t *testing.T) {
+	data := generateAudioData(2)
+
+	// Should contain 94 frames
+	nFrames := 0
+	offset := 0
+	for offset < len(data)-7 {
+		if data[offset] != 0xFF || (data[offset+1]&0xF0) != 0xF0 {
+			t.Fatalf("lost ADTS sync at offset %d", offset)
+		}
+		frameLen := (int(data[offset+3]&3) << 11) | (int(data[offset+4]) << 3) | (int(data[offset+5]) >> 5)
+		if frameLen < 7 || frameLen > 300 {
+			t.Fatalf("frame %d: unexpected length %d", nFrames, frameLen)
+		}
+		offset += frameLen
+		nFrames++
+	}
+	if nFrames != 94 {
+		t.Errorf("got %d frames, want 94", nFrames)
+	}
+	t.Logf("2s audio data: %d bytes, %d ADTS frames", len(data), nFrames)
+}
+
+// TestPMTContainsAudioStream verifies the PMT includes both video and audio.
+func TestPMTContainsAudioStream(t *testing.T) {
+	m := &tsMuxer{}
+	var buf [tsPacketSize]byte
+	m.writePMT(buf[:])
+
+	// PMT section starts at offset 5 (after TS header + pointer)
+	pmt := buf[5:]
+
+	// section_length should be 23 (5+4+5+5+4)
+	secLen := int(pmt[1]&0x0F)<<8 | int(pmt[2])
+	if secLen != 23 {
+		t.Errorf("PMT section_length = %d, want 23", secLen)
+	}
+
+	// Stream entry 1: H.264 video at offset 12
+	if pmt[12] != tsStreamTypeH264 {
+		t.Errorf("stream 1 type = 0x%02X, want 0x%02X (H.264)", pmt[12], tsStreamTypeH264)
+	}
+	vidPID := (uint16(pmt[13]&0x1F) << 8) | uint16(pmt[14])
+	if vidPID != tsPIDVideo {
+		t.Errorf("video PID = 0x%04X, want 0x%04X", vidPID, tsPIDVideo)
+	}
+
+	// Stream entry 2: AAC audio at offset 17
+	if pmt[17] != tsStreamTypeAAC {
+		t.Errorf("stream 2 type = 0x%02X, want 0x%02X (AAC)", pmt[17], tsStreamTypeAAC)
+	}
+	audPID := (uint16(pmt[18]&0x1F) << 8) | uint16(pmt[19])
+	if audPID != tsPIDAudio {
+		t.Errorf("audio PID = 0x%04X, want 0x%04X", audPID, tsPIDAudio)
+	}
+
+	t.Logf("PMT: video PID=0x%04X (H.264), audio PID=0x%04X (AAC)", vidPID, audPID)
+}
+
+// TestSegmentContainsAudioPackets verifies that generated segments have audio TS packets.
+func TestSegmentContainsAudioPackets(t *testing.T) {
+	h264 := &h264Settings{width: 320, height: 240, fps: 30, qp: 26}
+	state := &serverState{
+		seg:          newHLSSegmenter(3, 2),
+		muxer:        &tsMuxer{},
+		sps:          encodeSPS(h264),
+		pps:          encodePPS(h264),
+		aud:          encodeAUD(),
+		frame:        newFrame(320, 240),
+		h264:         h264,
+		channelName:  "TEST",
+		showUptime:   false,
+		fontScale:    0,
+		startTime:    time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC),
+		location:     time.UTC,
+		framesPerSeg: 60,
+		ptsPerFrame:  3000,
+		segDuration:  2.0,
+		segDurationI: 2,
+	}
+
+	state.generateSegment()
+
+	// Get the segment data from the segmenter
+	seg := state.seg
+	if seg.seqNum < 1 {
+		t.Fatal("no segment generated")
+	}
+
+	// Check that audio PID packets exist in the last segment
+	idx := (seg.head - 1 + seg.ringSize) % seg.ringSize
+	data := seg.ring[idx].data
+	videoPkts := 0
+	audioPkts := 0
+	for i := 0; i+tsPacketSize <= len(data); i += tsPacketSize {
+		if data[i] != tsSyncByte {
+			t.Fatalf("lost TS sync at offset %d", i)
+		}
+		pid := (uint16(data[i+1]&0x1F) << 8) | uint16(data[i+2])
+		switch pid {
+		case tsPIDVideo:
+			videoPkts++
+		case tsPIDAudio:
+			audioPkts++
+		}
+	}
+
+	if videoPkts == 0 {
+		t.Error("no video TS packets found")
+	}
+	if audioPkts == 0 {
+		t.Error("no audio TS packets found")
+	}
+	t.Logf("Segment: %d bytes, %d video packets, %d audio packets", len(data), videoPkts, audioPkts)
 }

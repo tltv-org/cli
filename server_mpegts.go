@@ -1,6 +1,6 @@
 package main
 
-// MPEG-TS muxer for a single H.264 video elementary stream.
+// MPEG-TS muxer for H.264 video and AAC-LC audio elementary streams.
 // Produces 188-byte transport stream packets per ISO 13818-1 (ITU-T H.222.0).
 
 const (
@@ -9,17 +9,21 @@ const (
 	tsPIDPAT     = uint16(0x0000)
 	tsPIDPMT     = uint16(0x1000)
 	tsPIDVideo   = uint16(0x0100)
+	tsPIDAudio   = uint16(0x0101)
 	tsPIDNull    = uint16(0x1FFF)
 
 	tsStreamTypeH264 = byte(0x1B)
+	tsStreamTypeAAC  = byte(0x0F) // ISO/IEC 13818-7 ADTS AAC
 	pesSIDVideo      = byte(0xE0)
+	pesSIDAudio      = byte(0xC0)
 )
 
-// tsMuxer writes MPEG-TS packets for a single H.264 video PID.
+// tsMuxer writes MPEG-TS packets for H.264 video and AAC audio PIDs.
 type tsMuxer struct {
 	patCC uint8
 	pmtCC uint8
 	vidCC uint8
+	audCC uint8
 }
 
 // writePAT writes a single TS packet containing the PAT.
@@ -64,7 +68,7 @@ func (m *tsMuxer) writePAT(buf []byte) {
 	}
 }
 
-// writePMT writes a single TS packet containing the PMT.
+// writePMT writes a single TS packet containing the PMT with video and audio streams.
 func (m *tsMuxer) writePMT(buf []byte) {
 	clear188(buf)
 	buf[0] = tsSyncByte
@@ -78,9 +82,9 @@ func (m *tsMuxer) writePMT(buf []byte) {
 
 	pmt := buf[5:]
 	pmt[0] = 0x02 // table_id = PMT
-	// section_syntax=1, '0', reserved=11, section_length=18
+	// section_syntax=1, '0', reserved=11, section_length=23
 	pmt[1] = 0xB0
-	pmt[2] = 0x12 // 5 header + 4 PCR/info + 5 stream + 4 CRC = 18
+	pmt[2] = 0x17 // 5 header + 4 PCR/info + 5 video + 5 audio + 4 CRC = 23
 	pmt[3] = 0x00 // program_number high = 1
 	pmt[4] = 0x01
 	pmt[5] = 0xC1 // reserved=11, version=0, current_next=1
@@ -92,20 +96,26 @@ func (m *tsMuxer) writePMT(buf []byte) {
 	// reserved=1111, program_info_length=0
 	pmt[10] = 0xF0
 	pmt[11] = 0x00
-	// Stream entry: H.264 video
+	// Stream entry 1: H.264 video (PID 0x0100)
 	pmt[12] = tsStreamTypeH264 // stream_type = 0x1B
-	pmt[13] = 0xE0 | 0x01 // reserved + elementary PID high
-	pmt[14] = 0x00         // elementary PID low
-	pmt[15] = 0xF0 // reserved=1111, ES_info_length=0
+	pmt[13] = 0xE0 | 0x01     // reserved + elementary PID high
+	pmt[14] = 0x00             // elementary PID low
+	pmt[15] = 0xF0             // reserved=1111, ES_info_length=0
 	pmt[16] = 0x00
+	// Stream entry 2: AAC audio (PID 0x0101)
+	pmt[17] = tsStreamTypeAAC // stream_type = 0x0F
+	pmt[18] = 0xE0 | 0x01    // reserved + elementary PID high
+	pmt[19] = 0x01            // elementary PID low
+	pmt[20] = 0xF0            // reserved=1111, ES_info_length=0
+	pmt[21] = 0x00
 	// CRC32
-	crc := mpegCRC32(pmt[0:17])
-	pmt[17] = uint8(crc >> 24)
-	pmt[18] = uint8(crc >> 16)
-	pmt[19] = uint8(crc >> 8)
-	pmt[20] = uint8(crc)
+	crc := mpegCRC32(pmt[0:22])
+	pmt[22] = uint8(crc >> 24)
+	pmt[23] = uint8(crc >> 16)
+	pmt[24] = uint8(crc >> 8)
+	pmt[25] = uint8(crc)
 
-	for i := 5 + 21; i < tsPacketSize; i++ {
+	for i := 5 + 26; i < tsPacketSize; i++ {
 		buf[i] = 0xFF
 	}
 }
@@ -219,6 +229,138 @@ func buildPESHeader(pts int64) []byte {
 	// PES packet length = 0 (unbounded for video)
 	h[4] = 0x00
 	h[5] = 0x00
+	// Optional header: MPEG-2 marker, data alignment
+	h[6] = 0x84 // '10' + scrambling=0 + priority=0 + alignment=1 + copyright=0 + original=0
+	h[7] = 0x80 // PTS only
+	h[8] = 0x05 // PES header data length = 5
+
+	// Encode PTS (5 bytes)
+	h[9] = 0x20 | uint8((pts>>29)&0x0E) | 0x01
+	h[10] = uint8(pts >> 22)
+	h[11] = uint8((pts>>14)&0xFE) | 0x01
+	h[12] = uint8(pts >> 7)
+	h[13] = uint8((pts<<1)&0xFE) | 0x01
+
+	return h[:]
+}
+
+// writeAudioPES writes a batch of AAC ADTS frames as a single PES packet on the audio PID.
+// Batching multiple ADTS frames per PES (like ffmpeg's default of ~16 per PES) is critical
+// for gapless HLS playback — players decode the ADTS frames within the PES using the sample
+// rate for timing, with the PTS applying to the first frame in the batch.
+func (m *tsMuxer) writeAudioPES(dst []byte, frames []audioFrame) []byte {
+	if len(frames) == 0 {
+		return dst
+	}
+
+	// Concatenate all ADTS frame data
+	totalADTS := 0
+	for i := range frames {
+		totalADTS += len(frames[i].data)
+	}
+
+	// Build PES header with PTS from the first frame
+	pts := frames[0].pts
+	pesHeader := buildAudioPESHeader(pts, totalADTS)
+
+	// Build complete PES payload
+	payloadBuf := make([]byte, 0, len(pesHeader)+totalADTS)
+	payloadBuf = append(payloadBuf, pesHeader...)
+	for i := range frames {
+		payloadBuf = append(payloadBuf, frames[i].data...)
+	}
+
+	// Write TS packets
+	written := 0
+	first := true
+	for written < len(payloadBuf) {
+		var pkt [tsPacketSize]byte
+		pkt[0] = tsSyncByte
+
+		// PID = audio (0x0101)
+		if first {
+			pkt[1] = 0x40 | 0x01 // PUSI + PID high
+		} else {
+			pkt[1] = 0x01 // PID high
+		}
+		pkt[2] = 0x01 // PID low (0x0101)
+
+		available := 184
+		payloadOffset := 4
+
+		if first {
+			// Adaptation field with random_access_indicator for audio
+			pkt[3] = 0x30 | (m.audCC & 0x0F) // AF + payload
+			pkt[4] = 1                         // AF length = 1
+			pkt[5] = 0x40                      // random_access_indicator
+			payloadOffset = 6
+			available = tsPacketSize - payloadOffset
+		} else {
+			pkt[3] = 0x10 | (m.audCC & 0x0F) // payload only
+		}
+
+		remaining := len(payloadBuf) - written
+		if remaining < available {
+			// Need stuffing
+			stuffNeeded := available - remaining
+			if first {
+				// Extend existing AF with stuffing
+				existingAFLen := int(pkt[4])
+				pkt[4] = uint8(existingAFLen + stuffNeeded)
+				insertAt := 5 + existingAFLen
+				for i := 0; i < stuffNeeded; i++ {
+					pkt[insertAt+i] = 0xFF
+				}
+				payloadOffset += stuffNeeded
+			} else {
+				pkt[3] = 0x30 | (m.audCC & 0x0F) // AF + payload
+				if stuffNeeded == 1 {
+					pkt[4] = 0
+					payloadOffset = 5
+				} else {
+					pkt[4] = uint8(stuffNeeded - 1)
+					pkt[5] = 0x00
+					for i := 6; i < 4+stuffNeeded; i++ {
+						pkt[i] = 0xFF
+					}
+					payloadOffset = 4 + stuffNeeded
+				}
+			}
+			available = remaining
+		}
+
+		copy(pkt[payloadOffset:], payloadBuf[written:written+available])
+		written += available
+
+		m.audCC = (m.audCC + 1) & 0x0F
+		dst = append(dst, pkt[:]...)
+		first = false
+	}
+
+	return dst
+}
+
+// buildAudioPESHeader constructs a PES header for AAC audio with PTS.
+// dataLen is the total ADTS payload size (may contain multiple frames).
+func buildAudioPESHeader(pts int64, dataLen int) []byte {
+	var h [14]byte
+	// PES start code
+	h[0] = 0x00
+	h[1] = 0x00
+	h[2] = 0x01
+	h[3] = pesSIDAudio // stream_id = 0xC0
+
+	// PES packet length = header_data_length(3+5) + payload
+	pesPayloadLen := 3 + 5 + dataLen
+	if pesPayloadLen > 0xFFFF {
+		// For large PES, use 0 (unbounded)
+		h[4] = 0x00
+		h[5] = 0x00
+	} else {
+		h[4] = uint8(pesPayloadLen >> 8)
+		h[5] = uint8(pesPayloadLen)
+	}
+
 	// Optional header: MPEG-2 marker, data alignment
 	h[6] = 0x84 // '10' + scrambling=0 + priority=0 + alignment=1 + copyright=0 + original=0
 	h[7] = 0x80 // PTS only

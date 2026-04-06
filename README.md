@@ -132,7 +132,7 @@ tltv completion --install zsh
 
 | Command | Description |
 |---|---|
-| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name and wall clock, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
+| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
 | `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
 | `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
 
@@ -247,7 +247,7 @@ tltv --json crawl example.com | jq '.channels | length'
 
 ### Test Signal Generator
 
-A self-contained test signal generator that produces live HLS video entirely in pure Go -- no ffmpeg, no C libraries, no external dependencies. One command gives you a full TLTV channel with live video and signed protocol endpoints.
+A self-contained test signal generator that produces live HLS video and audio entirely in pure Go -- no ffmpeg, no C libraries, no external dependencies. One command gives you a full TLTV channel with live video, a 1 kHz diagnostic audio tone, and signed protocol endpoints.
 
 ```bash
 # Start with defaults (640x360 @ 30fps)
@@ -383,7 +383,8 @@ signal.go           OS signal handling
 logging.go          Structured logging: levels, human + JSON format, file output
 server.go           Server entry point, flags, key management, frame loop, shutdown
 server_h264.go      H.264 Baseline encoder (I_16x16 + I_4x4, ~2400 lines, pure Go)
-server_mpegts.go    MPEG-TS muxer (188-byte packets, PAT/PMT, PES, PCR)
+server_audio.go     1 kHz AAC-LC tone generator (pre-encoded ADTS frame, 48kHz mono)
+server_mpegts.go    MPEG-TS muxer (188-byte packets, PAT/PMT, PES, PCR, video + audio)
 server_hls.go       HLS segmenter (ring buffer, sliding window m3u8)
 server_pattern.go   SMPTE EG 1-1990 bars (3-row + PLUGE), 8x8 bitmap font, frame rendering
 server_serve.go     HTTP handlers (TLTV protocol + direct HLS)
@@ -392,12 +393,19 @@ relay*.go           Relay node (upstream fetch+verify, caching, gossip, HTTP)
 main_test.go        82 tests against all protocol test vectors + edge cases
 bridge_test.go      73 bridge tests (source parsing, manifest rewriting, endpoints)
 relay_test.go       37 relay tests (fetch+verify, access checks, migration, endpoints)
-server_gen_test.go  11 tests (raw H.264, solid gray, multi-resolution, text overlay, I_4x4, font specimen)
+server_gen_test.go  15 tests (raw H.264, solid gray, multi-resolution, text overlay, I_4x4, font specimen, audio tone, PMT, audio muxing)
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 201 tests.
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 205 tests.
+
+## Links
+
+- [timelooptv.org](https://timelooptv.org) — Project homepage
+- [Spec](https://spec.timelooptv.org) — Protocol specification
+- [Demo](https://demo.timelooptv.org) — Live demo
+- [GitHub](https://github.com/tltv-org) — All repositories
 
 ## License
 

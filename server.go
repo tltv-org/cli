@@ -43,7 +43,7 @@ func cmdServer(args []string) {
 		fmt.Fprintf(os.Stderr, "TLTV content server\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv server <subcommand> [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Subcommands:\n")
-		fmt.Fprintf(os.Stderr, "  test    Start a test signal generator (SMPTE bars, pure Go video)\n\n")
+		fmt.Fprintf(os.Stderr, "  test    Start a test signal generator (SMPTE bars + 1 kHz tone, pure Go)\n\n")
 		fmt.Fprintf(os.Stderr, "Use \"tltv server <subcommand> -h\" for help with a specific subcommand.\n")
 		if len(args) == 0 {
 			os.Exit(1)
@@ -61,8 +61,9 @@ func cmdServer(args []string) {
 }
 
 // cmdServerTest implements "tltv server test" — a self-contained TLTV
-// origin server that generates live HLS video entirely in Go.
-// Produces SMPTE color bars with a wall clock, channel name, and uptime counter.
+// origin server that generates live HLS video and audio entirely in Go.
+// Produces SMPTE color bars with a wall clock, channel name, uptime counter,
+// and a continuous 1 kHz audio tone (AAC-LC, 48kHz, mono).
 func cmdServerTest(args []string) {
 	fs := flag.NewFlagSet("server test", flag.ExitOnError)
 
@@ -103,9 +104,9 @@ func cmdServerTest(args []string) {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Start a TLTV test signal generator\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv server test [flags]\n\n")
-		fmt.Fprintf(os.Stderr, "Generates a full SMPTE color bar test pattern with wall clock and channel\n")
-		fmt.Fprintf(os.Stderr, "name. Pure Go H.264 encoder and HLS segmenter — no ffmpeg required.\n")
-		fmt.Fprintf(os.Stderr, "Useful for testing the full TLTV pipeline without external tools.\n\n")
+		fmt.Fprintf(os.Stderr, "Generates a full SMPTE color bar test pattern with wall clock, channel\n")
+		fmt.Fprintf(os.Stderr, "name, and 1 kHz audio tone. Pure Go H.264/AAC encoder and HLS segmenter\n")
+		fmt.Fprintf(os.Stderr, "— no ffmpeg required. Useful for testing the full TLTV pipeline.\n\n")
 		fmt.Fprintf(os.Stderr, "Identity:\n")
 		fmt.Fprintf(os.Stderr, "  -k, --key FILE             channel key file (auto-generated if missing)\n\n")
 		fmt.Fprintf(os.Stderr, "Source:\n")
@@ -319,6 +320,7 @@ func cmdServerTest(args []string) {
 		framesPerSeg: framesPerSeg,
 		ptsPerFrame:  ptsPerFrame,
 		segDuration:  float64(*segDuration),
+		segDurationI: *segDuration,
 	}
 
 	ticker := time.NewTicker(time.Duration(*segDuration) * time.Second)
@@ -366,8 +368,10 @@ type serverState struct {
 	framesPerSeg int
 	ptsPerFrame  int64
 	segDuration  float64
+	segDurationI int // integer seconds for audio frame count
 
-	frameNum uint64
+	frameNum      uint64
+	audioFrameNum uint64 // running AAC frame counter (continuous across segments)
 }
 
 // generateSegment renders frames, encodes them as H.264,
@@ -389,14 +393,34 @@ func (s *serverState) generateSegment() {
 	s.muxer.writePMT(pmtPkt[:])
 	tsData = append(tsData, pmtPkt[:]...)
 
+	// Pre-generate all audio ADTS frames for this segment.
+	// Audio frame count is derived from the running sample counter so that
+	// PTS is continuous across segments with no gaps.
+	segEndPTS := int64(s.frameNum+uint64(s.framesPerSeg)) * s.ptsPerFrame
+	audioFrames := generateAudioFrames(s.audioFrameNum, segEndPTS)
+
 	var cachedNAL []byte
 	var cachedTimeStr string
 
+	// Interleave video and audio in batches, matching ffmpeg's muxing strategy.
+	// ffmpeg writes ~5-6 video frames then ~16 audio frames in alternating batches.
+	// This keeps the player's decode buffers fed and produces the PES batching
+	// that is critical for gapless audio at segment boundaries.
+	//
+	// Strategy: write all video frames first, then insert audio PES batches
+	// at regular intervals. Each audio PES covers ~16 ADTS frames (~340ms).
+	const audioPESBatchSize = 16 // frames per audio PES, matching ffmpeg's DEFAULT_PES_HEADER_FREQ
+
+	// We interleave by writing a batch of video frames, then an audio PES
+	// batch, repeating. The video batch size is chosen so that audio PES
+	// batches are roughly evenly spaced.
+	audioIdx := 0
+	videoBatchSize := s.framesPerSeg / ((len(audioFrames) + audioPESBatchSize - 1) / audioPESBatchSize)
+	if videoBatchSize < 1 {
+		videoBatchSize = 1
+	}
+
 	for i := 0; i < s.framesPerSeg; i++ {
-		// Compute display time from frame number, not wall clock.
-		// We generate segments in bursts, so time.Now() would return the same
-		// second for all frames. Using frame count gives correct per-second
-		// transitions during playback.
 		var timeStr string
 		if s.showUptime {
 			totalSecs := int(s.frameNum) / s.h264.fps
@@ -407,21 +431,34 @@ func (s *serverState) generateSegment() {
 			timeStr = displayTime.In(s.location).Format("15:04:05")
 		}
 
-		// Only re-render and re-encode when the display changes
 		if cachedNAL == nil || timeStr != cachedTimeStr {
 			renderTestFrame(s.frame, s.channelName, timeStr, s.fontScale)
 			cachedNAL = encodeFrame(s.sps, s.pps, s.aud, s.frame, s.h264, int(s.frameNum), int(s.frameNum))
 			cachedTimeStr = timeStr
 		}
 
-		// PTS in 90kHz units, wrapped to 33-bit range for MPEG-TS
-		pts := (int64(s.frameNum) * s.ptsPerFrame) & ((1 << 33) - 1)
-
-		// Wrap in MPEG-TS packets
-		tsData = s.muxer.writeVideoPackets(tsData, cachedNAL, pts, true)
-
+		videoPTS := (int64(s.frameNum) * s.ptsPerFrame) & ((1 << 33) - 1)
+		tsData = s.muxer.writeVideoPackets(tsData, cachedNAL, videoPTS, true)
 		s.frameNum++
+
+		// After every videoBatchSize frames, write one audio PES batch
+		if (i+1)%videoBatchSize == 0 && audioIdx < len(audioFrames) {
+			batchEnd := audioIdx + audioPESBatchSize
+			if batchEnd > len(audioFrames) {
+				batchEnd = len(audioFrames)
+			}
+			tsData = s.muxer.writeAudioPES(tsData, audioFrames[audioIdx:batchEnd])
+			audioIdx = batchEnd
+		}
 	}
+
+	// Write any remaining audio frames
+	if audioIdx < len(audioFrames) {
+		tsData = s.muxer.writeAudioPES(tsData, audioFrames[audioIdx:])
+	}
+
+	// Advance persistent audio frame counter
+	s.audioFrameNum += uint64(len(audioFrames))
 
 	s.seg.pushSegment(tsData, s.segDuration)
 
