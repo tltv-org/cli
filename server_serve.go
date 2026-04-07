@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -96,6 +97,16 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			w.Header().Set("Cache-Control", "max-age=300")
 			w.Write(docs.guide)
 
+		case "guide.xml":
+			if docs.guide == nil {
+				bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+				return
+			}
+			xml := serverGuideToXMLTV(docs.guide, docs.channelID, docs.channelName)
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.Header().Set("Cache-Control", "max-age=300")
+			w.Write([]byte(xml))
+
 		case "stream.m3u8":
 			manifest := seg.getManifest()
 			if manifest == "" {
@@ -172,4 +183,17 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		}
 		http.NotFound(w, r)
 	})
+}
+
+// serverGuideToXMLTV generates XMLTV from the signed guide JSON bytes.
+// Parses the guide document to extract entries, then formats as XMLTV using
+// the shared bridgeGuideToXMLTV helper.
+func serverGuideToXMLTV(guideJSON []byte, channelID, channelName string) string {
+	var doc map[string]interface{}
+	if err := json.Unmarshal(guideJSON, &doc); err != nil {
+		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tv/>\n"
+	}
+
+	entries := relayExtractGuideEntries(doc)
+	return bridgeGuideToXMLTV(channelID, channelName, entries)
 }

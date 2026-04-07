@@ -217,31 +217,10 @@ func (s *bridgeServer) serveGuideXML(w http.ResponseWriter, r *http.Request, ch 
 		entries = bridgeDefaultGuideEntries(ch.Name)
 	}
 
-	var sb strings.Builder
-	sb.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-	sb.WriteString("<tv>\n")
-	sb.WriteString("  <channel id=\"" + bridgeXMLEscape(ch.ChannelID) + "\">\n")
-	sb.WriteString("    <display-name>" + bridgeXMLEscape(ch.Name) + "</display-name>\n")
-	sb.WriteString("  </channel>\n")
-
-	for _, e := range entries {
-		sb.WriteString("  <programme start=\"" + bridgeISOToXMLTV(e.Start) + "\" stop=\"" + bridgeISOToXMLTV(e.End) + "\" channel=\"" + bridgeXMLEscape(ch.ChannelID) + "\">\n")
-		sb.WriteString("    <title>" + bridgeXMLEscape(e.Title) + "</title>\n")
-		if e.Description != "" {
-			sb.WriteString("    <desc>" + bridgeXMLEscape(e.Description) + "</desc>\n")
-		}
-		if e.Category != "" {
-			sb.WriteString("    <category>" + bridgeXMLEscape(e.Category) + "</category>\n")
-		}
-		sb.WriteString("  </programme>\n")
-	}
-
-	sb.WriteString("</tv>\n")
-
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("Cache-Control", "max-age=300")
 	bridgeSetPrivateHeaders(w, ch)
-	w.Write([]byte(sb.String()))
+	w.Write([]byte(bridgeGuideToXMLTV(ch.ChannelID, ch.Name, entries)))
 }
 
 // ---------- Helpers ----------
@@ -290,4 +269,30 @@ func bridgeXMLEscape(s string) string {
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
+}
+
+// bridgeGuideToXMLTV generates an XMLTV document from guide entries.
+// Used by bridge, relay, and server XMLTV endpoints.
+func bridgeGuideToXMLTV(channelID, channelName string, entries []bridgeGuideEntry) string {
+	var sb strings.Builder
+	sb.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	sb.WriteString("<tv>\n")
+	sb.WriteString("  <channel id=\"" + bridgeXMLEscape(channelID) + "\">\n")
+	sb.WriteString("    <display-name>" + bridgeXMLEscape(channelName) + "</display-name>\n")
+	sb.WriteString("  </channel>\n")
+
+	for _, e := range entries {
+		sb.WriteString("  <programme start=\"" + bridgeISOToXMLTV(e.Start) + "\" stop=\"" + bridgeISOToXMLTV(e.End) + "\" channel=\"" + bridgeXMLEscape(channelID) + "\">\n")
+		sb.WriteString("    <title>" + bridgeXMLEscape(e.Title) + "</title>\n")
+		if e.Description != "" {
+			sb.WriteString("    <desc>" + bridgeXMLEscape(e.Description) + "</desc>\n")
+		}
+		if e.Category != "" {
+			sb.WriteString("    <category>" + bridgeXMLEscape(e.Category) + "</category>\n")
+		}
+		sb.WriteString("  </programme>\n")
+	}
+
+	sb.WriteString("</tv>\n")
+	return sb.String()
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -413,6 +414,45 @@ func TestServerSignDocs_EphemeralGuide(t *testing.T) {
 	}
 	if _, ok := metaDoc["signature"]; !ok {
 		t.Error("metadata missing signature")
+	}
+}
+
+func TestServerGuideXMLTV(t *testing.T) {
+	// Server XMLTV endpoint should produce valid XMLTV from signed guide JSON.
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := priv.Public().(ed25519.PublicKey)
+	id := makeChannelID(pub)
+
+	_, guide := serverSignDocs(id, "TEST", "", priv)
+	if guide == nil {
+		t.Fatal("guide is nil")
+	}
+
+	xml := serverGuideToXMLTV(guide, id, "TEST")
+
+	if !strings.Contains(xml, "<tv>") {
+		t.Error("missing <tv> tag")
+	}
+	if !strings.Contains(xml, id) {
+		t.Error("missing channel ID in XMLTV")
+	}
+	if !strings.Contains(xml, "<display-name>TEST</display-name>") {
+		t.Error("missing display-name")
+	}
+	if !strings.Contains(xml, "<programme") {
+		t.Error("missing programme element")
+	}
+	if !strings.Contains(xml, "<title>TEST</title>") {
+		t.Error("missing guide entry title")
+	}
+}
+
+func TestServerGuideXMLTV_InvalidJSON(t *testing.T) {
+	// Corrupt JSON should produce minimal fallback XML.
+	xml := serverGuideToXMLTV([]byte("not json"), "TVabc", "Test")
+
+	if !strings.Contains(xml, "<tv/>") {
+		t.Error("expected fallback <tv/> for invalid JSON")
 	}
 }
 

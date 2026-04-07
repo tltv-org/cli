@@ -90,6 +90,7 @@ func usage() {
 	fmt.Fprintf(w, "  bridge                 Start a bridge origin server\n")
 	fmt.Fprintf(w, "  relay                  Start a relay node\n")
 	fmt.Fprintf(w, "  receiver <target>      Connect to a channel and consume the stream\n")
+	fmt.Fprintf(w, "  viewer <target>        Open a local web viewer for a channel\n")
 	fmt.Fprintf(w, "  loadtest <target>      Load test with multiple concurrent receivers\n\n")
 	fmt.Fprintf(w, "Operations:\n")
 	fmt.Fprintf(w, "  migrate                Create a migration document\n")
@@ -190,6 +191,8 @@ dispatch:
 		cmdRelay(cmdArgs)
 	case "receiver":
 		cmdReceiver(cmdArgs)
+	case "viewer":
+		cmdViewer(cmdArgs)
 	case "loadtest":
 		cmdLoadtest(cmdArgs)
 	case "migrate":
@@ -856,7 +859,7 @@ var allCommands = []string{
 	"sign", "verify", "template",
 	"parse", "format",
 	"resolve", "node", "fetch", "guide", "peers", "stream", "crawl",
-	"server", "bridge", "relay", "receiver", "loadtest",
+	"server", "bridge", "relay", "receiver", "viewer", "loadtest",
 	"migrate", "update", "completion", "version",
 }
 

@@ -433,6 +433,18 @@ func (recv *Receiver) Stop() {
 	recv.stopped.Store(true)
 }
 
+// resolveTarget parses the receiver's target into channel ID, host, and token.
+// Handles tltv:// URIs, compact id@host, and bare hostnames.
+func (recv *Receiver) resolveTarget(client *Client) (channelID, host, token string, err error) {
+	channelID, host, err = parseTargetOrDiscover(recv.Target, client)
+	if err != nil {
+		err = fmt.Errorf("invalid target %q: %w", recv.Target, err)
+		return
+	}
+	token = extractToken(recv.Target)
+	return
+}
+
 // resolveStreamURL determines the HLS manifest URL from either a direct URL
 // or a tltv:// URI.
 func (recv *Receiver) resolveStreamURL(client *Client) (manifestURL, channelID string, err error) {
@@ -440,18 +452,9 @@ func (recv *Receiver) resolveStreamURL(client *Client) (manifestURL, channelID s
 		return recv.DirectURL, "", nil
 	}
 
-	target := recv.Target
-	id, host, err := parseTarget(target)
+	id, host, token, err := recv.resolveTarget(client)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid target %q: %w", target, err)
-	}
-
-	// Extract token from URI if present
-	token := ""
-	if strings.HasPrefix(target, tltvScheme) {
-		if uri, err := parseTLTVUri(target); err == nil {
-			token = uri.Token
-		}
+		return "", "", err
 	}
 
 	base := client.baseURL(host)
@@ -464,18 +467,9 @@ func (recv *Receiver) resolveStreamURL(client *Client) (manifestURL, channelID s
 
 // verifyChannelMetadata fetches and verifies the channel's signed metadata.
 func (recv *Receiver) verifyChannelMetadata(client *Client, channelID string) error {
-	target := recv.Target
-	_, host, err := parseTarget(target)
+	_, host, token, err := recv.resolveTarget(client)
 	if err != nil {
 		return err
-	}
-
-	// Extract token from URI if present
-	token := ""
-	if strings.HasPrefix(target, tltvScheme) {
-		if uri, err := parseTLTVUri(target); err == nil {
-			token = uri.Token
-		}
 	}
 
 	doc, err := client.FetchMetadata(host, channelID, token)

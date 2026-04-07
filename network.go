@@ -89,12 +89,17 @@ func cmdFetch(args []string) {
 		os.Exit(1)
 	}
 
-	channelID, host, err := parseTarget(fs.Arg(0))
+	// Token: flag overrides URI-embedded token
+	if *token == "" {
+		*token = extractToken(fs.Arg(0))
+	}
+
+	client := newClient(flagInsecure)
+	channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
 	if err != nil {
 		fatal("%v", err)
 	}
 
-	client := newClient(flagInsecure)
 	doc, err := client.FetchMetadata(host, channelID, *token)
 	if err != nil {
 		fatal("%v", err)
@@ -224,12 +229,17 @@ func cmdGuide(args []string) {
 		os.Exit(1)
 	}
 
-	channelID, host, err := parseTarget(fs.Arg(0))
+	// Token: flag overrides URI-embedded token
+	if *token == "" {
+		*token = extractToken(fs.Arg(0))
+	}
+
+	client := newClient(flagInsecure)
+	channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
 	if err != nil {
 		fatal("%v", err)
 	}
 
-	client := newClient(flagInsecure)
 	doc, err := client.FetchGuide(host, channelID, *token)
 	if err != nil {
 		fatal("%v", err)
@@ -408,12 +418,16 @@ func cmdStream(args []string) {
 		os.Exit(1)
 	}
 
-	channelID, host, err := parseTarget(fs.Arg(0))
-	if err != nil {
-		fatal("%v", err)
+	// Token: flag overrides URI-embedded token
+	if *token == "" {
+		*token = extractToken(fs.Arg(0))
 	}
 
 	client := newClient(flagInsecure)
+	channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
+	if err != nil {
+		fatal("%v", err)
+	}
 
 	streamURL := client.baseURL(host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
 	if *token != "" {
@@ -988,8 +1002,8 @@ func outputXMLTV(channelID string, guide map[string]interface{}) {
 	fmt.Println(`<?xml version="1.0" encoding="UTF-8"?>`)
 	fmt.Printf("<tv generator-info-name=\"tltv-cli/%s\">\n", version)
 
-	fmt.Printf("  <channel id=\"%s\">\n", xmlEscape(channelID))
-	fmt.Printf("    <display-name>%s</display-name>\n", xmlEscape(channelID))
+	fmt.Printf("  <channel id=\"%s\">\n", bridgeXMLEscape(channelID))
+	fmt.Printf("    <display-name>%s</display-name>\n", bridgeXMLEscape(channelID))
 	fmt.Println("  </channel>")
 
 	entries, _ := guide["entries"].([]interface{})
@@ -999,44 +1013,22 @@ func outputXMLTV(channelID string, guide map[string]interface{}) {
 			continue
 		}
 
-		start := toXMLTVTime(getString(entry, "start"))
-		stop := toXMLTVTime(getString(entry, "end"))
-		if start == "" || stop == "" {
-			continue
-		}
+		start := bridgeISOToXMLTV(getString(entry, "start"))
+		stop := bridgeISOToXMLTV(getString(entry, "end"))
 
 		fmt.Printf("  <programme start=\"%s\" stop=\"%s\" channel=\"%s\">\n",
-			start, stop, xmlEscape(channelID))
-		fmt.Printf("    <title>%s</title>\n", xmlEscape(getString(entry, "title")))
+			start, stop, bridgeXMLEscape(channelID))
+		fmt.Printf("    <title>%s</title>\n", bridgeXMLEscape(getString(entry, "title")))
 		if desc := getString(entry, "description"); desc != "" {
-			fmt.Printf("    <desc>%s</desc>\n", xmlEscape(desc))
+			fmt.Printf("    <desc>%s</desc>\n", bridgeXMLEscape(desc))
 		}
 		if cat := getString(entry, "category"); cat != "" {
-			fmt.Printf("    <category>%s</category>\n", xmlEscape(cat))
+			fmt.Printf("    <category>%s</category>\n", bridgeXMLEscape(cat))
 		}
 		fmt.Println("  </programme>")
 	}
 
 	fmt.Println("</tv>")
-}
-
-// toXMLTVTime converts ISO 8601 UTC to XMLTV timestamp format.
-func toXMLTVTime(iso string) string {
-	t, err := time.Parse("2006-01-02T15:04:05Z", iso)
-	if err != nil {
-		return ""
-	}
-	return t.Format("20060102150405 +0000")
-}
-
-// xmlEscape escapes special characters for XML output.
-func xmlEscape(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
-	s = strings.ReplaceAll(s, "'", "&apos;")
-	return s
 }
 
 // Helper functions for extracting typed values from map[string]interface{}

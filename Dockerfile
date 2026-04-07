@@ -3,6 +3,7 @@ ARG VERSION=dev
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
+COPY hls.min.js ./
 RUN CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=${VERSION}" -o /tltv .
 
 FROM scratch

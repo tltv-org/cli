@@ -231,7 +231,7 @@ func relayDiscoverTargets(client *Client, channels, nodes []string) ([]relayTarg
 	targetMap := make(map[string]*relayTarget)
 
 	for _, ch := range channels {
-		channelID, host, err := parseTarget(ch)
+		channelID, host, err := parseTargetOrDiscover(ch, client)
 		if err != nil {
 			return nil, fmt.Errorf("invalid channel %q: %w", ch, err)
 		}

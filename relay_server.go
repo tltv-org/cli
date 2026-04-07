@@ -192,29 +192,9 @@ func (s *relayServer) serveGuideXML(w http.ResponseWriter, ch *relayRegisteredCh
 		entries = bridgeDefaultGuideEntries(ch.Name)
 	}
 
-	var sb strings.Builder
-	sb.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-	sb.WriteString("<tv>\n")
-	sb.WriteString("  <channel id=\"" + bridgeXMLEscape(ch.ChannelID) + "\">\n")
-	sb.WriteString("    <display-name>" + bridgeXMLEscape(ch.Name) + "</display-name>\n")
-	sb.WriteString("  </channel>\n")
-
-	for _, e := range entries {
-		sb.WriteString("  <programme start=\"" + bridgeISOToXMLTV(e.Start) + "\" stop=\"" + bridgeISOToXMLTV(e.End) + "\" channel=\"" + bridgeXMLEscape(ch.ChannelID) + "\">\n")
-		sb.WriteString("    <title>" + bridgeXMLEscape(e.Title) + "</title>\n")
-		if e.Description != "" {
-			sb.WriteString("    <desc>" + bridgeXMLEscape(e.Description) + "</desc>\n")
-		}
-		if e.Category != "" {
-			sb.WriteString("    <category>" + bridgeXMLEscape(e.Category) + "</category>\n")
-		}
-		sb.WriteString("  </programme>\n")
-	}
-	sb.WriteString("</tv>\n")
-
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("Cache-Control", "max-age=300")
-	w.Write([]byte(sb.String()))
+	w.Write([]byte(bridgeGuideToXMLTV(ch.ChannelID, ch.Name, entries)))
 }
 
 // ---------- Stream Proxying ----------

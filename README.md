@@ -136,6 +136,7 @@ tltv completion --install zsh
 | `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
 | `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Built-in HLS cache with singleflight deduplication (`--cache`). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
 | `receiver <target>` | Headless HLS stream consumer. Connects to a TLTV channel, fetches segments, verifies metadata, and reports statistics. Modes: `--monitor` (health check, exit 0/1), `--record` (save to file), `--pipe` (raw TS to stdout), `--duration` (timed run). Tracks latency percentiles, cache hit rates, and bandwidth. |
+| `viewer <target>` | Open a local web viewer for a channel. Fetches and verifies metadata, serves an HLS.js player with live debug stats. Proxies the stream through localhost with server-side token injection. |
 | `loadtest <target>` | Multi-receiver load simulator. Spawns N concurrent receivers (`--receivers`/`-n`) with optional ramp-up (`--ramp`). Reports aggregate stats: segment/manifest latency percentiles, cache hit rates, bandwidth, error rates. |
 
 ### Operations
@@ -214,13 +215,20 @@ Network commands default to HTTPS (port 443). For local development, `localhost`
 
 The `resolve` and `crawl` commands use an SSRF-safe HTTP client that validates hints (rejecting URLs, userinfo, paths) and checks resolved DNS addresses against private/loopback/link-local ranges at connection time. Use `--local` to allow local addresses for development.
 
-Commands that need both a channel ID and a host accept either a `tltv://` URI or the compact `id@host` format:
+Commands that need both a channel ID and a host accept three formats: `tltv://` URIs, compact `id@host`, or a bare hostname (auto-discovers the first channel via `/.well-known/tltv`):
 
 ```bash
-tltv fetch "tltv://TVMkVH...@example.com:443"   # tltv:// URI
+tltv fetch demo.timelooptv.org                   # bare hostname — discovers first channel
 tltv fetch TVMkVH...@example.com                 # compact format, HTTPS port 443
-tltv fetch TVMkVH...@example.com:8443            # custom port
+tltv fetch "tltv://TVMkVH...@example.com:443"    # tltv:// URI
 tltv fetch TVMkVH...@localhost:8000              # HTTP (auto-detected)
+```
+
+Tokens embedded in `tltv://` URIs are used automatically. The `--token` flag overrides the URI token:
+
+```bash
+tltv fetch "tltv://TVabc...@example.com:443?token=secret"   # token from URI
+tltv fetch --token secret TVabc...@example.com               # token from flag
 ```
 
 The `stream` command's `--url` flag outputs just the bare stream URL, making it composable with other tools:
@@ -410,6 +418,32 @@ Tracks segment latency (p50/p95/p99), cache hit rates (`Cache-Status` header fro
 
 Environment variables: `MONITOR=1`, `TIMEOUT`, `DURATION`, `RECORD`, `PIPE=1`, `URL`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
+## Viewer
+
+The viewer is a local web UI for watching and debugging TLTV channels. It fetches and verifies signed metadata and guide, then serves an HLS.js video player with live debug stats.
+
+```bash
+# Watch a channel (discovers first channel on the host)
+tltv viewer demo.timelooptv.org
+
+# Specify channel explicitly
+tltv viewer TVabc...@demo.timelooptv.org:443
+
+# Private channel with token
+tltv viewer --token secret TVabc...@localhost:8000
+
+# Custom listen address
+tltv viewer --listen 127.0.0.1:3000 demo.timelooptv.org
+```
+
+The viewer proxies the HLS stream through localhost, rewriting manifests so the browser fetches segments through the proxy. For private channels, the access token is injected server-side and never exposed to the browser.
+
+The debug panel shows: stream status, segment number (real HLS media sequence), bitrate, buffer length, and video resolution. All channel metadata fields are displayed dynamically — any custom field the channel includes shows up automatically.
+
+Defaults to `127.0.0.1:9000` and warns if you bind to a non-local address. Safari is supported via native HLS fallback.
+
+Environment variables: `LISTEN`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+
 ## Load Testing
 
 Spawns N concurrent receivers against a target to simulate viewer load.
@@ -457,17 +491,18 @@ bridge*.go          Bridge origin server (source parsing, identity, HLS rewritin
 relay*.go           Relay node (upstream fetch+verify, HLS cache, singleflight, gossip, HTTP)
 receiver.go         HLS receiver (manifest parser, segment tracking, stats, retry)
 loadtest.go         Multi-receiver load simulator (ramp-up, aggregate stats, percentiles)
-main_test.go        82 tests against all protocol test vectors + edge cases
-bridge_test.go      73 bridge tests (source parsing, manifest rewriting, endpoints)
-relay_test.go       37 relay tests (fetch+verify, access checks, migration, endpoints)
-relay_cache_test.go 17 cache tests (hit/miss, TTL, singleflight, eviction, error non-caching)
-receiver_test.go    21 receiver tests (HLS parser, segment resolution, stats, live stream)
-server_gen_test.go  15 tests (raw H.264, solid gray, multi-resolution, text overlay, I_4x4, font specimen, audio tone, PMT, audio muxing)
+viewer.go           Local web viewer (HLS.js player, stream proxy, metadata display)
+hls.min.js          Vendored HLS.js latest stable (~530 KB), embedded via go:embed
+main_test.go        85 tests against all protocol test vectors + edge cases
+bridge_test.go      68 bridge tests (source parsing, manifest rewriting, endpoints)
+relay_test.go       47 relay tests (fetch+verify, access checks, migration, endpoints, cache)
+receiver_test.go    20 receiver tests (HLS parser, segment resolution, stats, live stream)
+server_gen_test.go  20 tests (raw H.264, multi-resolution, I_4x4, font, audio, PMT, XMLTV)
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 234 tests.
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 240 tests.
 
 ## Links
 

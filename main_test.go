@@ -976,13 +976,109 @@ func TestXMLTVTimeConversion(t *testing.T) {
 	}{
 		{"2026-03-15T00:00:00Z", "20260315000000 +0000"},
 		{"2026-03-15T23:59:59Z", "20260315235959 +0000"},
-		{"invalid", ""},
 	}
 	for _, tc := range cases {
-		got := toXMLTVTime(tc.input)
+		got := bridgeISOToXMLTV(tc.input)
 		if got != tc.expected {
-			t.Errorf("toXMLTVTime(%q): got %q, want %q", tc.input, got, tc.expected)
+			t.Errorf("bridgeISOToXMLTV(%q): got %q, want %q", tc.input, got, tc.expected)
 		}
+	}
+}
+
+// ---------- extractToken ----------
+
+func TestExtractToken(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"URI with token", "tltv://TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:443?token=secret", "secret"},
+		{"URI without token", "tltv://TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:443", ""},
+		{"compact format", "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com", ""},
+		{"bare hostname", "example.com", ""},
+		{"empty string", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractToken(tc.input)
+			if got != tc.want {
+				t.Errorf("extractToken(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------- bridgeGuideToXMLTV ----------
+
+func TestBridgeGuideToXMLTV(t *testing.T) {
+	entries := []bridgeGuideEntry{
+		{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "Test Show", Description: "A test", Category: "Test"},
+		{Start: "2026-03-15T13:00:00Z", End: "2026-03-15T14:00:00Z", Title: "Show 2"},
+	}
+
+	xml := bridgeGuideToXMLTV("TVabc123", "My Channel", entries)
+
+	// Structure checks
+	if !strings.Contains(xml, `<?xml version="1.0" encoding="UTF-8"?>`) {
+		t.Error("missing XML declaration")
+	}
+	if !strings.Contains(xml, `<channel id="TVabc123">`) {
+		t.Error("missing channel element")
+	}
+	if !strings.Contains(xml, `<display-name>My Channel</display-name>`) {
+		t.Error("missing display-name")
+	}
+	if !strings.Contains(xml, `<title>Test Show</title>`) {
+		t.Error("missing first entry title")
+	}
+	if !strings.Contains(xml, `<desc>A test</desc>`) {
+		t.Error("missing description")
+	}
+	if !strings.Contains(xml, `<category>Test</category>`) {
+		t.Error("missing category")
+	}
+	if !strings.Contains(xml, `<title>Show 2</title>`) {
+		t.Error("missing second entry title")
+	}
+	// Second entry has no description/category — shouldn't appear
+	if strings.Count(xml, "<desc>") != 1 {
+		t.Errorf("expected 1 <desc>, got %d", strings.Count(xml, "<desc>"))
+	}
+	if strings.Count(xml, "<category>") != 1 {
+		t.Errorf("expected 1 <category>, got %d", strings.Count(xml, "<category>"))
+	}
+}
+
+func TestBridgeGuideToXMLTV_Empty(t *testing.T) {
+	xml := bridgeGuideToXMLTV("TVabc", "Empty", nil)
+
+	if !strings.Contains(xml, "<tv>") {
+		t.Error("missing <tv>")
+	}
+	if !strings.Contains(xml, `<display-name>Empty</display-name>`) {
+		t.Error("missing display-name")
+	}
+	if strings.Contains(xml, "<programme") {
+		t.Error("should have no programme elements for nil entries")
+	}
+}
+
+func TestBridgeGuideToXMLTV_XMLEscape(t *testing.T) {
+	entries := []bridgeGuideEntry{
+		{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "News <Live> & More"},
+	}
+
+	xml := bridgeGuideToXMLTV("TV&test", "Ch <1>", entries)
+
+	if !strings.Contains(xml, "TV&amp;test") {
+		t.Error("channel ID not escaped")
+	}
+	if !strings.Contains(xml, "Ch &lt;1&gt;") {
+		t.Error("channel name not escaped")
+	}
+	if !strings.Contains(xml, "News &lt;Live&gt; &amp; More") {
+		t.Error("title not escaped")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -394,6 +395,41 @@ func parseTarget(s string) (channelID, host string, err error) {
 		return "", "", fmt.Errorf("empty host")
 	}
 	return channelID, host, nil
+}
+
+// parseTargetOrDiscover tries parseTarget first. If that fails, treats the
+// target as a bare hostname: fetches /.well-known/tltv and picks the first channel.
+func parseTargetOrDiscover(s string, client *Client) (channelID, host string, err error) {
+	channelID, host, err = parseTarget(s)
+	if err == nil {
+		return
+	}
+
+	// Try as bare hostname — discover first channel
+	host = normalizeHost(s)
+	info, discErr := client.FetchNodeInfo(host)
+	if discErr != nil {
+		return "", "", fmt.Errorf("not a valid target and discovery failed on %s: %w", s, discErr)
+	}
+	if len(info.Channels) == 0 {
+		return "", "", fmt.Errorf("no channels found on %s", s)
+	}
+	if len(info.Channels) > 1 {
+		fmt.Fprintf(os.Stderr, "note: %s has %d channels, using %s (%s)\n",
+			s, len(info.Channels), info.Channels[0].ID, info.Channels[0].Name)
+	}
+	return info.Channels[0].ID, host, nil
+}
+
+// extractToken extracts the access token from a tltv:// URI target string.
+// Returns "" if the target is not a URI or has no token.
+func extractToken(target string) string {
+	if strings.HasPrefix(target, tltvScheme) {
+		if uri, err := parseTLTVUri(target); err == nil {
+			return uri.Token
+		}
+	}
+	return ""
 }
 
 // normalizeHost ensures a host has a port.
