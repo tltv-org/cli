@@ -37,6 +37,24 @@ func cmdRelay(args []string) {
 	peersStr := fs.String("peers", os.Getenv("PEERS"), "additional peer hints to advertise")
 	fs.StringVar(peersStr, "P", os.Getenv("PEERS"), "alias for --peers")
 
+	// Cache flags
+	defaultCache := os.Getenv("CACHE") == "1"
+	cacheEnabled := fs.Bool("cache", defaultCache, "enable in-memory HLS stream cache")
+
+	defaultMaxEntries := 100
+	if v := os.Getenv("CACHE_MAX_ENTRIES"); v != "" {
+		if n, err := fmt.Sscanf(v, "%d", &defaultMaxEntries); n != 1 || err != nil {
+			defaultMaxEntries = 100
+		}
+	}
+	cacheMaxEntries := fs.Int("cache-max-entries", defaultMaxEntries, "max cached items")
+
+	defaultCacheStats := 0
+	if v := os.Getenv("CACHE_STATS"); v != "" {
+		fmt.Sscanf(v, "%d", &defaultCacheStats)
+	}
+	cacheStatsInterval := fs.Int("cache-stats", defaultCacheStats, "log cache stats every N seconds (0 = off)")
+
 	// Tuning flags
 	defaultMetaPoll := "60s"
 	if v := os.Getenv("META_POLL"); v != "" {
@@ -56,8 +74,17 @@ func cmdRelay(args []string) {
 	}
 	peerPollStr := fs.String("peer-poll", defaultPeerPoll, "peer poll interval")
 
-	maxPeers := fs.Int("max-peers", 100, "max peers in exchange")
-	staleDays := fs.Int("stale-days", 7, "drop peers not seen in N days")
+	defaultMaxPeers := 100
+	if v := os.Getenv("MAX_PEERS"); v != "" {
+		fmt.Sscanf(v, "%d", &defaultMaxPeers)
+	}
+	maxPeers := fs.Int("max-peers", defaultMaxPeers, "max peers in exchange")
+
+	defaultStaleDays := 7
+	if v := os.Getenv("STALE_DAYS"); v != "" {
+		fmt.Sscanf(v, "%d", &defaultStaleDays)
+	}
+	staleDays := fs.Int("stale-days", defaultStaleDays, "drop peers not seen in N days")
 
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
@@ -75,6 +102,10 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for peer exchange\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         additional peer hints to advertise\n\n")
+		fmt.Fprintf(os.Stderr, "Cache:\n")
+		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory HLS stream cache\n")
+		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "      --cache-stats N      log cache stats every N seconds (0 = off)\n\n")
 		fmt.Fprintf(os.Stderr, "Tuning:\n")
 		fmt.Fprintf(os.Stderr, "      --meta-poll DUR      metadata poll interval (default: 60s)\n")
 		fmt.Fprintf(os.Stderr, "      --guide-poll DUR     guide poll interval (default: 15m)\n")
@@ -86,8 +117,10 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: CHANNELS, NODE, CONFIG, LISTEN, HOSTNAME,\n")
-		fmt.Fprintf(os.Stderr, "PEERS, META_POLL, GUIDE_POLL, PEER_POLL, LOG_LEVEL, LOG_FORMAT,\n")
-		fmt.Fprintf(os.Stderr, "LOG_FILE. Flags override env vars.\n\n")
+		fmt.Fprintf(os.Stderr, "PEERS, CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, META_POLL,\n")
+		fmt.Fprintf(os.Stderr, "GUIDE_POLL, PEER_POLL, MAX_PEERS, STALE_DAYS, LOG_LEVEL,\n")
+		fmt.Fprintf(os.Stderr, "LOG_FORMAT, LOG_FILE.\n")
+		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv relay --channels \"tltv://TVabc...@origin.example.com:443\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv relay --node origin.example.com:443\n")
@@ -235,15 +268,34 @@ func cmdRelay(args []string) {
 
 	logInfof("%d channels relaying", len(relayTargets))
 
+	// Set up HLS cache (if enabled)
+	var cache *hlsCache
+	if *cacheEnabled {
+		cache = newHLSCache(*cacheMaxEntries)
+		logInfof("HLS cache enabled (max %d entries)", *cacheMaxEntries)
+	}
+
 	// Start HTTP server
-	server := newRelayServer(registry, client)
-	httpSrv := &http.Server{Handler: server}
+	server := newRelayServer(registry, client, cache)
+	httpSrv := &http.Server{
+		Handler:           server,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	ln, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
 		fatal("listen %s: %v", *listenAddr, err)
 	}
-	logInfof("listening on %s", displayListenAddr(ln.Addr().String()))
+	addr := displayListenAddr(ln.Addr().String())
+	logInfof("listening on %s", addr)
+	for _, t := range relayTargets {
+		logInfof("stream: http://%s/tltv/v1/channels/%s/stream.m3u8", addr, t.ChannelID)
+	}
+	if len(relayTargets) == 1 {
+		logInfof("tltv URI: tltv://%s@%s", relayTargets[0].ChannelID, addr)
+	}
 
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -254,6 +306,23 @@ func cmdRelay(args []string) {
 	// Start poll loops
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start cache stats + sweep goroutines
+	if cache != nil {
+		go hlsCacheStatsLoop(cache, time.Duration(*cacheStatsInterval)*time.Second, ctx.Done())
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					cache.sweep()
+				}
+			}
+		}()
+	}
 
 	if metaPoll > 0 {
 		go relayMetadataPollLoop(ctx, metaPoll, client, registry, relayTargets)
@@ -398,20 +467,20 @@ func relayPeerPollLoop(ctx context.Context, interval time.Duration, client *Clie
 							}
 						}
 					}
-				if !found {
-					continue
-				}
+					if !found {
+						continue
+					}
 
-				// Step 3 (spec 11.5): verify signed metadata before adding peer
-				metaRes, err := relayFetchAndVerifyMetadata(client, p.ID, []string{hint})
-				if err != nil {
-					continue
-				}
-				if metaRes.IsMigration {
-					continue
-				}
+					// Step 3 (spec 11.5): verify signed metadata before adding peer
+					metaRes, err := relayFetchAndVerifyMetadata(client, p.ID, []string{hint})
+					if err != nil {
+						continue
+					}
+					if metaRes.IsMigration {
+						continue
+					}
 
-				lastSeen := time.Now()
+					lastSeen := time.Now()
 					if p.LastSeen != "" {
 						if t, err := time.Parse(timestampFormat, p.LastSeen); err == nil {
 							lastSeen = t

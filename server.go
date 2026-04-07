@@ -293,10 +293,14 @@ func cmdServerTest(args []string) {
 	addr := displayListenAddr(ln.Addr().String())
 	logInfof("listening on %s", addr)
 	logInfof("stream: http://%s/tltv/v1/channels/%s/stream.m3u8", addr, channelID)
-	logInfof("direct: http://%s/stream.m3u8", addr)
 	logInfof("tltv URI: tltv://%s@%s", channelID, addr)
 
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		if err := srv.Serve(ln); err != http.ErrServerClosed {
 			logErrorf("http: %v", err)

@@ -134,7 +134,9 @@ tltv completion --install zsh
 |---|---|
 | `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
 | `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
-| `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
+| `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Built-in HLS cache with singleflight deduplication (`--cache`). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
+| `receiver <target>` | Headless HLS stream consumer. Connects to a TLTV channel, fetches segments, verifies metadata, and reports statistics. Modes: `--monitor` (health check, exit 0/1), `--record` (save to file), `--pipe` (raw TS to stdout), `--duration` (timed run). Tracks latency percentiles, cache hit rates, and bandwidth. |
+| `loadtest <target>` | Multi-receiver load simulator. Spawns N concurrent receivers (`--receivers`/`-n`) with optional ramp-up (`--ramp`). Reports aggregate stats: segment/manifest latency percentiles, cache hit rates, bandwidth, error rates. |
 
 ### Operations
 
@@ -340,6 +342,22 @@ tltv relay --config relay.json --hostname relay.example.com:443
 
 The relay verifies every metadata and guide document against the channel's Ed25519 public key before caching. Documents are served verbatim (raw bytes preserved, unknown fields intact). Private, on-demand, and retired channels are refused per spec. If a channel transitions to any of these states, the relay stops immediately.
 
+### HLS Cache
+
+Enable `--cache` for in-memory caching with singleflight deduplication. When 500 viewers request the same segment simultaneously, the relay makes one upstream fetch -- the other 499 get the cached result. This is the core scaling mechanism.
+
+```bash
+# Caching relay with stats logging
+tltv relay --node origin.example.com:443 --cache --cache-stats 30
+
+# Docker
+docker run -e NODE=origin.example.com:443 -e CACHE=1 tltv relay
+```
+
+TTLs follow the protocol spec (§9.10): 1 second for manifests, 3600 seconds for segments (immutable once created). The relay ignores upstream HTTP cache headers and applies protocol-recommended TTLs. Responses include a `Cache-Status` header (RFC 9211) reporting `HIT` or `MISS`.
+
+Cache flags: `--cache` (`CACHE=1`), `--cache-max-entries` (`CACHE_MAX_ENTRIES`, default 100), `--cache-stats N` (`CACHE_STATS`, log stats every N seconds).
+
 Migration chains are followed automatically (up to 5 hops). Peer exchange participates in gossip with validated entries, 7-day staleness cutoff, and 100-entry limit.
 
 Config file format:
@@ -350,7 +368,7 @@ Config file format:
 }
 ```
 
-Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`, `MAX_PEERS`, `STALE_DAYS`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml
@@ -366,6 +384,53 @@ services:
 volumes:
   relay-data:
 ```
+
+## Receiver
+
+The receiver is a headless HLS stream consumer. It connects to a TLTV channel, fetches segments, verifies protocol compliance, and reports statistics. Used directly as a monitoring/recording tool, and internally by `loadtest`.
+
+```bash
+# Watch a channel -- prints live stats, Ctrl-C to stop
+tltv receiver tltv://TVabc...@demo.timelooptv.org:443
+
+# Health check -- exit 0 if stream is live, 1 if not
+tltv receiver --monitor --timeout 10s tltv://TVabc...@demo.timelooptv.org:443
+
+# Record to file
+tltv receiver --record out.ts tltv://TVabc...@demo.timelooptv.org:443
+
+# Pipe to a player
+tltv receiver --pipe tltv://TVabc...@demo.timelooptv.org:443 | mpv -
+
+# Timed run with JSON stats
+tltv --json receiver --duration 5m tltv://TVabc...@demo.timelooptv.org:443
+```
+
+Tracks segment latency (p50/p95/p99), cache hit rates (`Cache-Status` header from relays), bandwidth, and error rates. Retries failed fetches with exponential backoff. Periodically re-verifies metadata signatures. `--pipe` and `--record` are mutually exclusive. `--pipe` and `--json` are mutually exclusive.
+
+Environment variables: `MONITOR=1`, `TIMEOUT`, `DURATION`, `RECORD`, `PIPE=1`, `URL`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+
+## Load Testing
+
+Spawns N concurrent receivers against a target to simulate viewer load.
+
+```bash
+# 200 viewers for 5 minutes
+tltv loadtest -n 200 -d 5m tltv://TVabc...@demo.timelooptv.org:443
+
+# Ramp up gradually
+tltv loadtest -n 500 --ramp 60s -d 10m TVabc...@localhost:8000
+
+# Target a direct HLS URL
+tltv loadtest -n 100 -d 5m --url https://demo.timelooptv.org/tltv/v1/channels/TVabc.../stream.m3u8
+
+# JSON output for scripting
+tltv --json loadtest -n 50 -d 2m TVabc...@localhost:8000
+```
+
+Reports aggregate statistics: manifest/segment latency percentiles, cache hit rates, total bandwidth, and error rates. Validates the target before spawning receivers. Live progress output every 5 seconds.
+
+Environment variables: `RECEIVERS`, `DURATION`, `RAMP`, `URL`, `CONNECT_TIMEOUT`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 ## Project Structure
 
@@ -387,18 +452,22 @@ server_audio.go     1 kHz AAC-LC tone generator (pre-encoded ADTS frame, 48kHz m
 server_mpegts.go    MPEG-TS muxer (188-byte packets, PAT/PMT, PES, PCR, video + audio)
 server_hls.go       HLS segmenter (ring buffer, sliding window m3u8)
 server_pattern.go   SMPTE EG 1-1990 bars (3-row + PLUGE), 8x8 bitmap font, frame rendering
-server_serve.go     HTTP handlers (TLTV protocol + direct HLS)
+server_serve.go     HTTP handlers (TLTV protocol endpoints)
 bridge*.go          Bridge origin server (source parsing, identity, HLS rewriting, HTTP)
-relay*.go           Relay node (upstream fetch+verify, caching, gossip, HTTP)
+relay*.go           Relay node (upstream fetch+verify, HLS cache, singleflight, gossip, HTTP)
+receiver.go         HLS receiver (manifest parser, segment tracking, stats, retry)
+loadtest.go         Multi-receiver load simulator (ramp-up, aggregate stats, percentiles)
 main_test.go        82 tests against all protocol test vectors + edge cases
 bridge_test.go      73 bridge tests (source parsing, manifest rewriting, endpoints)
 relay_test.go       37 relay tests (fetch+verify, access checks, migration, endpoints)
+relay_cache_test.go 17 cache tests (hit/miss, TTL, singleflight, eviction, error non-caching)
+receiver_test.go    21 receiver tests (HLS parser, segment resolution, stats, live stream)
 server_gen_test.go  15 tests (raw H.264, solid gray, multi-resolution, text overlay, I_4x4, font specimen, audio tone, PMT, audio muxing)
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 205 tests.
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 234 tests.
 
 ## Links
 

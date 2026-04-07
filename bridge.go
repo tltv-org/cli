@@ -22,6 +22,7 @@ func cmdBridge(args []string) {
 
 	// Channel defaults
 	nameArg := fs.String("name", os.Getenv("NAME"), "channel name (single-stream mode only)")
+	fs.StringVar(nameArg, "n", os.Getenv("NAME"), "alias for --name")
 	onDemand := fs.Bool("on-demand", os.Getenv("ON_DEMAND") == "1", "mark all channels as on-demand")
 
 	defaultPoll := "60s"
@@ -172,13 +173,26 @@ func cmdBridge(args []string) {
 
 	// Start HTTP server
 	server := newBridgeServer(registry)
-	httpSrv := &http.Server{Handler: server}
+	httpSrv := &http.Server{
+		Handler:           server,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	ln, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
 		fatal("listen %s: %v", *listenAddr, err)
 	}
-	logInfof("listening on %s", displayListenAddr(ln.Addr().String()))
+	addr := displayListenAddr(ln.Addr().String())
+	logInfof("listening on %s", addr)
+	channelList := registry.ListChannels()
+	for _, ch := range channelList {
+		logInfof("stream: http://%s/tltv/v1/channels/%s/stream.m3u8", addr, ch.ChannelID)
+	}
+	if len(channelList) == 1 {
+		logInfof("tltv URI: tltv://%s@%s", channelList[0].ChannelID, addr)
+	}
 
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {

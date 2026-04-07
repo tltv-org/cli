@@ -161,38 +161,15 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		http.NotFound(w, r)
 	})
 
-	// --- Direct HLS Endpoints (for simple clients) ---
-
-	mux.HandleFunc("/stream.m3u8", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		manifest := seg.getManifest()
-		if manifest == "" {
-			http.Error(w, "stream not ready", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		w.Header().Set("Cache-Control", "no-cache, no-store")
-		w.Write([]byte(manifest))
-	})
-
+	// Catch-all: 404 for unknown paths
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		// CORS preflight
 		if r.Method == "OPTIONS" {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-
-		// HLS segment: /seg{N}.ts
-		path := r.URL.Path
-		if strings.HasPrefix(path, "/seg") && strings.HasSuffix(path, ".ts") {
-			serveSegment(w, r, seg, path[4:len(path)-3])
-			return
-		}
-
 		http.NotFound(w, r)
 	})
 }

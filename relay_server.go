@@ -13,15 +13,18 @@ import (
 // relayServer implements the TLTV protocol HTTP endpoints for relayed channels.
 type relayServer struct {
 	registry *relayRegistry
-	client   *Client // for proxying streams from upstream
+	client   *Client    // for proxying streams from upstream
+	cache    *hlsCache  // optional HLS cache (nil = disabled)
 	mux      *http.ServeMux
 }
 
 // newRelayServer creates a relay HTTP server with all protocol endpoints.
-func newRelayServer(registry *relayRegistry, client *Client) *relayServer {
+// Pass cache=nil to disable caching.
+func newRelayServer(registry *relayRegistry, client *Client, cache *hlsCache) *relayServer {
 	s := &relayServer{
 		registry: registry,
 		client:   client,
+		cache:    cache,
 		mux:      http.NewServeMux(),
 	}
 
@@ -218,6 +221,8 @@ func (s *relayServer) serveGuideXML(w http.ResponseWriter, ch *relayRegisteredCh
 
 // serveStream proxies HLS content from the upstream origin.
 // Rewrites absolute URLs to relative so viewers fetch through the relay.
+// When cache is enabled, uses singleflight deduplication and protocol-compliant
+// TTLs (1s for manifests, 3600s for segments) per spec section 9.10.
 func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *relayRegisteredChannel, subPath string) {
 	if !bridgeValidateSubPath(subPath) {
 		bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
@@ -251,6 +256,38 @@ func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *re
 		fetchURL = parsed.ResolveReference(ref).String()
 	}
 
+	// Cache path: use full request path as cache key
+	if s.cache != nil {
+		cacheKey := r.URL.Path
+		data, contentType, hit, err := s.cache.getOrFetch(cacheKey, func() (*hlsCacheFetchResult, error) {
+			fr, err := hlsCacheFetchUpstream(s.client.http, fetchURL, r)
+			if err != nil {
+				return nil, err
+			}
+			// Rewrite manifests before caching
+			if strings.HasSuffix(subPath, ".m3u8") {
+				rewritten := bridgeRewriteManifest(manifestURL, fr.data, "")
+				fr.data = rewritten
+			}
+			return fr, nil
+		})
+		if err != nil {
+			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		bridgeSetStreamHeaders(w, subPath, false)
+		if hit {
+			w.Header().Set("Cache-Status", "HIT")
+		} else {
+			w.Header().Set("Cache-Status", "MISS")
+		}
+		w.Write(data)
+		_ = contentType // headers set by bridgeSetStreamHeaders
+		return
+	}
+
+	// Non-cache path: direct proxy
 	req, err := http.NewRequestWithContext(r.Context(), "GET", fetchURL, nil)
 	if err != nil {
 		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)

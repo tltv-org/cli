@@ -88,7 +88,9 @@ func usage() {
 	fmt.Fprintf(w, "Server:\n")
 	fmt.Fprintf(w, "  server test            Start a test signal generator (pure Go video)\n")
 	fmt.Fprintf(w, "  bridge                 Start a bridge origin server\n")
-	fmt.Fprintf(w, "  relay                  Start a relay node\n\n")
+	fmt.Fprintf(w, "  relay                  Start a relay node\n")
+	fmt.Fprintf(w, "  receiver <target>      Connect to a channel and consume the stream\n")
+	fmt.Fprintf(w, "  loadtest <target>      Load test with multiple concurrent receivers\n\n")
 	fmt.Fprintf(w, "Operations:\n")
 	fmt.Fprintf(w, "  migrate                Create a migration document\n")
 	fmt.Fprintf(w, "  update                 Update to the latest release\n")
@@ -186,6 +188,10 @@ dispatch:
 		cmdBridge(cmdArgs)
 	case "relay":
 		cmdRelay(cmdArgs)
+	case "receiver":
+		cmdReceiver(cmdArgs)
+	case "loadtest":
+		cmdLoadtest(cmdArgs)
 	case "migrate":
 		cmdMigrate(cmdArgs)
 	case "completion":
@@ -850,7 +856,7 @@ var allCommands = []string{
 	"sign", "verify", "template",
 	"parse", "format",
 	"resolve", "node", "fetch", "guide", "peers", "stream", "crawl",
-	"server", "bridge", "relay",
+	"server", "bridge", "relay", "receiver", "loadtest",
 	"migrate", "update", "completion", "version",
 }
 
