@@ -414,7 +414,7 @@ tltv receiver --pipe tltv://TVabc...@demo.timelooptv.org:443 | mpv -
 tltv --json receiver --duration 5m tltv://TVabc...@demo.timelooptv.org:443
 ```
 
-Tracks segment latency (p50/p95/p99), cache hit rates (`Cache-Status` header from relays), bandwidth, and error rates. Retries failed fetches with exponential backoff. Periodically re-verifies metadata signatures. `--pipe` and `--record` are mutually exclusive. `--pipe` and `--json` are mutually exclusive.
+Tracks segment latency (p50/p95/p99), cache hit rates (`Cache-Status` header from relays), bandwidth, and error rates. Retries failed fetches with exponential backoff. Periodically re-verifies metadata signatures. `--pipe` starts from the live edge (last 3 segments) for smooth player startup; `--record` starts from the full manifest window. `--pipe` and `--record` are mutually exclusive. `--pipe` and `--json` are mutually exclusive.
 
 Environment variables: `MONITOR=1`, `TIMEOUT`, `DURATION`, `RECORD`, `PIPE=1`, `URL`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
@@ -496,13 +496,13 @@ hls.min.js          Vendored HLS.js latest stable (~530 KB), embedded via go:emb
 main_test.go        85 tests against all protocol test vectors + edge cases
 bridge_test.go      68 bridge tests (source parsing, manifest rewriting, endpoints)
 relay_test.go       47 relay tests (fetch+verify, access checks, migration, endpoints, cache)
-receiver_test.go    20 receiver tests (HLS parser, segment resolution, stats, live stream)
+receiver_test.go    22 receiver tests (HLS parser, segment resolution, stats, live stream, LiveEdge)
 server_gen_test.go  20 tests (raw H.264, multi-resolution, I_4x4, font, audio, PMT, XMLTV)
 Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 240 tests.
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 242 tests.
 
 ## Links
 

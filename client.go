@@ -42,7 +42,8 @@ type Peer struct {
 
 // Client is an HTTP client for TLTV protocol operations.
 type Client struct {
-	http *http.Client
+	http     *http.Client
+	insecure bool // when true, baseURL defaults to HTTP instead of HTTPS
 }
 
 // newClient creates a new TLTV HTTP client.
@@ -63,6 +64,7 @@ func newClient(insecure bool) *Client {
 			Timeout:   15 * time.Second,
 			Transport: tr,
 		},
+		insecure: insecure,
 	}
 }
 
@@ -83,6 +85,7 @@ func newSSRFSafeClient(insecure bool) *Client {
 			Timeout:   15 * time.Second,
 			Transport: tr,
 		},
+		insecure: insecure,
 	}
 }
 
@@ -121,7 +124,7 @@ func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 }
 
 // baseURL constructs the base URL for a host.
-// Defaults to HTTPS, but uses HTTP for localhost/loopback.
+// Defaults to HTTPS, but uses HTTP for localhost/loopback or when --insecure is set.
 func (c *Client) baseURL(host string) string {
 	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
 		return strings.TrimRight(host, "/")
@@ -129,12 +132,16 @@ func (c *Client) baseURL(host string) string {
 
 	// Normalize host: add default port if missing
 	if _, _, err := net.SplitHostPort(host); err != nil {
-		host = host + ":443"
+		if c.insecure {
+			host = host + ":80"
+		} else {
+			host = host + ":443"
+		}
 	}
 
-	// Detect local addresses -> use HTTP
+	// Use HTTP for --insecure or local addresses
 	scheme := "https"
-	if isLocalAddress(host) {
+	if c.insecure || isLocalAddress(host) {
 		scheme = "http"
 	}
 

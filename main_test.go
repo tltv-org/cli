@@ -1986,6 +1986,92 @@ func TestStreamURL(t *testing.T) {
 	}
 }
 
+func TestStreamURLInsecure(t *testing.T) {
+	client := newClient(true)
+	channelID := "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3"
+
+	cases := []struct {
+		name     string
+		host     string
+		expected string
+	}{
+		{
+			"insecure uses http for remote host",
+			"example.com:8000",
+			"http://example.com:8000/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"insecure default port is 80",
+			"example.com",
+			"http://example.com:80/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"insecure docker hostname",
+			"tltv:8000",
+			"http://tltv:8000/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"insecure localhost still http",
+			"localhost:8000",
+			"http://localhost:8000/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"explicit http:// preserved",
+			"http://origin:8000",
+			"http://origin:8000/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+		{
+			"explicit https:// preserved even with insecure",
+			"https://example.com",
+			"https://example.com/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			url := client.baseURL(tc.host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
+			if url != tc.expected {
+				t.Fatalf("got %q, want %q", url, tc.expected)
+			}
+		})
+	}
+}
+
+func TestHoistGlobalFlags(t *testing.T) {
+	// Reset globals before test
+	flagJSON = false
+	flagNoColor = false
+	flagInsecure = false
+	flagLocal = false
+
+	args := []string{"--channels", "tltv://TV1@host:8000", "--insecure", "--local", "--cache", "--log-level", "info"}
+	remaining := hoistGlobalFlags(args)
+
+	if !flagInsecure {
+		t.Error("--insecure not hoisted")
+	}
+	if !flagLocal {
+		t.Error("--local not hoisted")
+	}
+
+	// Subcommand flags should remain
+	expected := []string{"--channels", "tltv://TV1@host:8000", "--cache", "--log-level", "info"}
+	if len(remaining) != len(expected) {
+		t.Fatalf("remaining args: got %v, want %v", remaining, expected)
+	}
+	for i, arg := range remaining {
+		if arg != expected[i] {
+			t.Errorf("remaining[%d]: got %q, want %q", i, arg, expected[i])
+		}
+	}
+
+	// Reset globals after test
+	flagJSON = false
+	flagNoColor = false
+	flagInsecure = false
+	flagLocal = false
+}
+
 // demoNode tries to reach the public TLTV demo server.
 // Returns the host or skips the test if the demo is unreachable.
 func demoNode(t *testing.T) string {

@@ -64,7 +64,7 @@ func usage() {
 	fmt.Fprintf(w, "Global Flags:\n")
 	fmt.Fprintf(w, "  --json        Machine-readable JSON output\n")
 	fmt.Fprintf(w, "  --no-color    Disable colored output\n")
-	fmt.Fprintf(w, "  --insecure    Skip TLS verification\n")
+	fmt.Fprintf(w, "  --insecure    Use HTTP transport (and skip TLS verification)\n")
 	fmt.Fprintf(w, "  --local       Allow local/private address hints\n\n")
 	fmt.Fprintf(w, "Identity & Keys:\n")
 	fmt.Fprintf(w, "  keygen                 Generate a new channel keypair\n")
@@ -150,6 +150,7 @@ func main() {
 
 dispatch:
 	_ = globalArgs
+	cmdArgs = hoistGlobalFlags(cmdArgs)
 	initColor()
 
 	switch cmd {
@@ -211,6 +212,29 @@ dispatch:
 		usage()
 		os.Exit(1)
 	}
+}
+
+// hoistGlobalFlags scans subcommand args for known global flags, sets them,
+// and returns the remaining args. This allows users to place global flags
+// after the subcommand name (e.g. "tltv relay --insecure" instead of
+// "tltv --insecure relay").
+func hoistGlobalFlags(args []string) []string {
+	var remaining []string
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			flagJSON = true
+		case "--no-color":
+			flagNoColor = true
+		case "--insecure":
+			flagInsecure = true
+		case "--local":
+			flagLocal = true
+		default:
+			remaining = append(remaining, arg)
+		}
+	}
+	return remaining
 }
 
 // ---------- keygen ----------
@@ -970,7 +994,7 @@ _tltv() {
     _arguments -C \
         '--json[JSON output]' \
         '--no-color[Disable colors]' \
-        '--insecure[Skip TLS verification]' \
+        '--insecure[Use HTTP transport]' \
         '--local[Allow local/private address hints]' \
         '1:command:->cmd' \
         '*::arg:->args'
@@ -1011,7 +1035,7 @@ func completionFish() string {
 	sb.WriteString("complete -c tltv -e\n")
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l json -d 'JSON output'\n")
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l no-color -d 'Disable colors'\n")
-	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l insecure -d 'Skip TLS'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l insecure -d 'Use HTTP transport'\n")
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l local -d 'Allow local addresses'\n")
 
 	descriptions := map[string]string{
