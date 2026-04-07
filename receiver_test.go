@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -359,6 +360,160 @@ func TestReceiver_LiveStream(t *testing.T) {
 	}
 	if snap.SegmentErrors != 0 {
 		t.Errorf("SegmentErrors = %d, want 0", snap.SegmentErrors)
+	}
+}
+
+func TestReceiver_LiveEdge(t *testing.T) {
+	// A manifest with 7 segments. With LiveEdge=3, the receiver should only
+	// fetch the last 3 on the first poll (skipping the first 4). Without
+	// LiveEdge, it fetches all 7.
+	var fetched []string
+	var mu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:100\n")
+		for i := 0; i < 7; i++ {
+			fmt.Fprintf(w, "#EXTINF:2.000,\nseg%d.ts\n", 100+i)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".ts") {
+			mu.Lock()
+			fetched = append(fetched, r.URL.Path)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "video/mp2t")
+			w.Write([]byte("ts-data"))
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Test WITH LiveEdge=3: should fetch only last 3 segments (104, 105, 106)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	stats := &ReceiverStats{StartTime: time.Now()}
+	recv := &Receiver{
+		DirectURL:      srv.URL + "/stream.m3u8",
+		Client:         newClient(false),
+		Stats:          stats,
+		VerifyMetadata: false,
+		LiveEdge:       3,
+	}
+	recv.OnSegment = func(sr ReceiverSegmentResult) {
+		// Stop after first poll's segments are fetched
+		if sr.Sequence == 106 {
+			cancel()
+		}
+	}
+	recv.Run(ctx)
+
+	mu.Lock()
+	edgeFetched := make([]string, len(fetched))
+	copy(edgeFetched, fetched)
+	mu.Unlock()
+
+	// Should have fetched exactly 3 segments: 104, 105, 106
+	if len(edgeFetched) < 3 {
+		t.Fatalf("LiveEdge=3: fetched %d segments, want >= 3", len(edgeFetched))
+	}
+	// First segment fetched should be seg104, not seg100
+	if edgeFetched[0] != "/seg104.ts" {
+		t.Errorf("LiveEdge=3: first segment = %q, want /seg104.ts", edgeFetched[0])
+	}
+	for _, path := range edgeFetched[:3] {
+		if path == "/seg100.ts" || path == "/seg101.ts" || path == "/seg102.ts" || path == "/seg103.ts" {
+			t.Errorf("LiveEdge=3: should not fetch old segment %s", path)
+		}
+	}
+
+	// Test WITHOUT LiveEdge: should fetch all 7 segments starting from 100
+	fetched = nil
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel2()
+
+	stats2 := &ReceiverStats{StartTime: time.Now()}
+	recv2 := &Receiver{
+		DirectURL:      srv.URL + "/stream.m3u8",
+		Client:         newClient(false),
+		Stats:          stats2,
+		VerifyMetadata: false,
+		// LiveEdge: 0 (default — fetch all)
+	}
+	recv2.OnSegment = func(sr ReceiverSegmentResult) {
+		if sr.Sequence == 106 {
+			cancel2()
+		}
+	}
+	recv2.Run(ctx2)
+
+	mu.Lock()
+	allFetched := make([]string, len(fetched))
+	copy(allFetched, fetched)
+	mu.Unlock()
+
+	if len(allFetched) < 7 {
+		t.Fatalf("LiveEdge=0: fetched %d segments, want >= 7", len(allFetched))
+	}
+	if allFetched[0] != "/seg100.ts" {
+		t.Errorf("LiveEdge=0: first segment = %q, want /seg100.ts", allFetched[0])
+	}
+}
+
+func TestReceiver_LiveEdge_SmallManifest(t *testing.T) {
+	// When the manifest has fewer segments than LiveEdge, all segments are fetched.
+	var fetched []string
+	var mu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:50\n")
+		fmt.Fprint(w, "#EXTINF:2.000,\nseg50.ts\n#EXTINF:2.000,\nseg51.ts\n")
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".ts") {
+			mu.Lock()
+			fetched = append(fetched, r.URL.Path)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "video/mp2t")
+			w.Write([]byte("ts-data"))
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	stats := &ReceiverStats{StartTime: time.Now()}
+	recv := &Receiver{
+		DirectURL:      srv.URL + "/stream.m3u8",
+		Client:         newClient(false),
+		Stats:          stats,
+		VerifyMetadata: false,
+		LiveEdge:       3, // larger than manifest
+	}
+	recv.OnSegment = func(sr ReceiverSegmentResult) {
+		if sr.Sequence == 51 {
+			cancel()
+		}
+	}
+	recv.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Both segments should be fetched (manifest has only 2, LiveEdge=3 doesn't skip any)
+	if len(fetched) < 2 {
+		t.Fatalf("small manifest: fetched %d segments, want >= 2", len(fetched))
+	}
+	if fetched[0] != "/seg50.ts" {
+		t.Errorf("small manifest: first segment = %q, want /seg50.ts", fetched[0])
 	}
 }
 

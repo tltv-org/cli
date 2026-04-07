@@ -244,6 +244,11 @@ type Receiver struct {
 	// RecordWriter receives raw segment data (optional).
 	RecordWriter io.Writer
 
+	// LiveEdge is the number of segments from the live edge to start from on
+	// the first manifest poll. 0 means start from all segments (default for
+	// stats/record). 3 is the HLS-recommended value for live playback (--pipe).
+	LiveEdge int
+
 	// stopped is set when the receiver should stop.
 	stopped atomic.Bool
 }
@@ -331,9 +336,18 @@ func (recv *Receiver) Run(ctx context.Context) error {
 			continue
 		}
 
+		// On first poll with LiveEdge, skip to near the live edge.
+		// This avoids downloading the entire manifest window, which causes
+		// player stalls when piping (the player runs out of buffer while
+		// the receiver downloads old segments sequentially).
+		segments := manifest.Segments
+		if firstPoll && recv.LiveEdge > 0 && len(segments) > recv.LiveEdge {
+			segments = segments[len(segments)-recv.LiveEdge:]
+		}
+
 		// Count new segments
 		newCount := 0
-		for _, seg := range manifest.Segments {
+		for _, seg := range segments {
 			if seg.Sequence > lastSeq || firstPoll {
 				newCount++
 			}
@@ -350,7 +364,7 @@ func (recv *Receiver) Run(ctx context.Context) error {
 		}
 
 		// Fetch new segments
-		for _, seg := range manifest.Segments {
+		for _, seg := range segments {
 			if !firstPoll && seg.Sequence <= lastSeq {
 				continue
 			}
@@ -688,6 +702,13 @@ func cmdReceiver(args []string) {
 		Stats:          stats,
 		VerifyMetadata: !(*directURL != ""),
 		RecordWriter:   recordWriter,
+	}
+
+	// For --pipe, start from near the live edge (last 3 segments per HLS spec)
+	// instead of downloading the entire manifest window. This prevents player
+	// stalls caused by sequential downloads filling a stale buffer.
+	if *pipe {
+		recv.LiveEdge = 3
 	}
 
 	// Monitor mode: connect, check stream, exit
