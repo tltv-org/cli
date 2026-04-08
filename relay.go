@@ -40,6 +40,9 @@ func cmdRelay(args []string) {
 	// Cache flags
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
+	// Viewer
+	viewerEnabled := addViewerFlag(fs)
+
 	// Tuning flags
 	defaultMetaPoll := "60s"
 	if v := os.Getenv("META_POLL"); v != "" {
@@ -91,6 +94,8 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory HLS stream cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
 		fmt.Fprintf(os.Stderr, "      --cache-stats N      log cache stats every N seconds (0 = off)\n\n")
+		fmt.Fprintf(os.Stderr, "Viewer:\n")
+		fmt.Fprintf(os.Stderr, "      --viewer             serve built-in web player at / (default: off)\n\n")
 		fmt.Fprintf(os.Stderr, "Tuning:\n")
 		fmt.Fprintf(os.Stderr, "      --meta-poll DUR      metadata poll interval (default: 60s)\n")
 		fmt.Fprintf(os.Stderr, "      --guide-poll DUR     guide poll interval (default: 15m)\n")
@@ -102,7 +107,7 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: CHANNELS, NODE, CONFIG, LISTEN, HOSTNAME,\n")
-		fmt.Fprintf(os.Stderr, "PEERS, CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, META_POLL,\n")
+		fmt.Fprintf(os.Stderr, "PEERS, CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1, META_POLL,\n")
 		fmt.Fprintf(os.Stderr, "GUIDE_POLL, PEER_POLL, MAX_PEERS, STALE_DAYS, LOG_LEVEL,\n")
 		fmt.Fprintf(os.Stderr, "LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
@@ -262,6 +267,32 @@ func cmdRelay(args []string) {
 
 	// Start HTTP server
 	server := newRelayServer(registry, client, cache)
+
+	// Embed viewer (first non-migrated channel)
+	var viewerChannelName string
+	if *viewerEnabled {
+		for _, ch := range registry.ListChannels() {
+			if ch.Name != "(migrated)" {
+				chID := ch.ChannelID
+				viewerEmbedRoutes(server.mux, func() map[string]interface{} {
+					current := registry.GetChannel(chID)
+					if current == nil {
+						return map[string]interface{}{}
+					}
+					info := viewerBuildInfo(current.ChannelID, current.Name, current.Metadata, current.Guide)
+					info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
+					info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
+					if registry.hostname != "" {
+						info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
+					}
+					return info
+				})
+				viewerChannelName = ch.Name
+				break
+			}
+		}
+	}
+
 	httpSrv := &http.Server{
 		Handler:           server,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -280,6 +311,9 @@ func cmdRelay(args []string) {
 	}
 	if len(relayTargets) == 1 {
 		logInfof("tltv URI: tltv://%s@%s", relayTargets[0].ChannelID, addr)
+	}
+	if *viewerEnabled && viewerChannelName != "" {
+		logInfof("viewer: http://%s (channel: %s)", addr, viewerChannelName)
 	}
 
 	go func() {

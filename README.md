@@ -132,9 +132,9 @@ tltv completion --install zsh
 
 | Command | Description |
 |---|---|
-| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Built-in response cache with singleflight deduplication (`--cache`). Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
-| `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Built-in response cache with singleflight deduplication (`--cache`). Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
-| `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Built-in HLS cache with singleflight deduplication (`--cache`). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
+| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Built-in response cache with singleflight deduplication (`--cache`). Built-in web player (`--viewer`). Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
+| `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Built-in response cache with singleflight deduplication (`--cache`). Built-in web player (`--viewer`). Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
+| `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Built-in HLS cache with singleflight deduplication (`--cache`). Built-in web player (`--viewer`). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
 | `receiver <target>` | Headless HLS stream consumer. Connects to a TLTV channel, fetches segments, verifies metadata, and reports statistics. Modes: `--monitor` (health check, exit 0/1), `--record` (save to file), `--pipe` (raw TS to stdout), `--duration` (timed run). Tracks latency percentiles, cache hit rates, and bandwidth. |
 | `viewer <target>` | Open a local web viewer for a channel. Fetches and verifies metadata, serves an HLS.js player with live debug stats. Proxies the stream through localhost with server-side token injection. |
 | `loadtest <target>` | Multi-receiver load simulator. Spawns N concurrent receivers (`--receivers`/`-n`) with optional ramp-up (`--ramp`). Reports aggregate stats: segment/manifest latency percentiles, cache hit rates, bandwidth, error rates. |
@@ -285,8 +285,11 @@ tltv server test --name "Test" --segment-duration 4 --segment-count 3
 # Enable response cache (singleflight dedup for high viewer counts)
 tltv server test --name "Test" --cache --cache-stats 30
 
+# Serve with built-in web player at /
+tltv server test --name "Test" --viewer
+
 # Docker with environment variables
-docker run -e NAME=TEST -e WIDTH=1280 -e HEIGHT=720 -e CACHE=1 tltv server test
+docker run -e NAME=TEST -e WIDTH=1280 -e HEIGHT=720 -e CACHE=1 -e VIEWER=1 tltv server test
 ```
 
 Generates a full SMPTE EG 1-1990 color bar test pattern (3-row: 75% bars, reverse castellations, PLUGE) with "TLTV" branding, channel name, and wall clock overlay. Text size auto-scales with resolution (overridable via `--font-scale`). Any resolution is accepted -- non-16-aligned dimensions are rounded up internally with SPS frame cropping.
@@ -295,7 +298,7 @@ The H.264 encoder uses adaptive I_16x16/I_4x4 prediction with CAVLC entropy codi
 
 The MPEG-TS muxer wraps encoded frames into 188-byte transport stream packets with PAT/PMT tables, PES headers, and PCR timestamps. The HLS segmenter maintains a configurable sliding-window playlist (default: 2-second segments, 5-segment window).
 
-Full TLTV protocol endpoints are served: `/.well-known/tltv`, signed metadata, signed guide, HLS stream, and peers. Documents are re-signed every 5 minutes. If no `--key` is provided, an ephemeral key is generated. Use `--timezone` with an IANA timezone name (e.g. `America/New_York`) to display local time on the clock overlay. Enable `--cache` for in-memory response caching with singleflight deduplication -- 500 viewers requesting the same segment result in 1 segmenter lock acquisition instead of 500. All flags also accept environment variables for Docker deployment.
+Full TLTV protocol endpoints are served: `/.well-known/tltv`, signed metadata, signed guide, HLS stream, and peers. Documents are re-signed every 5 minutes. If no `--key` is provided, an ephemeral key is generated. Use `--timezone` with an IANA timezone name (e.g. `America/New_York`) to display local time on the clock overlay. Enable `--cache` for in-memory response caching with singleflight deduplication -- 500 viewers requesting the same segment result in 1 segmenter lock acquisition instead of 500. Enable `--viewer` to serve the built-in web player at `/` -- same Phosphor Dark theme as `tltv viewer`, pointing directly at the protocol stream path (no proxy needed on same origin). All flags also accept environment variables for Docker deployment.
 
 All three long-running commands (server, bridge, relay) support structured logging: `--log-level` (debug/info/error), `--log-format` (human/json), `--log-file` (path). Environment variables: `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
@@ -321,7 +324,7 @@ tltv bridge --stream http://mediaserver:8000/api/channels.m3u \
 
 Source formats are auto-detected: M3U playlists (with tvg-id/tvg-name attributes), JSON channel arrays, local directories with sidecar `.json` files, or single HLS streams. Guide data can be XMLTV or JSON.
 
-All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml
@@ -386,7 +389,7 @@ Config file format:
 }
 ```
 
-Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`, `MAX_PEERS`, `STALE_DAYS`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`, `MAX_PEERS`, `STALE_DAYS`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml
@@ -451,6 +454,8 @@ The viewer proxies the HLS stream through localhost, rewriting manifests so the 
 The debug panel shows: stream status, segment number (real HLS media sequence), bitrate, buffer length, and video resolution. All channel metadata fields are displayed dynamically — any custom field the channel includes shows up automatically.
 
 Defaults to `127.0.0.1:9000` and warns if you bind to a non-local address. Safari is supported via native HLS fallback.
+
+The same viewer UI is available as a built-in web player on `server test`, `bridge`, and `relay` via `--viewer` (`VIEWER=1`). When embedded, the player points directly at the protocol stream path on the same origin — no proxy needed. Bridge picks the first public channel; relay picks the first non-migrated channel.
 
 Environment variables: `LISTEN`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 

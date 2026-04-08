@@ -101,6 +101,9 @@ func cmdServerTest(args []string) {
 	// --- Cache ---
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
+	// --- Viewer ---
+	viewerEnabled := addViewerFlag(fs)
+
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
 
@@ -131,6 +134,8 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --cache                enable in-memory response cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries N  max cached items (default: 100)\n")
 		fmt.Fprintf(os.Stderr, "      --cache-stats N        log cache stats every N seconds (0 = off)\n\n")
+		fmt.Fprintf(os.Stderr, "Viewer:\n")
+		fmt.Fprintf(os.Stderr, "      --viewer               serve built-in web player at / (default: off)\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL      log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT    log format: human, json (default: human)\n")
@@ -138,7 +143,7 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "All flags also accept environment variables (uppercase, underscores):\n")
 		fmt.Fprintf(os.Stderr, "  KEY, NAME, UPTIME, TIMEZONE, FONT_SCALE, WIDTH, HEIGHT, FPS, QP,\n")
 		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT,\n")
-		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS,\n")
+		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
 		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv server test -k channel.key --name \"TLTV Test\"\n")
@@ -298,6 +303,18 @@ func cmdServerTest(args []string) {
 
 	// HTTP server
 	mux := http.NewServeMux()
+	if *viewerEnabled {
+		viewerEmbedRoutes(mux, func() map[string]interface{} {
+			docs := serverDocsState.Load()
+			info := viewerBuildInfo(docs.channelID, docs.channelName, docs.metadata, docs.guide)
+			info["stream_src"] = "/tltv/v1/channels/" + docs.channelID + "/stream.m3u8"
+			info["xmltv_url"] = "/tltv/v1/channels/" + docs.channelID + "/guide.xml"
+			if hostname != "" {
+				info["tltv_uri"] = formatTLTVUri(docs.channelID, []string{hostname}, "")
+			}
+			return info
+		})
+	}
 	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache)
 
 	ln, err := net.Listen("tcp", *listenAddr)
@@ -309,6 +326,9 @@ func cmdServerTest(args []string) {
 	logInfof("listening on %s", addr)
 	logInfof("stream: http://%s/tltv/v1/channels/%s/stream.m3u8", addr, channelID)
 	logInfof("tltv URI: tltv://%s@%s", channelID, addr)
+	if *viewerEnabled {
+		logInfof("viewer: http://%s", addr)
+	}
 
 	srv := &http.Server{
 		Handler:           mux,

@@ -35,6 +35,84 @@ type viewerServer struct {
 	tltvURI     string
 }
 
+// ---------- Shared Viewer Helpers ----------
+
+// addViewerFlag registers --viewer with VIEWER=1 env var on a FlagSet.
+func addViewerFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("viewer", os.Getenv("VIEWER") == "1", "serve built-in web player at /")
+}
+
+// viewerEmbedRoutes registers the viewer HTML, static assets, and /api/info
+// on an existing mux. infoFn is called per-request to get current channel state.
+//
+// Routes registered:
+//
+//	GET /            → viewer HTML (path "/" only, returns 404 for other paths)
+//	GET /favicon.svg → SVG icon
+//	GET /hls.min.js  → vendored HLS.js
+//	GET /api/info    → JSON channel info
+//
+// Protocol endpoints (/.well-known/tltv, /tltv/v1/...) registered separately
+// by the daemon take routing priority over the "/" subtree pattern.
+func viewerEmbedRoutes(mux *http.ServeMux, infoFn func() map[string]interface{}) {
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(viewerHTML))
+	})
+
+	mux.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "max-age=86400")
+		w.Write([]byte(viewerFavicon))
+	})
+
+	mux.HandleFunc("GET /hls.min.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "max-age=86400")
+		w.Write(hlsJSData)
+	})
+
+	mux.HandleFunc("GET /api/info", func(w http.ResponseWriter, r *http.Request) {
+		info := infoFn()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		enc.Encode(info)
+	})
+}
+
+// viewerBuildInfo builds the /api/info JSON base from signed document bytes.
+// Callers add context-specific fields (stream_src, tltv_uri, etc.) to the result.
+func viewerBuildInfo(channelID, channelName string, metadataJSON, guideJSON []byte) map[string]interface{} {
+	info := map[string]interface{}{
+		"channel_id":   channelID,
+		"channel_name": channelName,
+		"verified":     true,
+	}
+
+	if metadataJSON != nil {
+		var meta map[string]interface{}
+		if json.Unmarshal(metadataJSON, &meta) == nil {
+			info["metadata"] = meta
+		}
+	}
+
+	if guideJSON != nil {
+		var guide map[string]interface{}
+		if json.Unmarshal(guideJSON, &guide) == nil {
+			info["guide"] = guide
+		}
+	}
+
+	return info
+}
+
+// ---------- Standalone Viewer ----------
+
 func cmdViewer(args []string) {
 	fs := flag.NewFlagSet("viewer", flag.ExitOnError)
 
@@ -155,10 +233,28 @@ func cmdViewer(args []string) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.handleIndex)
-	mux.HandleFunc("/favicon.svg", srv.handleFavicon)
-	mux.HandleFunc("/hls.min.js", srv.handleHLSJS)
-	mux.HandleFunc("/api/info", srv.handleInfo)
+
+	// Shared viewer routes (HTML, assets, /api/info)
+	viewerEmbedRoutes(mux, func() map[string]interface{} {
+		info := map[string]interface{}{
+			"channel_id":   srv.channelID,
+			"channel_name": srv.channelName,
+			"tltv_uri":     srv.tltvURI,
+			"stream_file":  srv.streamFile,
+			"stream_src":   "/stream/" + srv.streamFile,
+			"stream_url":   srv.streamURL,
+			"xmltv_url":    srv.xmltvURL,
+			"base_url":     srv.baseURL,
+			"verified":     true,
+			"metadata":     srv.metadata,
+		}
+		if srv.guide != nil {
+			info["guide"] = srv.guide
+		}
+		return info
+	})
+
+	// Standalone-only: stream proxy to remote upstream
 	mux.HandleFunc("/stream/", srv.handleStream)
 
 	httpSrv := &http.Server{
@@ -185,50 +281,7 @@ func cmdViewer(args []string) {
 	}
 }
 
-// ---------- HTTP Handlers ----------
-
-func (s *viewerServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(viewerHTML))
-}
-
-func (s *viewerServer) handleFavicon(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "image/svg+xml")
-	w.Header().Set("Cache-Control", "max-age=86400")
-	w.Write([]byte(viewerFavicon))
-}
-
-func (s *viewerServer) handleHLSJS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("Cache-Control", "max-age=86400")
-	w.Write(hlsJSData)
-}
-
-func (s *viewerServer) handleInfo(w http.ResponseWriter, r *http.Request) {
-	info := map[string]interface{}{
-		"channel_id":   s.channelID,
-		"channel_name": s.channelName,
-		"tltv_uri":     s.tltvURI,
-		"stream_file":  s.streamFile,
-		"stream_url":   s.streamURL,
-		"xmltv_url":    s.xmltvURL,
-		"base_url":     s.baseURL,
-		"verified":     true,
-		"metadata":     s.metadata,
-	}
-	if s.guide != nil {
-		info["guide"] = s.guide
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	enc.Encode(info)
-}
+// ---------- Standalone Stream Proxy ----------
 
 func (s *viewerServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	subPath := strings.TrimPrefix(r.URL.Path, "/stream/")
@@ -471,7 +524,7 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
     gd.innerHTML='<div class="ge" style="color:#666">no guide data</div>';
   }
 
-  initPlayer('/stream/'+d.stream_file);
+  initPlayer(d.stream_src);
 });
 
 function initPlayer(src){
