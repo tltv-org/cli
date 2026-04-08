@@ -47,7 +47,7 @@ func addViewerFlag(fs *flag.FlagSet) *bool {
 //
 // Routes registered:
 //
-//	GET /            → viewer HTML (path "/" only, returns 404 for other paths)
+//	GET /{$}         → viewer HTML (exact root path only)
 //	GET /favicon.svg → SVG icon
 //	GET /hls.min.js  → vendored HLS.js
 //	GET /api/info    → JSON channel info
@@ -55,11 +55,7 @@ func addViewerFlag(fs *flag.FlagSet) *bool {
 // Protocol endpoints (/.well-known/tltv, /tltv/v1/...) registered separately
 // by the daemon take routing priority over the "/" subtree pattern.
 func viewerEmbedRoutes(mux *http.ServeMux, infoFn func() map[string]interface{}) {
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(viewerHTML))
 	})

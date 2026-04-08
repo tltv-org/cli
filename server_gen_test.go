@@ -811,6 +811,65 @@ func TestServerCache_GuideCacheStatus(t *testing.T) {
 	}
 }
 
+// TestServerViewerCoexistence verifies that viewerEmbedRoutes can be
+// registered on the server's mux without a Go 1.22 ServeMux pattern conflict.
+// The viewer's "GET /{$}" must not conflict with the server's method-less
+// "/tltv/" and "/.well-known/tltv" catch-all patterns.
+func TestServerViewerCoexistence(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := priv.Public().(ed25519.PublicKey)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data"), 2.0)
+
+	mux := http.NewServeMux()
+	// Register viewer BEFORE server routes — same order as production code
+	viewerEmbedRoutes(mux, func() map[string]interface{} {
+		return map[string]interface{}{"channel_name": "TEST"}
+	})
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil)
+
+	// Viewer root serves HTML
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != 200 {
+		t.Errorf("GET / status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("GET / content-type = %q, want text/html", ct)
+	}
+
+	// Viewer assets work
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	if w.Code != 200 {
+		t.Errorf("GET /api/info status = %d, want 200", w.Code)
+	}
+
+	// Protocol endpoint still works
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/.well-known/tltv", nil))
+	if w.Code != 200 {
+		t.Errorf("GET /.well-known/tltv status = %d, want 200", w.Code)
+	}
+
+	// Stream still works
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil))
+	if w.Code != 200 {
+		t.Errorf("GET stream status = %d, want 200", w.Code)
+	}
+
+	// Non-root GET returns 404, not viewer HTML
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/nonexistent", nil))
+	if w.Code != 404 {
+		t.Errorf("GET /nonexistent status = %d, want 404", w.Code)
+	}
+}
+
 func TestServerCache_NilCacheNoHeaders(t *testing.T) {
 	// With cache=nil, no Cache-Status headers should appear.
 	_, priv, _ := ed25519.GenerateKey(nil)

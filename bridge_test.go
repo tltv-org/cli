@@ -844,6 +844,59 @@ func TestBridgeMethodNotAllowed(t *testing.T) {
 	}
 }
 
+// TestBridgeViewerCoexistence verifies that viewerEmbedRoutes can be
+// registered on the bridge's mux without a Go 1.22 ServeMux pattern conflict.
+// The viewer's "GET /{$}" must not conflict with the bridge's method-less
+// "/tltv/" and "/.well-known/tltv" catch-all patterns.
+func TestBridgeViewerCoexistence(t *testing.T) {
+	r := testBridgeRegistry(t)
+	srv := newBridgeServer(r, nil, nil, nil)
+
+	// Register viewer routes on the bridge's mux — this used to panic
+	// with "GET /" vs "/tltv/" pattern conflict before the fix.
+	viewerEmbedRoutes(srv.mux, func() map[string]interface{} {
+		return map[string]interface{}{"channel_name": "test"}
+	})
+
+	// Viewer root serves HTML
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != 200 {
+		t.Errorf("GET / status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("GET / content-type = %q, want text/html", ct)
+	}
+
+	// Viewer assets work
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	if w.Code != 200 {
+		t.Errorf("GET /api/info status = %d, want 200", w.Code)
+	}
+
+	// Protocol endpoint still works
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/.well-known/tltv", nil))
+	if w.Code != 200 {
+		t.Errorf("GET /.well-known/tltv status = %d, want 200", w.Code)
+	}
+
+	// Method rejection still works
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("POST", "/tltv/v1/peers", nil))
+	if w.Code != 400 {
+		t.Errorf("POST /tltv/ status = %d, want 400", w.Code)
+	}
+
+	// Non-root GET returns 404, not viewer HTML
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/nonexistent", nil))
+	if w.Code != 404 {
+		t.Errorf("GET /nonexistent status = %d, want 404", w.Code)
+	}
+}
+
 func TestBridgeOnDemandMetadata(t *testing.T) {
 	dir := t.TempDir()
 	r := newBridgeRegistry(dir, "")
