@@ -288,8 +288,14 @@ tltv server test --name "Test" --cache --cache-stats 30
 # Serve with built-in web player at /
 tltv server test --name "Test" --viewer
 
+# TLS with automatic Let's Encrypt certificate
+tltv server test --name "Demo" --tls --hostname demo.example.com
+
+# TLS with manual certificate files
+tltv server test --name "Test" --tls-cert cert.pem --tls-key key.pem
+
 # Docker with environment variables
-docker run -e NAME=TEST -e WIDTH=1280 -e HEIGHT=720 -e CACHE=1 -e VIEWER=1 tltv server test
+docker run -e NAME=TEST -e TLS=1 -e HOSTNAME=demo.example.com tltv server test
 ```
 
 Generates a full SMPTE EG 1-1990 color bar test pattern (3-row: 75% bars, reverse castellations, PLUGE) with "TLTV" branding, channel name, and wall clock overlay. Text size auto-scales with resolution (overridable via `--font-scale`). Any resolution is accepted -- non-16-aligned dimensions are rounded up internally with SPS frame cropping.
@@ -301,6 +307,8 @@ The MPEG-TS muxer wraps encoded frames into 188-byte transport stream packets wi
 Full TLTV protocol endpoints are served: `/.well-known/tltv`, signed metadata, signed guide, HLS stream, and peers. Documents are re-signed every 5 minutes. If no `--key` is provided, an ephemeral key is generated. Use `--timezone` with an IANA timezone name (e.g. `America/New_York`) to display local time on the clock overlay. Enable `--cache` for in-memory response caching with singleflight deduplication -- 500 viewers requesting the same segment result in 1 segmenter lock acquisition instead of 500. Enable `--viewer` to serve the built-in web player at `/` -- same Phosphor Dark theme as `tltv viewer`, pointing directly at the protocol stream path (no proxy needed on same origin). All flags also accept environment variables for Docker deployment.
 
 All three long-running commands (server, bridge, relay) support structured logging: `--log-level` (debug/info/error), `--log-format` (human/json), `--log-file` (path). Environment variables: `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+
+All three daemons support built-in TLS via `--tls` (automatic Let's Encrypt certificates using ACME HTTP-01) or `--tls-cert`/`--tls-key` (manual certificate files). When TLS is enabled, the default listen port changes from `:8000` to `:443`. The ACME client is zero-dependency (Go stdlib crypto only), handles certificate issuance, caching, and automatic renewal. Use `--tls-staging` for testing with Let's Encrypt's staging environment. Environment variables: `TLS=1`, `TLS_CERT`, `TLS_KEY`, `TLS_STAGING=1`, `TLS_DIR`, `ACME_EMAIL`.
 
 ## Bridge
 
@@ -320,11 +328,14 @@ tltv bridge --stream /media/hls
 tltv bridge --stream http://mediaserver:8000/api/channels.m3u \
   --guide http://mediaserver:8000/api/xmltv.xml --on-demand \
   --listen :8000 --hostname origin.example.com:443
+
+# TLS with automatic certificate
+tltv bridge --stream http://source.tv/live.m3u8 --tls --hostname mychannel.tv
 ```
 
 Source formats are auto-detected: M3U playlists (with tvg-id/tvg-name attributes), JSON channel arrays, local directories with sidecar `.json` files, or single HLS streams. Guide data can be XMLTV or JSON.
 
-All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`, `TLS=1`, `TLS_CERT`, `TLS_KEY`, `TLS_STAGING=1`, `TLS_DIR`, `ACME_EMAIL`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml
@@ -359,6 +370,9 @@ tltv relay --node origin.example.com:443
 
 # Relay with a config file
 tltv relay --config relay.json --hostname relay.example.com:443
+
+# Relay with TLS
+tltv relay --node origin.example.com:443 --tls --hostname relay.example.com
 ```
 
 The relay verifies every metadata and guide document against the channel's Ed25519 public key before caching. Documents are served verbatim (raw bytes preserved, unknown fields intact). Private, on-demand, and retired channels are refused per spec. If a channel transitions to any of these states, the relay stops immediately.
@@ -375,7 +389,7 @@ tltv relay --node origin.example.com:443 --cache --cache-stats 30
 docker run -e NODE=origin.example.com:443 -e CACHE=1 tltv relay
 ```
 
-TTLs follow the protocol spec (§9.10): 1 second for manifests, 3600 seconds for segments (immutable once created). The relay ignores upstream HTTP cache headers and applies protocol-recommended TTLs. Responses include a `Cache-Status` header (RFC 9211) reporting `HIT` or `MISS`.
+TTLs follow the protocol spec (§9.10): 1 second for manifests and protocol documents, 3600 seconds for segments (immutable once created). The cache ignores upstream HTTP cache headers and applies protocol-recommended TTLs. Responses include a `Cache-Status` header (RFC 9211) reporting `HIT` or `MISS`.
 
 Cache flags: `--cache` (`CACHE=1`), `--cache-max-entries` (`CACHE_MAX_ENTRIES`, default 100), `--cache-stats N` (`CACHE_STATS`, log stats every N seconds).
 
@@ -389,7 +403,7 @@ Config file format:
 }
 ```
 
-Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`, `MAX_PEERS`, `STALE_DAYS`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+Environment variables: `CHANNELS`, `NODE`, `CONFIG`, `LISTEN`, `HOSTNAME`, `PEERS`, `TLS=1`, `TLS_CERT`, `TLS_KEY`, `TLS_STAGING=1`, `TLS_DIR`, `ACME_EMAIL`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `META_POLL`, `GUIDE_POLL`, `PEER_POLL`, `MAX_PEERS`, `STALE_DAYS`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml

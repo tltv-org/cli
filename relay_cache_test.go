@@ -399,3 +399,35 @@ func TestRelayServer_CacheStatusHeader(t *testing.T) {
 		t.Errorf("hits after fetch = %d, want 1", hits)
 	}
 }
+
+func TestHLSCacheTTL(t *testing.T) {
+	tests := []struct {
+		path string
+		want time.Duration
+		desc string
+	}{
+		// Manifests → short TTL
+		{"/tltv/v1/channels/TVabc123/stream.m3u8", hlsCacheManifestTTL, "HLS manifest"},
+		{"/stream.m3u8", hlsCacheManifestTTL, "bare manifest"},
+
+		// Protocol documents → short TTL (re-signed periodically)
+		{"/tltv/v1/channels/TVabc123", hlsCacheManifestTTL, "metadata (no extension)"},
+		{"/tltv/v1/channels/TVabc123/guide.json", hlsCacheManifestTTL, "guide JSON"},
+		{"/tltv/v1/channels/TVabc123/guide.xml", hlsCacheManifestTTL, "guide XML"},
+
+		// Segments → long TTL (immutable by sequence number)
+		{"/tltv/v1/channels/TVabc123/seg0.ts", hlsCacheSegmentTTL, "MPEG-TS segment"},
+		{"/tltv/v1/channels/TVabc123/seg123.ts", hlsCacheSegmentTTL, "MPEG-TS segment high seq"},
+		{"/tltv/v1/channels/TVabc123/init.mp4", hlsCacheSegmentTTL, "fMP4 init segment"},
+		{"/tltv/v1/channels/TVabc123/chunk0.m4s", hlsCacheSegmentTTL, "fMP4 media segment"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			got := hlsCacheTTL(tt.path)
+			if got != tt.want {
+				t.Errorf("hlsCacheTTL(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}

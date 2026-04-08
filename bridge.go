@@ -58,6 +58,9 @@ func cmdBridge(args []string) {
 	// --- Viewer ---
 	viewerEnabled := addViewerFlag(fs)
 
+	// --- TLS ---
+	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
+
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
 
@@ -74,10 +77,16 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "      --on-demand          mark all channels as on-demand\n")
 		fmt.Fprintf(os.Stderr, "      --poll DURATION      re-poll interval (default: 60s)\n\n")
 		fmt.Fprintf(os.Stderr, "Server:\n")
-		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000)\n")
+		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins field\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         comma-separated peer host:port hints\n\n")
+		fmt.Fprintf(os.Stderr, "TLS:\n")
+		fmt.Fprintf(os.Stderr, "      --tls                enable TLS (autocert via Let's Encrypt if no cert/key)\n")
+		fmt.Fprintf(os.Stderr, "      --tls-cert FILE      TLS certificate file (PEM)\n")
+		fmt.Fprintf(os.Stderr, "      --tls-key FILE       TLS private key file (PEM)\n")
+		fmt.Fprintf(os.Stderr, "      --tls-staging        use Let's Encrypt staging (for testing)\n")
+		fmt.Fprintf(os.Stderr, "      --acme-email EMAIL   email for ACME account (optional)\n\n")
 		fmt.Fprintf(os.Stderr, "Cache:\n")
 		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory response cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
@@ -89,16 +98,23 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: STREAM, GUIDE, NAME, ON_DEMAND=1, POLL,\n")
-		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, CACHE=1, CACHE_MAX_ENTRIES,\n")
+		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, TLS=1, TLS_CERT, TLS_KEY,\n")
+		fmt.Fprintf(os.Stderr, "TLS_STAGING=1, TLS_DIR, ACME_EMAIL, CACHE=1, CACHE_MAX_ENTRIES,\n")
 		fmt.Fprintf(os.Stderr, "CACHE_STATS, VIEWER=1, LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://example.com/live.m3u8 --name \"My Channel\"\n")
+		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://source.tv/live.m3u8 --tls --hostname mychannel.tv\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://provider.com/channels.m3u --guide http://provider.com/guide.xml\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream /media/hls\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://tunarr:8000/api/channels.m3u --guide http://tunarr:8000/api/xmltv.xml --on-demand\n")
 	}
 	fs.Parse(args)
+
+	// Override default listen port for TLS.
+	if *tlsEnabled || *tlsCert != "" {
+		tlsOverrideListenPort(fs, listenAddr)
+	}
 
 	// Set up logging
 	if err := setupLogging(*logLvl, *logFmt, *logPath, "bridge"); err != nil {
@@ -219,6 +235,18 @@ func cmdBridge(args []string) {
 		}
 	}
 
+	// Set up TLS (if enabled).
+	tlsCfg, tlsCleanup, tlsErr := tlsSetup(*hostnameArg, *tlsEnabled, *tlsCert, *tlsKey, *acmeEmail, *tlsStaging)
+	if tlsErr != nil {
+		fatal("tls: %v", tlsErr)
+	}
+	defer tlsCleanup()
+
+	scheme := "http"
+	if tlsCfg != nil {
+		scheme = "https"
+	}
+
 	httpSrv := &http.Server{
 		Handler:           server,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -231,23 +259,32 @@ func cmdBridge(args []string) {
 		fatal("listen %s: %v", *listenAddr, err)
 	}
 	addr := displayListenAddr(ln.Addr().String())
-	logInfof("listening on %s", addr)
+	logInfof("listening on %s (%s)", addr, scheme)
 	channelList := registry.ListChannels()
 	for _, ch := range channelList {
-		logInfof("stream: http://%s/tltv/v1/channels/%s/stream.m3u8", addr, ch.ChannelID)
+		logInfof("stream: %s://%s/tltv/v1/channels/%s/stream.m3u8", scheme, addr, ch.ChannelID)
 	}
 	if len(channelList) == 1 {
 		logInfof("tltv URI: tltv://%s@%s", channelList[0].ChannelID, addr)
 	}
 	if *viewerEnabled && viewerChannelName != "" {
-		logInfof("viewer: http://%s (channel: %s)", addr, viewerChannelName)
+		logInfof("viewer: %s://%s (channel: %s)", scheme, addr, viewerChannelName)
 	}
 
-	go func() {
-		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			logFatalf("server error: %v", err)
-		}
-	}()
+	if tlsCfg != nil {
+		httpSrv.TLSConfig = tlsCfg
+		go func() {
+			if err := httpSrv.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {
+				logFatalf("server error: %v", err)
+			}
+		}()
+	} else {
+		go func() {
+			if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				logFatalf("server error: %v", err)
+			}
+		}()
+	}
 
 	// Start poll loop
 	ctx, cancel := context.WithCancel(context.Background())

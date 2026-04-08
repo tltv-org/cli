@@ -148,8 +148,20 @@ func newHLSCache(maxEntries int) *hlsCache {
 }
 
 // hlsCacheTTL returns the protocol-recommended TTL for a given path.
+// Manifests (.m3u8) and protocol documents (.json, .xml, no extension)
+// use a short TTL (singleflight dedup without staleness).
+// Segments (.ts, .m4s, etc.) use a long TTL (immutable by sequence number).
 func hlsCacheTTL(path string) time.Duration {
 	if strings.HasSuffix(path, ".m3u8") {
+		return hlsCacheManifestTTL
+	}
+	if strings.HasSuffix(path, ".json") || strings.HasSuffix(path, ".xml") {
+		return hlsCacheManifestTTL
+	}
+	// Paths with no file extension are protocol documents (e.g. /tltv/v1/channels/{id}).
+	lastSlash := strings.LastIndex(path, "/")
+	lastDot := strings.LastIndex(path, ".")
+	if lastDot <= lastSlash {
 		return hlsCacheManifestTTL
 	}
 	return hlsCacheSegmentTTL

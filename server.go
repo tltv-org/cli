@@ -104,6 +104,9 @@ func cmdServerTest(args []string) {
 	// --- Viewer ---
 	viewerEnabled := addViewerFlag(fs)
 
+	// --- TLS ---
+	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
+
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
 
@@ -126,10 +129,16 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --fps N                frames per second (default: 30)\n")
 		fmt.Fprintf(os.Stderr, "      --qp N                 compression quality 0-51, lower = better (default: 26)\n\n")
 		fmt.Fprintf(os.Stderr, "Stream:\n")
-		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR          listen address (default: :8000)\n")
+		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR          listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST        public host:port for origins field\n")
 		fmt.Fprintf(os.Stderr, "      --segment-duration N   HLS segment duration in seconds (default: 2)\n")
 		fmt.Fprintf(os.Stderr, "      --segment-count N      segments in playlist window (default: 5)\n\n")
+		fmt.Fprintf(os.Stderr, "TLS:\n")
+		fmt.Fprintf(os.Stderr, "      --tls                  enable TLS (autocert via Let's Encrypt if no cert/key)\n")
+		fmt.Fprintf(os.Stderr, "      --tls-cert FILE        TLS certificate file (PEM)\n")
+		fmt.Fprintf(os.Stderr, "      --tls-key FILE         TLS private key file (PEM)\n")
+		fmt.Fprintf(os.Stderr, "      --tls-staging          use Let's Encrypt staging (for testing)\n")
+		fmt.Fprintf(os.Stderr, "      --acme-email EMAIL     email for ACME account (optional)\n\n")
 		fmt.Fprintf(os.Stderr, "Cache:\n")
 		fmt.Fprintf(os.Stderr, "      --cache                enable in-memory response cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries N  max cached items (default: 100)\n")
@@ -143,15 +152,22 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "All flags also accept environment variables (uppercase, underscores):\n")
 		fmt.Fprintf(os.Stderr, "  KEY, NAME, UPTIME, TIMEZONE, FONT_SCALE, WIDTH, HEIGHT, FPS, QP,\n")
 		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT,\n")
+		fmt.Fprintf(os.Stderr, "  TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
 		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv server test -k channel.key --name \"TLTV Test\"\n")
+		fmt.Fprintf(os.Stderr, "  tltv server test --name \"Demo\" --tls --hostname demo.timelooptv.org\n")
+		fmt.Fprintf(os.Stderr, "  tltv server test --tls-cert cert.pem --tls-key key.pem\n")
 		fmt.Fprintf(os.Stderr, "  tltv server test --width 1920 --height 1080 --fps 30\n")
-		fmt.Fprintf(os.Stderr, "  tltv server test --segment-duration 4 --segment-count 3\n")
-		fmt.Fprintf(os.Stderr, "  docker run -e NAME=TEST -e WIDTH=1280 -e HEIGHT=720 tltv server test\n")
+		fmt.Fprintf(os.Stderr, "  docker run -e NAME=TEST -e TLS=1 -e HOSTNAME=demo.tv tltv server test\n")
 	}
 	fs.Parse(args)
+
+	// Override default listen port for TLS.
+	if *tlsEnabled || *tlsCert != "" {
+		tlsOverrideListenPort(fs, listenAddr)
+	}
 
 	// Set up logging
 	if err := setupLogging(*logLvl, *logFmt, *logPath, "server"); err != nil {
@@ -317,17 +333,30 @@ func cmdServerTest(args []string) {
 	}
 	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache)
 
+	// Set up TLS (if enabled).
+	tlsCfg, tlsCleanup, tlsErr := tlsSetup(*hostnameArg, *tlsEnabled, *tlsCert, *tlsKey, *acmeEmail, *tlsStaging)
+	if tlsErr != nil {
+		fmt.Fprintf(os.Stderr, "server: tls: %v\n", tlsErr)
+		os.Exit(1)
+	}
+	defer tlsCleanup()
+
+	scheme := "http"
+	if tlsCfg != nil {
+		scheme = "https"
+	}
+
 	ln, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "server: listen: %v\n", err)
 		os.Exit(1)
 	}
 	addr := displayListenAddr(ln.Addr().String())
-	logInfof("listening on %s", addr)
-	logInfof("stream: http://%s/tltv/v1/channels/%s/stream.m3u8", addr, channelID)
+	logInfof("listening on %s (%s)", addr, scheme)
+	logInfof("stream: %s://%s/tltv/v1/channels/%s/stream.m3u8", scheme, addr, channelID)
 	logInfof("tltv URI: tltv://%s@%s", channelID, addr)
 	if *viewerEnabled {
-		logInfof("viewer: http://%s", addr)
+		logInfof("viewer: %s://%s", scheme, addr)
 	}
 
 	srv := &http.Server{
@@ -336,11 +365,20 @@ func cmdServerTest(args []string) {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	go func() {
-		if err := srv.Serve(ln); err != http.ErrServerClosed {
-			logErrorf("http: %v", err)
-		}
-	}()
+	if tlsCfg != nil {
+		srv.TLSConfig = tlsCfg
+		go func() {
+			if err := srv.ServeTLS(ln, "", ""); err != http.ErrServerClosed {
+				logErrorf("https: %v", err)
+			}
+		}()
+	} else {
+		go func() {
+			if err := srv.Serve(ln); err != http.ErrServerClosed {
+				logErrorf("http: %v", err)
+			}
+		}()
+	}
 
 	// Start cache goroutines
 	if cache != nil {
