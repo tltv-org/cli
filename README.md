@@ -132,8 +132,8 @@ tltv completion --install zsh
 
 | Command | Description |
 |---|---|
-| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
-| `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
+| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Built-in response cache with singleflight deduplication (`--cache`). Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
+| `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Built-in response cache with singleflight deduplication (`--cache`). Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
 | `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Built-in HLS cache with singleflight deduplication (`--cache`). Refuses private, on-demand, and retired channels per spec. Participates in peer exchange with validated gossip. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
 | `receiver <target>` | Headless HLS stream consumer. Connects to a TLTV channel, fetches segments, verifies metadata, and reports statistics. Modes: `--monitor` (health check, exit 0/1), `--record` (save to file), `--pipe` (raw TS to stdout), `--duration` (timed run). Tracks latency percentiles, cache hit rates, and bandwidth. |
 | `viewer <target>` | Open a local web viewer for a channel. Fetches and verifies metadata, serves an HLS.js player with live debug stats. Proxies the stream through localhost with server-side token injection. |
@@ -154,7 +154,7 @@ tltv completion --install zsh
 |---|---|
 | `--json` | Machine-readable JSON output on all commands. |
 | `--no-color` | Disable colored terminal output. Also respects `NO_COLOR` env var. |
-| `--insecure` | Skip TLS certificate verification (for development). |
+| `--insecure` | Use HTTP transport and skip TLS verification. For Docker-internal or plain-HTTP upstreams. |
 | `--local` | Allow local/private address hints in `resolve` and `crawl`. Without this flag, loopback, RFC 1918, link-local, and CGN addresses are skipped (per spec section 3.1). |
 
 ## Vanity Mining
@@ -211,7 +211,14 @@ Plus additional coverage: protocol version validation, migration identity bindin
 
 ## Network Commands
 
-Network commands default to HTTPS (port 443). For local development, `localhost` and `127.0.0.1` default to HTTP. Use `--insecure` to skip TLS verification for self-signed certificates.
+Network commands default to HTTPS (port 443). For local development, `localhost` and `127.0.0.1` default to HTTP. Use `--insecure` to switch all connections to HTTP (and skip TLS verification). This is essential for Docker-internal connections where the upstream speaks plain HTTP.
+
+Global flags (`--json`, `--no-color`, `--insecure`, `--local`) can appear before or after the subcommand name:
+
+```bash
+tltv --insecure relay --channels ...    # works
+tltv relay --insecure --channels ...    # also works
+```
 
 The `resolve` and `crawl` commands use an SSRF-safe HTTP client that validates hints (rejecting URLs, userinfo, paths) and checks resolved DNS addresses against private/loopback/link-local ranges at connection time. Use `--local` to allow local addresses for development.
 
@@ -275,8 +282,11 @@ tltv server test --name "Test" --timezone America/New_York
 # Adjust HLS segment timing
 tltv server test --name "Test" --segment-duration 4 --segment-count 3
 
+# Enable response cache (singleflight dedup for high viewer counts)
+tltv server test --name "Test" --cache --cache-stats 30
+
 # Docker with environment variables
-docker run -e NAME=TEST -e WIDTH=1280 -e HEIGHT=720 tltv server test
+docker run -e NAME=TEST -e WIDTH=1280 -e HEIGHT=720 -e CACHE=1 tltv server test
 ```
 
 Generates a full SMPTE EG 1-1990 color bar test pattern (3-row: 75% bars, reverse castellations, PLUGE) with "TLTV" branding, channel name, and wall clock overlay. Text size auto-scales with resolution (overridable via `--font-scale`). Any resolution is accepted -- non-16-aligned dimensions are rounded up internally with SPS frame cropping.
@@ -285,7 +295,7 @@ The H.264 encoder uses adaptive I_16x16/I_4x4 prediction with CAVLC entropy codi
 
 The MPEG-TS muxer wraps encoded frames into 188-byte transport stream packets with PAT/PMT tables, PES headers, and PCR timestamps. The HLS segmenter maintains a configurable sliding-window playlist (default: 2-second segments, 5-segment window).
 
-Full TLTV protocol endpoints are served: `/.well-known/tltv`, signed metadata, signed guide, HLS stream, and peers. Documents are re-signed every 5 minutes. If no `--key` is provided, an ephemeral key is generated. Use `--timezone` with an IANA timezone name (e.g. `America/New_York`) to display local time on the clock overlay. All flags also accept environment variables for Docker deployment.
+Full TLTV protocol endpoints are served: `/.well-known/tltv`, signed metadata, signed guide, HLS stream, and peers. Documents are re-signed every 5 minutes. If no `--key` is provided, an ephemeral key is generated. Use `--timezone` with an IANA timezone name (e.g. `America/New_York`) to display local time on the clock overlay. Enable `--cache` for in-memory response caching with singleflight deduplication -- 500 viewers requesting the same segment result in 1 segmenter lock acquisition instead of 500. All flags also accept environment variables for Docker deployment.
 
 All three long-running commands (server, bridge, relay) support structured logging: `--log-level` (debug/info/error), `--log-format` (human/json), `--log-file` (path). Environment variables: `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 

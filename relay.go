@@ -38,22 +38,7 @@ func cmdRelay(args []string) {
 	fs.StringVar(peersStr, "P", os.Getenv("PEERS"), "alias for --peers")
 
 	// Cache flags
-	defaultCache := os.Getenv("CACHE") == "1"
-	cacheEnabled := fs.Bool("cache", defaultCache, "enable in-memory HLS stream cache")
-
-	defaultMaxEntries := 100
-	if v := os.Getenv("CACHE_MAX_ENTRIES"); v != "" {
-		if n, err := fmt.Sscanf(v, "%d", &defaultMaxEntries); n != 1 || err != nil {
-			defaultMaxEntries = 100
-		}
-	}
-	cacheMaxEntries := fs.Int("cache-max-entries", defaultMaxEntries, "max cached items")
-
-	defaultCacheStats := 0
-	if v := os.Getenv("CACHE_STATS"); v != "" {
-		fmt.Sscanf(v, "%d", &defaultCacheStats)
-	}
-	cacheStatsInterval := fs.Int("cache-stats", defaultCacheStats, "log cache stats every N seconds (0 = off)")
+	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
 	// Tuning flags
 	defaultMetaPoll := "60s"
@@ -309,19 +294,7 @@ func cmdRelay(args []string) {
 
 	// Start cache stats + sweep goroutines
 	if cache != nil {
-		go hlsCacheStatsLoop(cache, time.Duration(*cacheStatsInterval)*time.Second, ctx.Done())
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					cache.sweep()
-				}
-			}
-		}()
+		startCacheGoroutines(cache, *cacheStatsInterval, ctx.Done())
 	}
 
 	if metaPoll > 0 {

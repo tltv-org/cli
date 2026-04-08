@@ -98,6 +98,9 @@ func cmdServerTest(args []string) {
 	segDuration := fs.Int("segment-duration", envInt("SEGMENT_DURATION", 2), "HLS segment duration in seconds")
 	segCount := fs.Int("segment-count", envInt("SEGMENT_COUNT", 5), "HLS playlist window size (number of segments)")
 
+	// --- Cache ---
+	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
+
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
 
@@ -124,6 +127,10 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST        public host:port for origins field\n")
 		fmt.Fprintf(os.Stderr, "      --segment-duration N   HLS segment duration in seconds (default: 2)\n")
 		fmt.Fprintf(os.Stderr, "      --segment-count N      segments in playlist window (default: 5)\n\n")
+		fmt.Fprintf(os.Stderr, "Cache:\n")
+		fmt.Fprintf(os.Stderr, "      --cache                enable in-memory response cache\n")
+		fmt.Fprintf(os.Stderr, "      --cache-max-entries N  max cached items (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "      --cache-stats N        log cache stats every N seconds (0 = off)\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL      log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT    log format: human, json (default: human)\n")
@@ -131,6 +138,7 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "All flags also accept environment variables (uppercase, underscores):\n")
 		fmt.Fprintf(os.Stderr, "  KEY, NAME, UPTIME, TIMEZONE, FONT_SCALE, WIDTH, HEIGHT, FPS, QP,\n")
 		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT,\n")
+		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS,\n")
 		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv server test -k channel.key --name \"TLTV Test\"\n")
@@ -281,9 +289,16 @@ func cmdServerTest(args []string) {
 	hostname := *hostnameArg
 	metadata, guide := serverSignDocs(channelID, channelName, hostname, privKey)
 
+	// Set up cache (if enabled)
+	var cache *hlsCache
+	if *cacheEnabled {
+		cache = newHLSCache(*cacheMaxEntries)
+		logInfof("cache enabled (max %d entries)", *cacheMaxEntries)
+	}
+
 	// HTTP server
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, channelName, metadata, guide)
+	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache)
 
 	ln, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
@@ -306,6 +321,11 @@ func cmdServerTest(args []string) {
 			logErrorf("http: %v", err)
 		}
 	}()
+
+	// Start cache goroutines
+	if cache != nil {
+		startCacheGoroutines(cache, *cacheStatsInterval, ctx.Done())
+	}
 
 	// Frame generation loop
 	state := &serverState{

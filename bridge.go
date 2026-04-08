@@ -52,6 +52,9 @@ func cmdBridge(args []string) {
 	peersStr := fs.String("peers", os.Getenv("PEERS"), "comma-separated peer host:port hints")
 	fs.StringVar(peersStr, "P", os.Getenv("PEERS"), "alias for --peers")
 
+	// --- Cache ---
+	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
+
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
 
@@ -72,12 +75,17 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins field\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         comma-separated peer host:port hints\n\n")
+		fmt.Fprintf(os.Stderr, "Cache:\n")
+		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory response cache\n")
+		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "      --cache-stats N      log cache stats every N seconds (0 = off)\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL    log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: STREAM, GUIDE, NAME, ON_DEMAND=1, POLL,\n")
-		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
+		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, CACHE=1, CACHE_MAX_ENTRIES,\n")
+		fmt.Fprintf(os.Stderr, "CACHE_STATS, LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://example.com/live.m3u8 --name \"My Channel\"\n")
@@ -171,8 +179,15 @@ func cmdBridge(args []string) {
 	}
 	logInfof("%d channels registered", len(channels))
 
+	// Set up cache (if enabled)
+	var cache *hlsCache
+	if *cacheEnabled {
+		cache = newHLSCache(*cacheMaxEntries)
+		logInfof("cache enabled (max %d entries)", *cacheMaxEntries)
+	}
+
 	// Start HTTP server
-	server := newBridgeServer(registry)
+	server := newBridgeServer(registry, cache)
 	httpSrv := &http.Server{
 		Handler:           server,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -203,6 +218,11 @@ func cmdBridge(args []string) {
 	// Start poll loop
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start cache goroutines
+	if cache != nil {
+		startCacheGoroutines(cache, *cacheStatsInterval, ctx.Done())
+	}
 
 	if pollDur > 0 {
 		go bridgePollLoop(ctx, pollDur, *streamArg, *guideArg, *nameArg, *onDemand, registry)

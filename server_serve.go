@@ -8,6 +8,14 @@ import (
 	"strings"
 )
 
+// serverCacheStatus returns the Cache-Status header value for a hit/miss.
+func serverCacheStatus(hit bool) string {
+	if hit {
+		return "HIT"
+	}
+	return "MISS"
+}
+
 // serveSegment writes an HLS segment response for the given sequence number.
 func serveSegment(w http.ResponseWriter, r *http.Request, seg *hlsSegmenter, numStr string) {
 	seqNum, err := strconv.ParseUint(numStr, 10, 64)
@@ -28,7 +36,8 @@ func serveSegment(w http.ResponseWriter, r *http.Request, seg *hlsSegmenter, num
 
 // serverHTTP sets up HTTP handlers for the server command.
 // Serves HLS stream and TLTV protocol endpoints.
-func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName string, metadata, guide []byte) {
+// Pass cache=nil to disable caching.
+func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName string, metadata, guide []byte, cache *hlsCache) {
 	// Store initial docs atomically
 	serverDocsState.Store(&serverDocs{
 		channelID:   channelID,
@@ -70,6 +79,22 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
 			return
 		}
+		if cache != nil {
+			data, _, hit, err := cache.getOrFetch(r.URL.Path, func() (*hlsCacheFetchResult, error) {
+				d := serverDocsState.Load()
+				if d.metadata == nil {
+					return nil, &hlsCacheUpstreamError{status: http.StatusNotFound}
+				}
+				return &hlsCacheFetchResult{data: d.metadata, contentType: "application/json; charset=utf-8"}, nil
+			})
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.Header().Set("Cache-Control", "max-age=60")
+				w.Header().Set("Cache-Status", serverCacheStatus(hit))
+				w.Write(data)
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "max-age=60")
 		w.Write(docs.metadata)
@@ -93,6 +118,22 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 				bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
 				return
 			}
+			if cache != nil {
+				data, _, hit, err := cache.getOrFetch(r.URL.Path, func() (*hlsCacheFetchResult, error) {
+					d := serverDocsState.Load()
+					if d.guide == nil {
+						return nil, &hlsCacheUpstreamError{status: http.StatusNotFound}
+					}
+					return &hlsCacheFetchResult{data: d.guide, contentType: "application/json; charset=utf-8"}, nil
+				})
+				if err == nil {
+					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+					w.Header().Set("Cache-Control", "max-age=300")
+					w.Header().Set("Cache-Status", serverCacheStatus(hit))
+					w.Write(data)
+					return
+				}
+			}
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "max-age=300")
 			w.Write(docs.guide)
@@ -102,12 +143,45 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 				bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
 				return
 			}
+			if cache != nil {
+				data, _, hit, err := cache.getOrFetch(r.URL.Path, func() (*hlsCacheFetchResult, error) {
+					d := serverDocsState.Load()
+					if d.guide == nil {
+						return nil, &hlsCacheUpstreamError{status: http.StatusNotFound}
+					}
+					xml := serverGuideToXMLTV(d.guide, d.channelID, d.channelName)
+					return &hlsCacheFetchResult{data: []byte(xml), contentType: "application/xml; charset=utf-8"}, nil
+				})
+				if err == nil {
+					w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+					w.Header().Set("Cache-Control", "max-age=300")
+					w.Header().Set("Cache-Status", serverCacheStatus(hit))
+					w.Write(data)
+					return
+				}
+			}
 			xml := serverGuideToXMLTV(docs.guide, docs.channelID, docs.channelName)
 			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 			w.Header().Set("Cache-Control", "max-age=300")
 			w.Write([]byte(xml))
 
 		case "stream.m3u8":
+			if cache != nil {
+				data, _, hit, err := cache.getOrFetch(r.URL.Path, func() (*hlsCacheFetchResult, error) {
+					m := seg.getManifest()
+					if m == "" {
+						return nil, &hlsCacheUpstreamError{status: http.StatusServiceUnavailable}
+					}
+					return &hlsCacheFetchResult{data: []byte(m), contentType: "application/vnd.apple.mpegurl"}, nil
+				})
+				if err == nil {
+					w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+					w.Header().Set("Cache-Control", "no-cache, no-store")
+					w.Header().Set("Cache-Status", serverCacheStatus(hit))
+					w.Write(data)
+					return
+				}
+			}
 			manifest := seg.getManifest()
 			if manifest == "" {
 				http.Error(w, "stream not ready", http.StatusServiceUnavailable)
@@ -120,6 +194,29 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		default:
 			// Segment files via protocol path: /tltv/v1/channels/{id}/seg{N}.ts
 			if strings.HasPrefix(subPath, "seg") && strings.HasSuffix(subPath, ".ts") {
+				if cache != nil {
+					data, _, hit, err := cache.getOrFetch(r.URL.Path, func() (*hlsCacheFetchResult, error) {
+						numStr := subPath[3 : len(subPath)-3]
+						seqNum, parseErr := strconv.ParseUint(numStr, 10, 64)
+						if parseErr != nil {
+							return nil, &hlsCacheUpstreamError{status: http.StatusNotFound}
+						}
+						segData := seg.getSegment(seqNum)
+						if segData == nil {
+							return nil, &hlsCacheUpstreamError{status: http.StatusNotFound}
+						}
+						return &hlsCacheFetchResult{data: segData, contentType: "video/mp2t"}, nil
+					})
+					if err == nil {
+						w.Header().Set("Content-Type", "video/mp2t")
+						w.Header().Set("Cache-Control", "max-age=10")
+						w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+						w.Header().Set("Cache-Status", serverCacheStatus(hit))
+						w.Write(data)
+						return
+					}
+					// Cache fetch error (segment not found) — fall through to 404
+				}
 				serveSegment(w, r, seg, subPath[3:len(subPath)-3])
 				return
 			}

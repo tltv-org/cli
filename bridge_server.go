@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -12,13 +14,16 @@ import (
 // bridgeServer implements the TLTV protocol HTTP endpoints for bridged channels.
 type bridgeServer struct {
 	registry *bridgeRegistry
+	cache    *hlsCache // optional response cache (nil = disabled)
 	mux      *http.ServeMux
 }
 
 // newBridgeServer creates a bridge HTTP server with all protocol endpoints registered.
-func newBridgeServer(registry *bridgeRegistry) *bridgeServer {
+// Pass cache=nil to disable caching.
+func newBridgeServer(registry *bridgeRegistry, cache *hlsCache) *bridgeServer {
 	s := &bridgeServer{
 		registry: registry,
+		cache:    cache,
 		mux:      http.NewServeMux(),
 	}
 
@@ -173,6 +178,12 @@ func (s *bridgeServer) handleChannelPath(w http.ResponseWriter, r *http.Request)
 		s.serveGuideXML(w, r, ch)
 	default:
 		// stream.m3u8 and all sub-paths (segments, sub-manifests)
+		// Cache upstream HTTP streams (not local file streams)
+		isUpstream := strings.HasPrefix(ch.StreamURL, "http://") || strings.HasPrefix(ch.StreamURL, "https://")
+		if s.cache != nil && isUpstream {
+			s.serveCachedStream(w, r, ch, subPath, token)
+			return
+		}
 		bridgeServeStream(w, r, ch, subPath, token)
 	}
 }
@@ -221,6 +232,64 @@ func (s *bridgeServer) serveGuideXML(w http.ResponseWriter, r *http.Request, ch 
 	w.Header().Set("Cache-Control", "max-age=300")
 	bridgeSetPrivateHeaders(w, ch)
 	w.Write([]byte(bridgeGuideToXMLTV(ch.ChannelID, ch.Name, entries)))
+}
+
+// ---------- Cached Stream Serving ----------
+
+// serveCachedStream serves upstream HLS content through the cache.
+// Same pattern as relay_server.go's serveStream — singleflight dedup,
+// protocol-compliant TTLs, manifests rewritten before caching.
+func (s *bridgeServer) serveCachedStream(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel, subPath, token string) {
+	if !bridgeValidateSubPath(subPath) {
+		bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+		return
+	}
+
+	manifestURL := ch.StreamURL
+
+	var fetchURL string
+	if subPath == "stream.m3u8" {
+		fetchURL = manifestURL
+	} else {
+		base, err := url.Parse(manifestURL)
+		if err != nil {
+			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ref, err := url.Parse(subPath)
+		if err != nil {
+			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		base.Path = path.Dir(base.Path) + "/"
+		fetchURL = base.ResolveReference(ref).String()
+	}
+
+	cacheKey := r.URL.Path
+	data, _, hit, err := s.cache.getOrFetch(cacheKey, func() (*hlsCacheFetchResult, error) {
+		fr, err := hlsCacheFetchUpstream(bridgeStreamClient, fetchURL, r)
+		if err != nil {
+			return nil, err
+		}
+		// Rewrite manifests before caching (same as relay)
+		if strings.HasSuffix(subPath, ".m3u8") {
+			rewritten := bridgeRewriteManifest(manifestURL, fr.data, token)
+			fr.data = rewritten
+		}
+		return fr, nil
+	})
+	if err != nil {
+		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	bridgeSetStreamHeaders(w, subPath, ch.IsPrivate())
+	if hit {
+		w.Header().Set("Cache-Status", "HIT")
+	} else {
+		w.Header().Set("Cache-Status", "MISS")
+	}
+	w.Write(data)
 }
 
 // ---------- Helpers ----------

@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -661,4 +663,173 @@ func TestSegmentContainsAudioPackets(t *testing.T) {
 		t.Error("no audio TS packets found")
 	}
 	t.Logf("Segment: %d bytes, %d video packets, %d audio packets", len(data), videoPkts, audioPkts)
+}
+
+// ---------- Server Cache Tests ----------
+
+func TestServerCache_ManifestCacheStatus(t *testing.T) {
+	// Set up a server with cache enabled and verify Cache-Status headers.
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := priv.Public().(ed25519.PublicKey)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data-0"), 2.0)
+
+	cache := newHLSCache(100)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+
+	// First request: MISS
+	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if cs := w.Header().Get("Cache-Status"); cs != "MISS" {
+		t.Errorf("first request Cache-Status = %q, want MISS", cs)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/vnd.apple.mpegurl" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+
+	// Second request: HIT
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil))
+
+	if w2.Code != 200 {
+		t.Fatalf("status = %d, want 200", w2.Code)
+	}
+	if cs := w2.Header().Get("Cache-Status"); cs != "HIT" {
+		t.Errorf("second request Cache-Status = %q, want HIT", cs)
+	}
+}
+
+func TestServerCache_SegmentCacheStatus(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := priv.Public().(ed25519.PublicKey)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data-0"), 2.0)
+
+	cache := newHLSCache(100)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+
+	path := "/tltv/v1/channels/" + channelID + "/seg0.ts"
+
+	// First: MISS
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if cs := w.Header().Get("Cache-Status"); cs != "MISS" {
+		t.Errorf("first Cache-Status = %q, want MISS", cs)
+	}
+	if string(w.Body.Bytes()) != "ts-data-0" {
+		t.Errorf("body = %q", w.Body.String())
+	}
+
+	// Second: HIT
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, httptest.NewRequest("GET", path, nil))
+	if cs := w2.Header().Get("Cache-Status"); cs != "HIT" {
+		t.Errorf("second Cache-Status = %q, want HIT", cs)
+	}
+}
+
+func TestServerCache_MetadataCacheStatus(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := priv.Public().(ed25519.PublicKey)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+
+	seg := newHLSSegmenter(5, 2)
+	cache := newHLSCache(100)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+
+	path := "/tltv/v1/channels/" + channelID
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if cs := w.Header().Get("Cache-Status"); cs != "MISS" {
+		t.Errorf("first Cache-Status = %q, want MISS", cs)
+	}
+
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, httptest.NewRequest("GET", path, nil))
+	if cs := w2.Header().Get("Cache-Status"); cs != "HIT" {
+		t.Errorf("second Cache-Status = %q, want HIT", cs)
+	}
+}
+
+func TestServerCache_GuideCacheStatus(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := priv.Public().(ed25519.PublicKey)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+
+	seg := newHLSSegmenter(5, 2)
+	cache := newHLSCache(100)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+
+	// guide.json
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/guide.json", nil))
+	if w.Code != 200 {
+		t.Fatalf("guide.json status = %d", w.Code)
+	}
+	if cs := w.Header().Get("Cache-Status"); cs != "MISS" {
+		t.Errorf("guide.json first Cache-Status = %q, want MISS", cs)
+	}
+
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/guide.json", nil))
+	if cs := w2.Header().Get("Cache-Status"); cs != "HIT" {
+		t.Errorf("guide.json second Cache-Status = %q, want HIT", cs)
+	}
+
+	// guide.xml
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/guide.xml", nil))
+	if w3.Code != 200 {
+		t.Fatalf("guide.xml status = %d", w3.Code)
+	}
+	if cs := w3.Header().Get("Cache-Status"); cs != "MISS" {
+		t.Errorf("guide.xml first Cache-Status = %q, want MISS", cs)
+	}
+}
+
+func TestServerCache_NilCacheNoHeaders(t *testing.T) {
+	// With cache=nil, no Cache-Status headers should appear.
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := priv.Public().(ed25519.PublicKey)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data"), 2.0)
+
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if cs := w.Header().Get("Cache-Status"); cs != "" {
+		t.Errorf("nil cache should not set Cache-Status, got %q", cs)
+	}
 }

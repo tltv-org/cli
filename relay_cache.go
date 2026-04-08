@@ -1,12 +1,58 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ---------- Shared Cache Flag Helpers ----------
+
+// addCacheFlags registers --cache, --cache-max-entries, --cache-stats on a FlagSet.
+// Returns pointers to the parsed values. Env vars: CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS.
+func addCacheFlags(fs *flag.FlagSet) (enabled *bool, maxEntries *int, statsInterval *int) {
+	defaultCache := os.Getenv("CACHE") == "1"
+	enabled = fs.Bool("cache", defaultCache, "enable in-memory response cache")
+
+	defaultMaxEntries := 100
+	if v := os.Getenv("CACHE_MAX_ENTRIES"); v != "" {
+		if n, err := fmt.Sscanf(v, "%d", &defaultMaxEntries); n != 1 || err != nil {
+			defaultMaxEntries = 100
+		}
+	}
+	maxEntries = fs.Int("cache-max-entries", defaultMaxEntries, "max cached items")
+
+	defaultCacheStats := 0
+	if v := os.Getenv("CACHE_STATS"); v != "" {
+		fmt.Sscanf(v, "%d", &defaultCacheStats)
+	}
+	statsInterval = fs.Int("cache-stats", defaultCacheStats, "log cache stats every N seconds (0 = off)")
+
+	return
+}
+
+// startCacheGoroutines starts the sweep (30s) and optional stats logging goroutines.
+// Call after creating the cache, before the main event loop.
+func startCacheGoroutines(cache *hlsCache, statsInterval int, done <-chan struct{}) {
+	go hlsCacheStatsLoop(cache, time.Duration(statsInterval)*time.Second, done)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				cache.sweep()
+			}
+		}
+	}()
+}
 
 // ---------- Singleflight (inline, zero deps) ----------
 
