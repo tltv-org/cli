@@ -209,6 +209,7 @@ func cmdRelay(args []string) {
 		}
 		// Apply scalar config values to flags
 		applyConfigToFlags(fs, cfg)
+		applyViewerConfig(&viewer, cfg)
 	}
 
 	// --dump-config: print resolved config and exit.
@@ -418,6 +419,7 @@ func cmdRelay(args []string) {
 				info := viewerBuildInfo(current.ChannelID, current.Name, current.Metadata, current.Guide)
 				info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
 				info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
+				info["via"] = "relay"
 				if registry.hostname != "" {
 					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
 				}

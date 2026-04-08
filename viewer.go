@@ -41,6 +41,7 @@ type viewerServer struct {
 type viewerConfig struct {
 	enabled  bool   // viewer is on
 	selector string // channel ID or tltv:// URI (empty = auto-select first)
+	fromCLI  bool   // true if --viewer appeared in CLI args (prevents config override)
 }
 
 // parseViewerArg pre-processes --viewer from args before fs.Parse().
@@ -71,6 +72,7 @@ func parseViewerArg(args []string) (remaining []string, vc viewerConfig) {
 		if strings.HasPrefix(arg, "--viewer=") {
 			val := arg[len("--viewer="):]
 			vc.enabled = true
+			vc.fromCLI = true
 			if val != "1" && val != "true" {
 				vc.selector = val
 			} else {
@@ -82,6 +84,7 @@ func parseViewerArg(args []string) (remaining []string, vc viewerConfig) {
 		// --viewer [optional channel selector]
 		if arg == "--viewer" {
 			vc.enabled = true
+			vc.fromCLI = true
 			vc.selector = ""
 			// Peek: if next arg looks like a channel ref, consume it
 			if i+1 < len(args) {
@@ -118,6 +121,35 @@ func resolveViewerChannelID(selector string) (string, error) {
 		return "", fmt.Errorf("invalid viewer channel: %v", err)
 	}
 	return selector, nil
+}
+
+// applyViewerConfig applies the "viewer" field from a daemon config file.
+// Only applies if --viewer was not set on the CLI. Config accepts:
+//
+//	true       → enable auto-select
+//	"TVabc..." → enable with channel selector
+//	"tltv://..." → enable with URI selector
+func applyViewerConfig(vc *viewerConfig, cfg map[string]interface{}) {
+	if vc.fromCLI {
+		return
+	}
+	val, ok := cfg["viewer"]
+	if !ok {
+		return
+	}
+	switch v := val.(type) {
+	case bool:
+		vc.enabled = v
+		vc.selector = ""
+	case string:
+		if v == "" || v == "0" || v == "false" {
+			return
+		}
+		vc.enabled = true
+		if v != "1" && v != "true" {
+			vc.selector = v
+		}
+	}
 }
 
 // viewerEmbedRoutes registers the viewer HTML, static assets, and /api/info
@@ -522,6 +554,7 @@ a.uri:hover{color:#999}
   <div class="db">
     <div class="dr">
       <div class="di"><span>verified </span><span id="dvr" class="ok"></span></div>
+      <div class="di" id="dvia" style="display:none"><span>via </span><span id="dviat"></span></div>
     </div>
     <div id="chd"></div>
   </div>
@@ -542,10 +575,11 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
   document.title=d.channel_name+' \u2014 tltv debug viewer';
 
   document.getElementById('dvr').textContent=d.verified?'\u2713':'?';
+  if(d.via){document.getElementById('dvia').style.display='';document.getElementById('dviat').textContent=d.via}
 
   // Render all metadata fields dynamically
   var m=d.metadata||{};
-  var base=d.base_url||'';
+  var base=d.base_url||window.location.origin;
   var skip={signature:1,v:1};
   var chd=document.getElementById('chd');
   var keys=Object.keys(m).sort();
@@ -565,9 +599,11 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
     chd.appendChild(div);
   });
   // Add xmltv url after metadata fields
+  var xmltv=d.xmltv_url||'';
+  if(xmltv.charAt(0)==='/') xmltv=base+xmltv;
   var xdiv=document.createElement('div');
   xdiv.className='dr';
-  xdiv.innerHTML='<div class="di"><span>xmltv </span><a class="uri" target="_blank" href="'+esc(d.xmltv_url||'')+'">'+esc(d.xmltv_url||'-')+'</a></div>';
+  xdiv.innerHTML='<div class="di"><span>xmltv </span><a class="uri" target="_blank" href="'+esc(xmltv)+'">'+esc(xmltv||'-')+'</a></div>';
   chd.appendChild(xdiv);
 
   // Find current program from guide

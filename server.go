@@ -193,6 +193,7 @@ func cmdServerTest(args []string) {
 			os.Exit(1)
 		}
 		applyConfigToFlags(fs, serverCfg)
+		applyViewerConfig(&viewer, serverCfg)
 		// Handle polymorphic guide from config
 		if guideVal, ok := serverCfg["guide"]; ok {
 			entries, _, err := parseGuideConfig(guideVal)
@@ -248,7 +249,11 @@ func cmdServerTest(args []string) {
 			cfg["cache"] = true
 		}
 		if viewer.enabled {
-			cfg["viewer"] = true
+			if viewer.selector != "" {
+				cfg["viewer"] = viewer.selector
+			} else {
+				cfg["viewer"] = true
+			}
 		}
 		if *gossipEnabled {
 			cfg["gossip"] = true
