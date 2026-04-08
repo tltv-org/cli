@@ -58,8 +58,8 @@ func cmdBridge(args []string) {
 	// --- Cache ---
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
-	// --- Viewer ---
-	viewerEnabled := addViewerFlag(fs)
+	// --- Viewer (parsed manually before fs.Parse) ---
+	var viewer viewerConfig
 
 	// --- TLS ---
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
@@ -100,7 +100,8 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
 		fmt.Fprintf(os.Stderr, "      --cache-stats N      log cache stats every N seconds (0 = off)\n\n")
 		fmt.Fprintf(os.Stderr, "Viewer:\n")
-		fmt.Fprintf(os.Stderr, "      --viewer             serve built-in web player at / (default: off)\n\n")
+		fmt.Fprintf(os.Stderr, "      --viewer [CHANNEL]   serve built-in web player at / (channel ID or tltv:// URI;\n")
+		fmt.Fprintf(os.Stderr, "                           must be a bridged channel; default: first public channel)\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL    log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
@@ -108,7 +109,7 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "Environment variables: STREAM, GUIDE, NAME, ON_DEMAND=1, POLL,\n")
 		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, GOSSIP=1, CONFIG,\n")
 		fmt.Fprintf(os.Stderr, "TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
-		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
+		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
 		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
@@ -118,6 +119,7 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream /media/hls\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://tunarr:8000/api/channels.m3u --guide http://tunarr:8000/api/xmltv.xml --on-demand\n")
 	}
+	args, viewer = parseViewerArg(args)
 	fs.Parse(args)
 
 	// Override default listen port for TLS.
@@ -176,8 +178,12 @@ func cmdBridge(args []string) {
 		if *cacheEnabled {
 			cfg["cache"] = true
 		}
-		if *viewerEnabled {
-			cfg["viewer"] = true
+		if viewer.enabled {
+			if viewer.selector != "" {
+				cfg["viewer"] = viewer.selector
+			} else {
+				cfg["viewer"] = true
+			}
 		}
 		if *gossipEnabled {
 			cfg["gossip"] = true
@@ -334,28 +340,50 @@ func cmdBridge(args []string) {
 	// Start HTTP server
 	server := newBridgeServer(registry, cache, peerReg, gossipReg)
 
-	// Embed viewer (first public channel)
+	// Embed viewer
 	var viewerChannelName string
-	if *viewerEnabled {
-		for _, ch := range registry.ListChannels() {
-			if !ch.IsPrivate() {
-				chID := ch.ChannelID
-				viewerEmbedRoutes(server.mux, func() map[string]interface{} {
-					current := registry.GetChannel(chID)
-					if current == nil {
-						return map[string]interface{}{}
-					}
-					info := viewerBuildInfo(current.ChannelID, current.Name, current.metadata, current.guideDoc)
-					info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
-					info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
-					if registry.hostname != "" {
-						info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
-					}
-					return info
-				})
-				viewerChannelName = ch.Name
-				break
+	if viewer.enabled {
+		viewerID, err := resolveViewerChannelID(viewer.selector)
+		if err != nil {
+			fatal("viewer: %v", err)
+		}
+
+		// Find the channel to display
+		var viewerChID string
+		if viewerID != "" {
+			// Explicit channel selection
+			ch := registry.GetChannel(viewerID)
+			if ch == nil {
+				fatal("viewer: channel %s not found in bridge", viewerID)
 			}
+			viewerChID = ch.ChannelID
+			viewerChannelName = ch.Name
+		} else {
+			// Auto-select first public channel
+			for _, ch := range registry.ListChannels() {
+				if !ch.IsPrivate() {
+					viewerChID = ch.ChannelID
+					viewerChannelName = ch.Name
+					break
+				}
+			}
+		}
+
+		if viewerChID != "" {
+			chID := viewerChID
+			viewerEmbedRoutes(server.mux, func() map[string]interface{} {
+				current := registry.GetChannel(chID)
+				if current == nil {
+					return map[string]interface{}{}
+				}
+				info := viewerBuildInfo(current.ChannelID, current.Name, current.metadata, current.guideDoc)
+				info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
+				info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
+				if registry.hostname != "" {
+					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
+				}
+				return info
+			})
 		}
 	}
 
@@ -391,7 +419,7 @@ func cmdBridge(args []string) {
 	if len(channelList) == 1 {
 		logInfof("tltv URI: tltv://%s@%s", channelList[0].ChannelID, addr)
 	}
-	if *viewerEnabled && viewerChannelName != "" {
+	if viewer.enabled && viewerChannelName != "" {
 		logInfof("viewer: %s://%s (channel: %s)", scheme, addr, viewerChannelName)
 	}
 

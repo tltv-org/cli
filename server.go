@@ -104,8 +104,8 @@ func cmdServerTest(args []string) {
 	// --- Cache ---
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
-	// --- Viewer ---
-	viewerEnabled := addViewerFlag(fs)
+	// --- Viewer (parsed manually before fs.Parse) ---
+	var viewer viewerConfig
 
 	// --- TLS ---
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
@@ -156,7 +156,7 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries N  max cached items (default: 100)\n")
 		fmt.Fprintf(os.Stderr, "      --cache-stats N        log cache stats every N seconds (0 = off)\n\n")
 		fmt.Fprintf(os.Stderr, "Viewer:\n")
-		fmt.Fprintf(os.Stderr, "      --viewer               serve built-in web player at / (default: off)\n\n")
+		fmt.Fprintf(os.Stderr, "      --viewer               serve built-in web player at /\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL      log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT    log format: human, json (default: human)\n")
@@ -165,7 +165,7 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  KEY, NAME, UPTIME, TIMEZONE, FONT_SCALE, WIDTH, HEIGHT, FPS, QP,\n")
 		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT, PEERS, GOSSIP=1,\n")
 		fmt.Fprintf(os.Stderr, "  CONFIG, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
-		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
+		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
 		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv server test -k channel.key --name \"TLTV Test\"\n")
@@ -174,6 +174,7 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv server test --width 1920 --height 1080 --fps 30\n")
 		fmt.Fprintf(os.Stderr, "  docker run -e NAME=TEST -e TLS=1 -e HOSTNAME=demo.tv tltv server test\n")
 	}
+	args, viewer = parseViewerArg(args)
 	fs.Parse(args)
 
 	// Override default listen port for TLS.
@@ -246,7 +247,7 @@ func cmdServerTest(args []string) {
 		if *cacheEnabled {
 			cfg["cache"] = true
 		}
-		if *viewerEnabled {
+		if viewer.enabled {
 			cfg["viewer"] = true
 		}
 		if *gossipEnabled {
@@ -460,7 +461,7 @@ func cmdServerTest(args []string) {
 
 	// HTTP server
 	mux := http.NewServeMux()
-	if *viewerEnabled {
+	if viewer.enabled {
 		viewerEmbedRoutes(mux, func() map[string]interface{} {
 			docs := serverDocsState.Load()
 			info := viewerBuildInfo(docs.channelID, docs.channelName, docs.metadata, docs.guide)
@@ -496,7 +497,7 @@ func cmdServerTest(args []string) {
 	logInfof("listening on %s (%s)", addr, scheme)
 	logInfof("stream: %s://%s/tltv/v1/channels/%s/stream.m3u8", scheme, addr, channelID)
 	logInfof("tltv URI: tltv://%s@%s", channelID, addr)
-	if *viewerEnabled {
+	if viewer.enabled {
 		logInfof("viewer: %s://%s", scheme, addr)
 	}
 

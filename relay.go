@@ -43,8 +43,8 @@ func cmdRelay(args []string) {
 	// Cache flags
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
-	// Viewer
-	viewerEnabled := addViewerFlag(fs)
+	// Viewer (parsed manually before fs.Parse)
+	var viewer viewerConfig
 
 	// --- TLS ---
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
@@ -111,7 +111,8 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --tls-staging        use Let's Encrypt staging (for testing)\n")
 		fmt.Fprintf(os.Stderr, "      --acme-email EMAIL   email for ACME account (optional)\n\n")
 		fmt.Fprintf(os.Stderr, "Viewer:\n")
-		fmt.Fprintf(os.Stderr, "      --viewer             serve built-in web player at / (default: off)\n\n")
+		fmt.Fprintf(os.Stderr, "      --viewer [CHANNEL]   serve built-in web player at / (channel ID or tltv:// URI;\n")
+		fmt.Fprintf(os.Stderr, "                           must be a relayed channel; default: first channel)\n\n")
 		fmt.Fprintf(os.Stderr, "Tuning:\n")
 		fmt.Fprintf(os.Stderr, "      --meta-poll DUR      metadata poll interval (default: 60s)\n")
 		fmt.Fprintf(os.Stderr, "      --guide-poll DUR     guide poll interval (default: 15m)\n")
@@ -125,7 +126,7 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "Environment variables: CHANNELS, NODE, CONFIG, LISTEN, HOSTNAME,\n")
 		fmt.Fprintf(os.Stderr, "PEERS, GOSSIP=1,\n")
 		fmt.Fprintf(os.Stderr, "TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
-		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
+		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
 		fmt.Fprintf(os.Stderr, "META_POLL, GUIDE_POLL, PEER_POLL, MAX_PEERS, STALE_DAYS,\n")
 		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
@@ -135,6 +136,7 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv relay --node origin.example.com:443\n")
 		fmt.Fprintf(os.Stderr, "  tltv relay --config relay.json\n")
 	}
+	args, viewer = parseViewerArg(args)
 	fs.Parse(args)
 
 	// Override default listen port for TLS.
@@ -225,8 +227,12 @@ func cmdRelay(args []string) {
 		if *cacheEnabled {
 			cfg["cache"] = true
 		}
-		if *viewerEnabled {
-			cfg["viewer"] = true
+		if viewer.enabled {
+			if viewer.selector != "" {
+				cfg["viewer"] = viewer.selector
+			} else {
+				cfg["viewer"] = true
+			}
 		}
 		if *gossipEnabled {
 			cfg["gossip"] = true
@@ -373,28 +379,50 @@ func cmdRelay(args []string) {
 	// Start HTTP server
 	server := newRelayServer(registry, client, cache, peerReg)
 
-	// Embed viewer (first non-migrated channel)
+	// Embed viewer
 	var viewerChannelName string
-	if *viewerEnabled {
-		for _, ch := range registry.ListChannels() {
-			if ch.Name != "(migrated)" {
-				chID := ch.ChannelID
-				viewerEmbedRoutes(server.mux, func() map[string]interface{} {
-					current := registry.GetChannel(chID)
-					if current == nil {
-						return map[string]interface{}{}
-					}
-					info := viewerBuildInfo(current.ChannelID, current.Name, current.Metadata, current.Guide)
-					info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
-					info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
-					if registry.hostname != "" {
-						info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
-					}
-					return info
-				})
-				viewerChannelName = ch.Name
-				break
+	if viewer.enabled {
+		viewerID, err := resolveViewerChannelID(viewer.selector)
+		if err != nil {
+			fatal("viewer: %v", err)
+		}
+
+		// Find the channel to display
+		var viewerChID string
+		if viewerID != "" {
+			// Explicit channel selection
+			ch := registry.GetChannel(viewerID)
+			if ch == nil {
+				fatal("viewer: channel %s not found in relay", viewerID)
 			}
+			viewerChID = ch.ChannelID
+			viewerChannelName = ch.Name
+		} else {
+			// Auto-select first non-migrated channel
+			for _, ch := range registry.ListChannels() {
+				if ch.Name != "(migrated)" {
+					viewerChID = ch.ChannelID
+					viewerChannelName = ch.Name
+					break
+				}
+			}
+		}
+
+		if viewerChID != "" {
+			chID := viewerChID
+			viewerEmbedRoutes(server.mux, func() map[string]interface{} {
+				current := registry.GetChannel(chID)
+				if current == nil {
+					return map[string]interface{}{}
+				}
+				info := viewerBuildInfo(current.ChannelID, current.Name, current.Metadata, current.Guide)
+				info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
+				info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
+				if registry.hostname != "" {
+					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
+				}
+				return info
+			})
 		}
 	}
 
@@ -429,7 +457,7 @@ func cmdRelay(args []string) {
 	if len(relayTargets) == 1 {
 		logInfof("tltv URI: tltv://%s@%s", relayTargets[0].ChannelID, addr)
 	}
-	if *viewerEnabled && viewerChannelName != "" {
+	if viewer.enabled && viewerChannelName != "" {
 		logInfof("viewer: %s://%s (channel: %s)", scheme, addr, viewerChannelName)
 	}
 

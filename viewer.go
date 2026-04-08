@@ -37,9 +37,87 @@ type viewerServer struct {
 
 // ---------- Shared Viewer Helpers ----------
 
-// addViewerFlag registers --viewer with VIEWER=1 env var on a FlagSet.
-func addViewerFlag(fs *flag.FlagSet) *bool {
-	return fs.Bool("viewer", os.Getenv("VIEWER") == "1", "serve built-in web player at /")
+// viewerConfig holds the parsed --viewer flag state.
+type viewerConfig struct {
+	enabled  bool   // viewer is on
+	selector string // channel ID or tltv:// URI (empty = auto-select first)
+}
+
+// parseViewerArg pre-processes --viewer from args before fs.Parse().
+// --viewer without a value enables auto-selection of the first channel.
+// --viewer followed by a channel ID (TV...) or tltv:// URI selects that channel.
+// Also reads the VIEWER env var: "1" enables auto-select, any other non-empty
+// value is treated as a channel selector. CLI overrides env.
+func parseViewerArg(args []string) (remaining []string, vc viewerConfig) {
+	// Env var default
+	if env := os.Getenv("VIEWER"); env != "" {
+		switch env {
+		case "0", "false":
+			// explicitly disabled
+		case "1", "true":
+			vc.enabled = true
+		default:
+			vc.enabled = true
+			vc.selector = env
+		}
+	}
+
+	// Scan CLI args
+	remaining = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		// --viewer=value
+		if strings.HasPrefix(arg, "--viewer=") {
+			val := arg[len("--viewer="):]
+			vc.enabled = true
+			if val != "1" && val != "true" {
+				vc.selector = val
+			} else {
+				vc.selector = ""
+			}
+			continue
+		}
+
+		// --viewer [optional channel selector]
+		if arg == "--viewer" {
+			vc.enabled = true
+			vc.selector = ""
+			// Peek: if next arg looks like a channel ref, consume it
+			if i+1 < len(args) {
+				next := args[i+1]
+				if strings.HasPrefix(next, "tltv://") || strings.HasPrefix(next, "TV") {
+					vc.selector = next
+					i++
+				}
+			}
+			continue
+		}
+
+		remaining = append(remaining, arg)
+	}
+
+	return
+}
+
+// resolveViewerChannelID extracts a channel ID from the viewer selector.
+// Returns "" for auto-select (empty selector). Validates channel IDs and
+// parses tltv:// URIs to extract the channel component.
+func resolveViewerChannelID(selector string) (string, error) {
+	if selector == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(selector, "tltv://") {
+		uri, err := parseTLTVUri(selector)
+		if err != nil {
+			return "", fmt.Errorf("invalid viewer URI: %v", err)
+		}
+		return uri.ChannelID, nil
+	}
+	if err := validateChannelID(selector); err != nil {
+		return "", fmt.Errorf("invalid viewer channel: %v", err)
+	}
+	return selector, nil
 }
 
 // viewerEmbedRoutes registers the viewer HTML, static assets, and /api/info

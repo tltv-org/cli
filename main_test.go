@@ -2072,6 +2072,151 @@ func TestHoistGlobalFlags(t *testing.T) {
 	flagLocal = false
 }
 
+func TestParseViewerArg(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		env       string
+		enabled   bool
+		selector  string
+		remaining []string
+	}{
+		{
+			name:      "no flag",
+			args:      []string{"--channels", "foo"},
+			enabled:   false,
+			remaining: []string{"--channels", "foo"},
+		},
+		{
+			name:      "bare --viewer",
+			args:      []string{"--channels", "foo", "--viewer"},
+			enabled:   true,
+			remaining: []string{"--channels", "foo"},
+		},
+		{
+			name:      "viewer with channel ID",
+			args:      []string{"--viewer", testChannelIDConst, "--listen", ":8000"},
+			enabled:   true,
+			selector:  testChannelIDConst,
+			remaining: []string{"--listen", ":8000"},
+		},
+		{
+			name:      "viewer with tltv URI",
+			args:      []string{"--viewer", "tltv://" + testChannelIDConst + "@host:443", "--cache"},
+			enabled:   true,
+			selector:  "tltv://" + testChannelIDConst + "@host:443",
+			remaining: []string{"--cache"},
+		},
+		{
+			name:      "viewer before flag arg",
+			args:      []string{"--viewer", "--listen", ":8000"},
+			enabled:   true,
+			selector:  "",
+			remaining: []string{"--listen", ":8000"},
+		},
+		{
+			name:      "viewer at end",
+			args:      []string{"--listen", ":8000", "--viewer"},
+			enabled:   true,
+			remaining: []string{"--listen", ":8000"},
+		},
+		{
+			name:      "viewer=value syntax",
+			args:      []string{"--viewer=" + testChannelIDConst},
+			enabled:   true,
+			selector:  testChannelIDConst,
+			remaining: []string{},
+		},
+		{
+			name:      "viewer=true",
+			args:      []string{"--viewer=true"},
+			enabled:   true,
+			selector:  "",
+			remaining: []string{},
+		},
+		{
+			name:      "env VIEWER=1",
+			args:      []string{"--listen", ":8000"},
+			env:       "1",
+			enabled:   true,
+			remaining: []string{"--listen", ":8000"},
+		},
+		{
+			name:      "env VIEWER=channelID",
+			args:      []string{},
+			env:       testChannelIDConst,
+			enabled:   true,
+			selector:  testChannelIDConst,
+			remaining: []string{},
+		},
+		{
+			name:      "cli overrides env",
+			args:      []string{"--viewer", testChannelIDConst},
+			env:       "1",
+			enabled:   true,
+			selector:  testChannelIDConst,
+			remaining: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("VIEWER", tt.env)
+			} else {
+				t.Setenv("VIEWER", "")
+			}
+			remaining, vc := parseViewerArg(tt.args)
+			if vc.enabled != tt.enabled {
+				t.Errorf("enabled: got %v, want %v", vc.enabled, tt.enabled)
+			}
+			if vc.selector != tt.selector {
+				t.Errorf("selector: got %q, want %q", vc.selector, tt.selector)
+			}
+			if len(remaining) != len(tt.remaining) {
+				t.Fatalf("remaining: got %v, want %v", remaining, tt.remaining)
+			}
+			for i, arg := range remaining {
+				if arg != tt.remaining[i] {
+					t.Errorf("remaining[%d]: got %q, want %q", i, arg, tt.remaining[i])
+				}
+			}
+		})
+	}
+}
+
+func TestResolveViewerChannelID(t *testing.T) {
+	// Empty selector = auto-select
+	id, err := resolveViewerChannelID("")
+	if err != nil || id != "" {
+		t.Errorf("empty: got %q, %v", id, err)
+	}
+
+	// Valid channel ID
+	id, err = resolveViewerChannelID(testChannelIDConst)
+	if err != nil || id != testChannelIDConst {
+		t.Errorf("channel ID: got %q, %v", id, err)
+	}
+
+	// tltv:// URI extracts channel ID
+	id, err = resolveViewerChannelID("tltv://" + testChannelIDConst + "@host:443")
+	if err != nil || id != testChannelIDConst {
+		t.Errorf("URI: got %q, %v", id, err)
+	}
+
+	// Invalid selector
+	_, err = resolveViewerChannelID("not-a-channel")
+	if err == nil {
+		t.Error("expected error for invalid selector")
+	}
+
+	// Invalid URI
+	_, err = resolveViewerChannelID("tltv://")
+	if err == nil {
+		t.Error("expected error for invalid URI")
+	}
+}
+
 // demoNode tries to reach the public TLTV demo server.
 // Returns the host or skips the test if the demo is unreachable.
 func demoNode(t *testing.T) string {
