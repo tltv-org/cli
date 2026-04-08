@@ -679,7 +679,7 @@ func TestServerCache_ManifestCacheStatus(t *testing.T) {
 
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
 
 	// First request: MISS
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil)
@@ -719,7 +719,7 @@ func TestServerCache_SegmentCacheStatus(t *testing.T) {
 
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
 
 	path := "/tltv/v1/channels/" + channelID + "/seg0.ts"
 
@@ -753,7 +753,7 @@ func TestServerCache_MetadataCacheStatus(t *testing.T) {
 	seg := newHLSSegmenter(5, 2)
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
 
 	path := "/tltv/v1/channels/" + channelID
 
@@ -782,7 +782,7 @@ func TestServerCache_GuideCacheStatus(t *testing.T) {
 	seg := newHLSSegmenter(5, 2)
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
 
 	// guide.json
 	w := httptest.NewRecorder()
@@ -822,7 +822,7 @@ func TestServerCache_NilCacheNoHeaders(t *testing.T) {
 	seg.pushSegment([]byte("ts-data"), 2.0)
 
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil)
 
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil))

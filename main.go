@@ -62,10 +62,10 @@ func usage() {
 	fmt.Fprintf(w, "tltv - TLTV Federation Protocol CLI (%s, protocol v1)\n\n", version)
 	fmt.Fprintf(w, "Usage: tltv [flags] <command> [options]\n\n")
 	fmt.Fprintf(w, "Global Flags:\n")
-	fmt.Fprintf(w, "  --json        Machine-readable JSON output\n")
-	fmt.Fprintf(w, "  --no-color    Disable colored output\n")
-	fmt.Fprintf(w, "  --insecure    Use HTTP transport (and skip TLS verification)\n")
-	fmt.Fprintf(w, "  --local       Allow local/private address hints\n\n")
+	fmt.Fprintf(w, "  -j, --json        Machine-readable JSON output\n")
+	fmt.Fprintf(w, "  -C, --no-color    Disable colored output\n")
+	fmt.Fprintf(w, "  -I, --insecure    Use HTTP transport (and skip TLS verification)\n")
+	fmt.Fprintf(w, "  -L, --local       Allow local/private address hints\n\n")
 	fmt.Fprintf(w, "Identity & Keys:\n")
 	fmt.Fprintf(w, "  keygen                 Generate a new channel keypair\n")
 	fmt.Fprintf(w, "  vanity <pattern>       Mine vanity channel IDs\n")
@@ -114,13 +114,13 @@ func main() {
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		switch arg {
-		case "--json":
+		case "-j", "--json":
 			flagJSON = true
-		case "--no-color":
+		case "-C", "--no-color":
 			flagNoColor = true
-		case "--insecure":
+		case "-I", "--insecure":
 			flagInsecure = true
-		case "--local":
+		case "-L", "--local":
 			flagLocal = true
 		case "-v", "--version":
 			initColor()
@@ -222,13 +222,13 @@ func hoistGlobalFlags(args []string) []string {
 	var remaining []string
 	for _, arg := range args {
 		switch arg {
-		case "--json":
+		case "-j", "--json":
 			flagJSON = true
-		case "--no-color":
+		case "-C", "--no-color":
 			flagNoColor = true
-		case "--insecure":
+		case "-I", "--insecure":
 			flagInsecure = true
-		case "--local":
+		case "-L", "--local":
 			flagLocal = true
 		default:
 			remaining = append(remaining, arg)
@@ -510,12 +510,13 @@ func cmdSign(args []string) {
 func cmdVerify(args []string) {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	channelFlag := fs.String("channel", "", "expected channel ID (auto-detected from document if omitted)")
+	fs.StringVar(channelFlag, "c", "", "alias for --channel")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Verify a signed TLTV document\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv verify [flags] [file]\n\n")
 		fmt.Fprintf(os.Stderr, "Reads from stdin if no file is specified.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -c, --channel ID    expected channel ID (auto-detected from document if omitted)\n")
 	}
 	fs.Parse(args)
 
@@ -793,15 +794,19 @@ func cmdFormat(args []string) {
 func cmdMigrate(args []string) {
 	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 	fromKey := fs.String("from-key", "", "path to OLD channel's seed file (required)")
+	fs.StringVar(fromKey, "k", "", "alias for --from-key")
 	toID := fs.String("to", "", "NEW channel ID (required)")
 	reason := fs.String("reason", "", "migration reason")
+	fs.StringVar(reason, "r", "", "alias for --reason")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Create a signed key migration document\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv migrate -from-key <old-seed-file> -to <new-channel-id> [-reason text]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv migrate --from-key <old-seed-file> --to <new-channel-id> [--reason text]\n\n")
 		fmt.Fprintf(os.Stderr, "The migration document is signed by the OLD key and served\n")
 		fmt.Fprintf(os.Stderr, "at the old channel's metadata endpoint.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "  -k, --from-key FILE    path to OLD channel's seed file (required)\n")
+		fmt.Fprintf(os.Stderr, "      --to ID            NEW channel ID (required)\n")
+		fmt.Fprintf(os.Stderr, "  -r, --reason TEXT      migration reason\n")
 	}
 	fs.Parse(args)
 
@@ -900,7 +905,7 @@ func cmdCompletion(args []string) {
 		fmt.Fprintf(os.Stderr, "  zsh:   /usr/local/share/zsh/site-functions/_tltv\n")
 		fmt.Fprintf(os.Stderr, "  fish:  ~/.config/fish/completions/tltv.fish\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "      --install    write completions to the standard shell location\n")
 	}
 	fs.Parse(args)
 
@@ -992,10 +997,10 @@ _tltv() {
     commands=(` + cmds + `)
 
     _arguments -C \
-        '--json[JSON output]' \
-        '--no-color[Disable colors]' \
-        '--insecure[Use HTTP transport]' \
-        '--local[Allow local/private address hints]' \
+        '(-j --json)'{-j,--json}'[JSON output]' \
+        '(-C --no-color)'{-C,--no-color}'[Disable colors]' \
+        '(-I --insecure)'{-I,--insecure}'[Use HTTP transport]' \
+        '(-L --local)'{-L,--local}'[Allow local/private address hints]' \
         '1:command:->cmd' \
         '*::arg:->args'
 
@@ -1033,10 +1038,10 @@ func completionFish() string {
 	sb.WriteString(strings.Join(allCommands, " "))
 	sb.WriteString("\n\n")
 	sb.WriteString("complete -c tltv -e\n")
-	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l json -d 'JSON output'\n")
-	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l no-color -d 'Disable colors'\n")
-	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l insecure -d 'Use HTTP transport'\n")
-	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -l local -d 'Allow local addresses'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -s j -l json -d 'JSON output'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -s C -l no-color -d 'Disable colors'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -s I -l insecure -d 'Use HTTP transport'\n")
+	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -s L -l local -d 'Allow local addresses'\n")
 
 	descriptions := map[string]string{
 		"keygen": "Generate channel keypair", "vanity": "Mine vanity IDs",

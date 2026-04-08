@@ -37,7 +37,7 @@ func serveSegment(w http.ResponseWriter, r *http.Request, seg *hlsSegmenter, num
 // serverHTTP sets up HTTP handlers for the server command.
 // Serves HLS stream and TLTV protocol endpoints.
 // Pass cache=nil to disable caching.
-func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName string, metadata, guide []byte, cache *hlsCache) {
+func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName string, metadata, guide []byte, cache *hlsCache, peerReg *peerRegistry) {
 	// Store initial docs atomically
 	serverDocsState.Store(&serverDocs{
 		channelID:   channelID,
@@ -224,12 +224,17 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		}
 	})
 
-	// Peers (empty — server is standalone)
+	// Peers
 	mux.HandleFunc("GET /tltv/v1/peers", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "max-age=300")
+		var external []peerEntry
+		if peerReg != nil {
+			external = peerReg.ListPeers()
+		}
+		peers := buildPeersResponse(nil, external)
 		bridgeWriteJSON(w, map[string]interface{}{
-			"peers": []interface{}{},
+			"peers": peers,
 		}, http.StatusOK)
 	})
 

@@ -14,16 +14,18 @@ import (
 // bridgeServer implements the TLTV protocol HTTP endpoints for bridged channels.
 type bridgeServer struct {
 	registry *bridgeRegistry
-	cache    *hlsCache // optional response cache (nil = disabled)
+	cache    *hlsCache        // optional response cache (nil = disabled)
+	peerReg  *peerRegistry    // optional external peers (nil = no --peers)
 	mux      *http.ServeMux
 }
 
 // newBridgeServer creates a bridge HTTP server with all protocol endpoints registered.
-// Pass cache=nil to disable caching.
-func newBridgeServer(registry *bridgeRegistry, cache *hlsCache) *bridgeServer {
+// Pass cache=nil to disable caching, peerReg=nil to disable external peers.
+func newBridgeServer(registry *bridgeRegistry, cache *hlsCache, peerReg *peerRegistry) *bridgeServer {
 	s := &bridgeServer{
 		registry: registry,
 		cache:    cache,
+		peerReg:  peerReg,
 		mux:      http.NewServeMux(),
 	}
 
@@ -86,40 +88,33 @@ func (s *bridgeServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePeers serves GET /tltv/v1/peers
+// Returns originated public channels + verified external peers from --peers.
 func (s *bridgeServer) handlePeers(w http.ResponseWriter, r *http.Request) {
-	if len(s.registry.peers) == 0 {
-		bridgeWriteJSON(w, map[string]interface{}{
-			"peers": []interface{}{},
-		}, http.StatusOK)
-		return
-	}
-
-	channels := s.registry.ListChannels()
-	now := time.Now().UTC().Format(timestampFormat)
-
-	type peerEntry struct {
-		ID       string   `json:"id"`
-		Name     string   `json:"name"`
-		Hints    []string `json:"hints"`
-		LastSeen string   `json:"last_seen"`
-	}
-
-	var peers []peerEntry
-	for _, ch := range channels {
-		if ch.IsPrivate() {
-			continue
+	// Own originated channels (public only, with hostname as hint)
+	var own []peerEntry
+	hostname := s.registry.hostname
+	if hostname != "" {
+		now := time.Now()
+		for _, ch := range s.registry.ListChannels() {
+			if ch.IsPrivate() {
+				continue
+			}
+			own = append(own, peerEntry{
+				ChannelID: ch.ChannelID,
+				Name:      ch.Name,
+				Hints:     []string{hostname},
+				LastSeen:  now,
+			})
 		}
-		peers = append(peers, peerEntry{
-			ID:       ch.ChannelID,
-			Name:     ch.Name,
-			Hints:    s.registry.peers,
-			LastSeen: now,
-		})
-	}
-	if peers == nil {
-		peers = []peerEntry{}
 	}
 
+	// External verified peers
+	var external []peerEntry
+	if s.peerReg != nil {
+		external = s.peerReg.ListPeers()
+	}
+
+	peers := buildPeersResponse(own, external)
 	w.Header().Set("Cache-Control", "max-age=300")
 	bridgeWriteJSON(w, map[string]interface{}{
 		"peers": peers,

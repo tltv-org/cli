@@ -34,8 +34,9 @@ func cmdRelay(args []string) {
 	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for peer exchange")
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
-	peersStr := fs.String("peers", os.Getenv("PEERS"), "additional peer hints to advertise")
-	fs.StringVar(peersStr, "P", os.Getenv("PEERS"), "alias for --peers")
+	peersStr := addPeersFlag(fs)
+	gossipEnabled := fs.Bool("gossip", os.Getenv("GOSSIP") == "1", "re-advertise validated gossip-discovered channels")
+	fs.BoolVar(gossipEnabled, "g", os.Getenv("GOSSIP") == "1", "alias for --gossip")
 
 	// Cache flags
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -91,8 +92,10 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --config PATH        relay config file (JSON)\n\n")
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
-		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for peer exchange\n")
-		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         additional peer hints to advertise\n\n")
+		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for peer exchange\n\n")
+		fmt.Fprintf(os.Stderr, "Peers:\n")
+		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
+		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n\n")
 		fmt.Fprintf(os.Stderr, "Cache:\n")
 		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory HLS stream cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
@@ -116,7 +119,7 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: CHANNELS, NODE, CONFIG, LISTEN, HOSTNAME,\n")
-		fmt.Fprintf(os.Stderr, "PEERS, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR,\n")
+		fmt.Fprintf(os.Stderr, "PEERS, GOSSIP=1, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR,\n")
 		fmt.Fprintf(os.Stderr, "ACME_EMAIL, CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
 		fmt.Fprintf(os.Stderr, "META_POLL, GUIDE_POLL, PEER_POLL, MAX_PEERS, STALE_DAYS,\n")
 		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
@@ -154,15 +157,11 @@ func cmdRelay(args []string) {
 		fatal("invalid --peer-poll: %v", err)
 	}
 
-	// Parse peer hints
-	var peerHints []string
-	if *peersStr != "" {
-		for _, p := range strings.Split(*peersStr, ",") {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				peerHints = append(peerHints, p)
-			}
-		}
+	// Parse --peers (tltv:// URIs for external peer exchange)
+	extPeerTargets, err := parsePeerTargets(*peersStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Collect channel and node lists from flags + config
@@ -217,7 +216,7 @@ func cmdRelay(args []string) {
 	}
 
 	// Create registry
-	registry := newRelayRegistry(*hostnameArg, peerHints, *maxPeers, *staleDays)
+	registry := newRelayRegistry(*hostnameArg, *gossipEnabled, *maxPeers, *staleDays)
 
 	// Initial metadata fetch + verification for all targets
 	var relayTargets []relayTarget // successfully verified targets
@@ -281,8 +280,15 @@ func cmdRelay(args []string) {
 		logInfof("HLS cache enabled (max %d entries)", *cacheMaxEntries)
 	}
 
+	// Set up external peer registry (--peers)
+	var peerReg *peerRegistry
+	if len(extPeerTargets) > 0 {
+		peerReg = newPeerRegistry()
+		logInfof("peers: verifying %d external channels", len(extPeerTargets))
+	}
+
 	// Start HTTP server
-	server := newRelayServer(registry, client, cache)
+	server := newRelayServer(registry, client, cache, peerReg)
 
 	// Embed viewer (first non-migrated channel)
 	var viewerChannelName string
@@ -376,6 +382,9 @@ func cmdRelay(args []string) {
 	}
 	if peerPoll > 0 && len(nodes) > 0 {
 		go relayPeerPollLoop(ctx, peerPoll, client, registry, nodes)
+	}
+	if len(extPeerTargets) > 0 && peerReg != nil {
+		go peerPollLoop(ctx, client, extPeerTargets, peerReg, 5*time.Minute)
 	}
 
 	// Wait for shutdown signal

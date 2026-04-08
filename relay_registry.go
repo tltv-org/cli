@@ -31,18 +31,18 @@ type relayPeerInfo struct {
 // relayRegistry manages relayed channels and peer state.
 // Thread-safe via sync.RWMutex with immutable replacement.
 type relayRegistry struct {
-	mu        sync.RWMutex
-	channels  map[string]*relayRegisteredChannel // channelID -> channel
-	peers     map[string]*relayPeerInfo          // channelID -> peer info (from gossip)
-	hostname  string
-	peerHints []string // our own hints to advertise
-	maxPeers  int
-	staleDays int
+	mu            sync.RWMutex
+	channels      map[string]*relayRegisteredChannel // channelID -> channel
+	peers         map[string]*relayPeerInfo          // channelID -> peer info (from gossip)
+	hostname      string
+	gossipEnabled bool // include gossip-discovered peers in the peers response
+	maxPeers      int
+	staleDays     int
 }
 
 // ---------- Constructor ----------
 
-func newRelayRegistry(hostname string, peerHints []string, maxPeers, staleDays int) *relayRegistry {
+func newRelayRegistry(hostname string, gossipEnabled bool, maxPeers, staleDays int) *relayRegistry {
 	if maxPeers <= 0 {
 		maxPeers = 100
 	}
@@ -50,12 +50,12 @@ func newRelayRegistry(hostname string, peerHints []string, maxPeers, staleDays i
 		staleDays = 7
 	}
 	return &relayRegistry{
-		channels:  make(map[string]*relayRegisteredChannel),
-		peers:     make(map[string]*relayPeerInfo),
-		hostname:  hostname,
-		peerHints: peerHints,
-		maxPeers:  maxPeers,
-		staleDays: staleDays,
+		channels:      make(map[string]*relayRegisteredChannel),
+		peers:         make(map[string]*relayPeerInfo),
+		hostname:      hostname,
+		gossipEnabled: gossipEnabled,
+		maxPeers:      maxPeers,
+		staleDays:     staleDays,
 	}
 }
 
@@ -87,7 +87,8 @@ func (r *relayRegistry) ChannelCount() int {
 }
 
 // ListPeers returns peer entries for the gossip exchange response.
-// Includes relayed channels with our hints + gossip-discovered peers.
+// Always includes relayed channels with our hostname as hint.
+// Gossip-discovered peers are only included when gossipEnabled is true.
 // Applies staleness cutoff and max limit.
 func (r *relayRegistry) ListPeers() []relayPeerInfo {
 	r.mu.RLock()
@@ -98,8 +99,8 @@ func (r *relayRegistry) ListPeers() []relayPeerInfo {
 
 	// Our own relayed channels
 	for _, ch := range r.channels {
-		hints := r.peerHints
-		if len(hints) == 0 && r.hostname != "" {
+		var hints []string
+		if r.hostname != "" {
 			hints = []string{r.hostname}
 		}
 		result = append(result, relayPeerInfo{
@@ -110,15 +111,17 @@ func (r *relayRegistry) ListPeers() []relayPeerInfo {
 		})
 	}
 
-	// Gossip-discovered peers (not channels we relay ourselves)
-	for _, p := range r.peers {
-		if _, relaying := r.channels[p.ChannelID]; relaying {
-			continue // already included from our own channels
+	// Gossip-discovered peers (only when --gossip is enabled)
+	if r.gossipEnabled {
+		for _, p := range r.peers {
+			if _, relaying := r.channels[p.ChannelID]; relaying {
+				continue // already included from our own channels
+			}
+			if p.LastSeen.Before(cutoff) {
+				continue // stale
+			}
+			result = append(result, *p)
 		}
-		if p.LastSeen.Before(cutoff) {
-			continue // stale
-		}
-		result = append(result, *p)
 	}
 
 	// Apply max limit

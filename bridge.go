@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -49,8 +48,7 @@ func cmdBridge(args []string) {
 	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for origins field")
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
-	peersStr := fs.String("peers", os.Getenv("PEERS"), "comma-separated peer host:port hints")
-	fs.StringVar(peersStr, "P", os.Getenv("PEERS"), "alias for --peers")
+	peersStr := addPeersFlag(fs)
 
 	// --- Cache ---
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -79,8 +77,9 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
-		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins field\n")
-		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         comma-separated peer host:port hints\n\n")
+		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins field\n\n")
+		fmt.Fprintf(os.Stderr, "Peers:\n")
+		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                enable TLS (autocert via Let's Encrypt if no cert/key)\n")
 		fmt.Fprintf(os.Stderr, "      --tls-cert FILE      TLS certificate file (PEM)\n")
@@ -137,15 +136,11 @@ func cmdBridge(args []string) {
 		fatal("invalid --poll value %q: %v", *pollStr, err)
 	}
 
-	// Parse peers
-	var peers []string
-	if *peersStr != "" {
-		for _, p := range strings.Split(*peersStr, ",") {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				peers = append(peers, p)
-			}
-		}
+	// Parse --peers (tltv:// URIs for external peer exchange)
+	peerTargets, err := parsePeerTargets(*peersStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Ensure keys directory exists
@@ -154,7 +149,7 @@ func cmdBridge(args []string) {
 	}
 
 	// Create registry
-	registry := newBridgeRegistry(*keysDir, *hostnameArg, peers)
+	registry := newBridgeRegistry(*keysDir, *hostnameArg)
 
 	// Initial source poll
 	logInfof("discovering channels from %s", *streamArg)
@@ -207,8 +202,21 @@ func cmdBridge(args []string) {
 		logInfof("cache enabled (max %d entries)", *cacheMaxEntries)
 	}
 
+	// Context for background goroutines
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Set up peer registry (--peers)
+	var peerReg *peerRegistry
+	if len(peerTargets) > 0 {
+		peerReg = newPeerRegistry()
+		client := newClient(flagInsecure)
+		go peerPollLoop(ctx, client, peerTargets, peerReg, 5*time.Minute)
+		logInfof("peers: verifying %d external channels", len(peerTargets))
+	}
+
 	// Start HTTP server
-	server := newBridgeServer(registry, cache)
+	server := newBridgeServer(registry, cache, peerReg)
 
 	// Embed viewer (first public channel)
 	var viewerChannelName string
@@ -285,10 +293,6 @@ func cmdBridge(args []string) {
 			}
 		}()
 	}
-
-	// Start poll loop
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Start cache goroutines
 	if cache != nil {

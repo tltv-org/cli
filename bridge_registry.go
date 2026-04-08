@@ -51,18 +51,16 @@ type bridgeRegistry struct {
 	byUpstream map[string]string                   // upstream ID -> TLTV channel ID
 	keysDir    string
 	hostname   string
-	peers      []string
 }
 
 // ---------- Constructor ----------
 
-func newBridgeRegistry(keysDir, hostname string, peers []string) *bridgeRegistry {
+func newBridgeRegistry(keysDir, hostname string) *bridgeRegistry {
 	return &bridgeRegistry{
 		channels:   make(map[string]*bridgeRegisteredChannel),
 		byUpstream: make(map[string]string),
 		keysDir:    keysDir,
 		hostname:   hostname,
-		peers:      peers,
 	}
 }
 

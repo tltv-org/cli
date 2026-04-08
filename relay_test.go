@@ -272,7 +272,7 @@ func TestRelayDiscoverTargets_FromNode(t *testing.T) {
 // ---------- Registry ----------
 
 func TestRelayRegistry_UpdateAndGet(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 
 	doc := map[string]interface{}{"name": "Test Channel"}
 	raw := []byte(`{"name":"Test Channel"}`)
@@ -292,7 +292,7 @@ func TestRelayRegistry_UpdateAndGet(t *testing.T) {
 }
 
 func TestRelayRegistry_RemoveChannel(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(`{}`), map[string]interface{}{"name": "x"}, nil)
 	r.RemoveChannel("TVtest123")
 	if r.GetChannel("TVtest123") != nil {
@@ -301,7 +301,7 @@ func TestRelayRegistry_RemoveChannel(t *testing.T) {
 }
 
 func TestRelayRegistry_GuideUpdate(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(`{}`), map[string]interface{}{"name": "x"}, nil)
 
 	entries := []bridgeGuideEntry{{Start: "2026-01-01T00:00:00Z", End: "2026-01-02T00:00:00Z", Title: "Show"}}
@@ -314,7 +314,7 @@ func TestRelayRegistry_GuideUpdate(t *testing.T) {
 }
 
 func TestRelayRegistry_ListPeers(t *testing.T) {
-	r := newRelayRegistry("relay.example.com:443", []string{"relay.example.com:443"}, 100, 7)
+	r := newRelayRegistry("relay.example.com:443", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(`{}`), map[string]interface{}{"name": "Test"}, nil)
 
 	peers := r.ListPeers()
@@ -332,9 +332,9 @@ func TestRelayRegistry_ListPeers(t *testing.T) {
 // ---------- Relay Server Endpoints ----------
 
 func TestRelayServerNodeInfo(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(`{}`), map[string]interface{}{"name": "Test"}, nil)
-	srv := newRelayServer(r, newClient(false), nil)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	req := httptest.NewRequest("GET", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -367,9 +367,9 @@ func TestRelayServerMetadata_RawBytesPreserved(t *testing.T) {
 	// Create metadata with an unknown field -- relay must preserve it
 	rawMeta := `{"v":1,"id":"TVtest123","name":"Test","unknown_field":"preserve_me","signature":"abc"}`
 
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(rawMeta), map[string]interface{}{"name": "Test"}, nil)
-	srv := newRelayServer(r, newClient(false), nil)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/TVtest123", nil)
 	w := httptest.NewRecorder()
@@ -386,8 +386,8 @@ func TestRelayServerMetadata_RawBytesPreserved(t *testing.T) {
 }
 
 func TestRelayServerChannelNotFound(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
-	srv := newRelayServer(r, newClient(false), nil)
+	r := newRelayRegistry("", false, 100, 7)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/TVnonexistent", nil)
 	w := httptest.NewRecorder()
@@ -399,9 +399,9 @@ func TestRelayServerChannelNotFound(t *testing.T) {
 }
 
 func TestRelayServerHealth(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(`{}`), map[string]interface{}{"name": "Test"}, nil)
-	srv := newRelayServer(r, newClient(false), nil)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -420,8 +420,8 @@ func TestRelayServerHealth(t *testing.T) {
 }
 
 func TestRelayServerCORS(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
-	srv := newRelayServer(r, newClient(false), nil)
+	r := newRelayRegistry("", false, 100, 7)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	req := httptest.NewRequest("GET", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -433,8 +433,8 @@ func TestRelayServerCORS(t *testing.T) {
 }
 
 func TestRelayServerOPTIONS(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
-	srv := newRelayServer(r, newClient(false), nil)
+	r := newRelayRegistry("", false, 100, 7)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	req := httptest.NewRequest("OPTIONS", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -446,8 +446,8 @@ func TestRelayServerOPTIONS(t *testing.T) {
 }
 
 func TestRelayServerMethodNotAllowed(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
-	srv := newRelayServer(r, newClient(false), nil)
+	r := newRelayRegistry("", false, 100, 7)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	req := httptest.NewRequest("POST", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -474,10 +474,10 @@ func TestRelayEndToEnd_StreamProxy(t *testing.T) {
 	}
 
 	// Set up relay
-	registry := newRelayRegistry("", nil, 100, 7)
+	registry := newRelayRegistry("", false, 100, 7)
 	registry.UpdateChannel(channelID, res.Raw, res.Doc, []string{hint})
 
-	srv := newRelayServer(registry, client, nil)
+	srv := newRelayServer(registry, client, nil, nil)
 
 	// Fetch manifest through relay
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil)
@@ -520,11 +520,11 @@ func TestRelayEndToEnd_GuideServing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	registry := newRelayRegistry("", nil, 100, 7)
+	registry := newRelayRegistry("", false, 100, 7)
 	registry.UpdateChannel(channelID, res.Raw, res.Doc, []string{hint})
 	registry.UpdateGuide(channelID, raw, entries)
 
-	srv := newRelayServer(registry, client, nil)
+	srv := newRelayServer(registry, client, nil, nil)
 
 	// guide.json -- served verbatim
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/guide.json", nil)
@@ -557,9 +557,9 @@ func TestRelayEndToEnd_GuideServing(t *testing.T) {
 // ---------- Concurrent Access ----------
 
 func TestRelayConcurrentAccess(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest", []byte(`{"name":"test"}`), map[string]interface{}{"name": "test"}, nil)
-	srv := newRelayServer(r, newClient(false), nil)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	var wg sync.WaitGroup
 
@@ -595,9 +595,9 @@ func TestRelayConcurrentAccess(t *testing.T) {
 // ---------- Access State Transition ----------
 
 func TestRelayRegistry_AccessTransition(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(`{"name":"Test"}`), map[string]interface{}{"name": "Test"}, nil)
-	srv := newRelayServer(r, newClient(false), nil)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 
 	// Channel exists
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/TVtest123", nil)
@@ -683,7 +683,7 @@ func TestAppendUnique(t *testing.T) {
 // ---------- StoreMigration ----------
 
 func TestRelayStoreMigration(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVold123", []byte(`{"name":"Old"}`), map[string]interface{}{"name": "Old"}, nil)
 
 	// Store migration
@@ -703,7 +703,7 @@ func TestRelayStoreMigration(t *testing.T) {
 	}
 
 	// Verify it serves through the HTTP endpoint
-	srv := newRelayServer(r, newClient(false), nil)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/TVold123", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -715,7 +715,7 @@ func TestRelayStoreMigration(t *testing.T) {
 // ---------- MergePeers ----------
 
 func TestRelayMergePeers(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 7)
+	r := newRelayRegistry("", true, 100, 7) // gossip enabled to see merged peers
 
 	// Add peers
 	r.MergePeers([]relayPeerInfo{
@@ -739,7 +739,7 @@ func TestRelayMergePeers(t *testing.T) {
 }
 
 func TestRelayMergePeers_Staleness(t *testing.T) {
-	r := newRelayRegistry("", nil, 100, 1) // 1-day staleness
+	r := newRelayRegistry("", true, 100, 1) // gossip enabled, 1-day staleness
 
 	staleTime := time.Now().Add(-48 * time.Hour)
 	r.MergePeers([]relayPeerInfo{
@@ -759,13 +759,13 @@ func TestRelayMergePeers_Staleness(t *testing.T) {
 // ---------- Relay Server Peers ----------
 
 func TestRelayServerPeers(t *testing.T) {
-	r := newRelayRegistry("relay.example.com:443", nil, 100, 7)
+	r := newRelayRegistry("relay.example.com:443", false, 100, 7)
 	r.UpdateChannel("TVtest1", []byte(`{"name":"Test"}`), map[string]interface{}{"name": "Test"}, []string{"origin.com:443"})
 	r.MergePeers([]relayPeerInfo{
 		{ChannelID: "TVpeer1", Name: "Peer Channel", Hints: []string{"peer.com:443"}, LastSeen: time.Now()},
 	})
 
-	srv := newRelayServer(r, newClient(false), nil)
+	srv := newRelayServer(r, newClient(false), nil, nil)
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)

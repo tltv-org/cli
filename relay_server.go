@@ -13,18 +13,20 @@ import (
 // relayServer implements the TLTV protocol HTTP endpoints for relayed channels.
 type relayServer struct {
 	registry *relayRegistry
-	client   *Client    // for proxying streams from upstream
-	cache    *hlsCache  // optional HLS cache (nil = disabled)
+	client   *Client        // for proxying streams from upstream
+	cache    *hlsCache      // optional HLS cache (nil = disabled)
+	peerReg  *peerRegistry  // optional external peers from --peers (nil = disabled)
 	mux      *http.ServeMux
 }
 
 // newRelayServer creates a relay HTTP server with all protocol endpoints.
-// Pass cache=nil to disable caching.
-func newRelayServer(registry *relayRegistry, client *Client, cache *hlsCache) *relayServer {
+// Pass cache=nil to disable caching, peerReg=nil to disable external peers.
+func newRelayServer(registry *relayRegistry, client *Client, cache *hlsCache, peerReg *peerRegistry) *relayServer {
 	s := &relayServer{
 		registry: registry,
 		client:   client,
 		cache:    cache,
+		peerReg:  peerReg,
 		mux:      http.NewServeMux(),
 	}
 
@@ -88,30 +90,27 @@ func (s *relayServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePeers serves GET /tltv/v1/peers with full gossip exchange.
+// Returns relayed channels + gossip (if --gossip) + verified external peers (--peers).
 func (s *relayServer) handlePeers(w http.ResponseWriter, r *http.Request) {
-	peerInfos := s.registry.ListPeers()
-
-	type peerEntry struct {
-		ID       string   `json:"id"`
-		Name     string   `json:"name"`
-		Hints    []string `json:"hints"`
-		LastSeen string   `json:"last_seen"`
-	}
-
-	peers := make([]peerEntry, 0, len(peerInfos))
-	for _, p := range peerInfos {
-		hints := p.Hints
-		if hints == nil {
-			hints = []string{}
-		}
-		peers = append(peers, peerEntry{
-			ID:       p.ChannelID,
-			Name:     p.Name,
-			Hints:    hints,
-			LastSeen: p.LastSeen.UTC().Format(timestampFormat),
+	// Relayed channels + gossip (from relay registry)
+	registryPeers := s.registry.ListPeers()
+	var own []peerEntry
+	for _, p := range registryPeers {
+		own = append(own, peerEntry{
+			ChannelID: p.ChannelID,
+			Name:      p.Name,
+			Hints:     p.Hints,
+			LastSeen:  p.LastSeen,
 		})
 	}
 
+	// External verified peers from --peers
+	var external []peerEntry
+	if s.peerReg != nil {
+		external = s.peerReg.ListPeers()
+	}
+
+	peers := buildPeersResponse(own, external)
 	w.Header().Set("Cache-Control", "max-age=300")
 	bridgeWriteJSON(w, map[string]interface{}{
 		"peers": peers,

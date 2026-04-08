@@ -95,6 +95,8 @@ func cmdServerTest(args []string) {
 	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for origins field")
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
+	peersStr := addPeersFlag(fs)
+
 	segDuration := fs.Int("segment-duration", envInt("SEGMENT_DURATION", 2), "HLS segment duration in seconds")
 	segCount := fs.Int("segment-count", envInt("SEGMENT_COUNT", 5), "HLS playlist window size (number of segments)")
 
@@ -133,6 +135,8 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST        public host:port for origins field\n")
 		fmt.Fprintf(os.Stderr, "      --segment-duration N   HLS segment duration in seconds (default: 2)\n")
 		fmt.Fprintf(os.Stderr, "      --segment-count N      segments in playlist window (default: 5)\n\n")
+		fmt.Fprintf(os.Stderr, "Peers:\n")
+		fmt.Fprintf(os.Stderr, "  -P, --peers LIST           tltv:// URIs to advertise in peer exchange\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                  enable TLS (autocert via Let's Encrypt if no cert/key)\n")
 		fmt.Fprintf(os.Stderr, "      --tls-cert FILE        TLS certificate file (PEM)\n")
@@ -151,7 +155,7 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-file PATH        log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "All flags also accept environment variables (uppercase, underscores):\n")
 		fmt.Fprintf(os.Stderr, "  KEY, NAME, UPTIME, TIMEZONE, FONT_SCALE, WIDTH, HEIGHT, FPS, QP,\n")
-		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT,\n")
+		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT, PEERS,\n")
 		fmt.Fprintf(os.Stderr, "  TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
 		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE\n\n")
@@ -317,6 +321,20 @@ func cmdServerTest(args []string) {
 		logInfof("cache enabled (max %d entries)", *cacheMaxEntries)
 	}
 
+	// Set up peer registry (--peers)
+	var peerReg *peerRegistry
+	peerTargets, err := parsePeerTargets(*peersStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if len(peerTargets) > 0 {
+		peerReg = newPeerRegistry()
+		client := newClient(flagInsecure)
+		go peerPollLoop(ctx, client, peerTargets, peerReg, 5*time.Minute)
+		logInfof("peers: verifying %d external channels", len(peerTargets))
+	}
+
 	// HTTP server
 	mux := http.NewServeMux()
 	if *viewerEnabled {
@@ -331,7 +349,7 @@ func cmdServerTest(args []string) {
 			return info
 		})
 	}
-	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache)
+	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache, peerReg)
 
 	// Set up TLS (if enabled).
 	tlsCfg, tlsCleanup, tlsErr := tlsSetup(*hostnameArg, *tlsEnabled, *tlsCert, *tlsKey, *acmeEmail, *tlsStaging)
