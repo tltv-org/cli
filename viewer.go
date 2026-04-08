@@ -558,6 +558,14 @@ a.uri:hover{color:#999}
     </div>
     <div id="chd"></div>
   </div>
+  <hr>
+
+  <div class="sl">node</div>
+  <div class="db" id="nd"><div class="ge" style="color:#666">loading...</div></div>
+  <hr>
+
+  <div class="sl">peers</div>
+  <div class="db" id="pd"><div class="ge" style="color:#666">loading...</div></div>
   </div>
 </div>
 </div>
@@ -575,7 +583,6 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
   document.title=d.channel_name+' \u2014 tltv debug viewer';
 
   document.getElementById('dvr').textContent=d.verified?'\u2713':'?';
-  if(d.via){document.getElementById('dvia').style.display='';document.getElementById('dviat').textContent=d.via}
 
   // Render all metadata fields dynamically
   var m=d.metadata||{};
@@ -635,6 +642,46 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
   }
 
   initPlayer(d.stream_src);
+
+  // Fetch node info and peers from protocol endpoints
+  var nb=base;
+  fetch(nb+'/.well-known/tltv').then(function(r){return r.json()}).then(function(n){
+    var nd=document.getElementById('nd');
+    nd.innerHTML='';
+    // Determine via
+    var via='';
+    if(n.relaying){for(var i=0;i<n.relaying.length;i++){if(n.relaying[i].id===d.channel_id){via='relay';break}}}
+    if(!via&&n.channels){for(var i=0;i<n.channels.length;i++){if(n.channels[i].id===d.channel_id){via='origin';break}}}
+    if(via){document.getElementById('dvia').style.display='';document.getElementById('dviat').textContent=via}
+    // Render node fields
+    var nf=[['protocol',n.protocol],['versions',(n.versions||[]).join(', ')]];
+    if(n.channels&&n.channels.length){
+      var cl=n.channels.map(function(c){return c.name||c.id}).join(', ');
+      nf.push(['channels',cl]);
+    }
+    if(n.relaying&&n.relaying.length){
+      var rl=n.relaying.map(function(c){return c.name||c.id}).join(', ');
+      nf.push(['relaying',rl]);
+    }
+    nf.forEach(function(f){
+      var div=document.createElement('div');div.className='dr';
+      div.innerHTML='<div class="di"><span>'+esc(f[0])+' </span><span class="uri">'+esc(f[1])+'</span></div>';
+      nd.appendChild(div);
+    });
+  }).catch(function(){document.getElementById('nd').innerHTML='<div class="ge" style="color:#666">unavailable</div>'});
+
+  fetch(nb+'/tltv/v1/peers').then(function(r){return r.json()}).then(function(p){
+    var pd=document.getElementById('pd');
+    pd.innerHTML='';
+    var peers=p.peers||[];
+    if(!peers.length){pd.innerHTML='<div class="ge" style="color:#666">no peers</div>';return}
+    peers.forEach(function(pr){
+      var div=document.createElement('div');div.className='ge';
+      var hints=(pr.hints||[]).join(', ');
+      div.innerHTML='<span class="uri">'+esc(pr.name||pr.id)+'</span> <span class="gt">'+esc(hints)+'</span>';
+      pd.appendChild(div);
+    });
+  }).catch(function(){document.getElementById('pd').innerHTML='<div class="ge" style="color:#666">unavailable</div>'});
 });
 
 function initPlayer(src){

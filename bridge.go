@@ -380,7 +380,6 @@ func cmdBridge(args []string) {
 				info := viewerBuildInfo(current.ChannelID, current.Name, current.metadata, current.guideDoc)
 				info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
 				info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
-				info["via"] = "bridge"
 				if registry.hostname != "" {
 					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
 				}
