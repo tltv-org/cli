@@ -304,7 +304,7 @@ func cmdRelay(args []string) {
 	// Initial metadata fetch + verification for all targets
 	var relayTargets []relayTarget // successfully verified targets
 	for _, t := range targets {
-		res, err := relayFetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
+		res, err := fetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
 		if err != nil {
 			logErrorf("skip %s: %v", t.ChannelID, err)
 			continue
@@ -326,7 +326,7 @@ func cmdRelay(args []string) {
 		}
 
 		// Check access restrictions
-		if err := relayCheckAccess(res.Doc); err != nil {
+		if err := checkChannelAccess(res.Doc); err != nil {
 			logErrorf("skip %s: %v", t.ChannelID, err)
 			continue
 		}
@@ -464,7 +464,12 @@ func cmdRelay(args []string) {
 		go relayGuidePollLoop(ctx, guidePoll, client, registry)
 	}
 	if peerPoll > 0 && len(nodes) > 0 {
-		go relayPeerPollLoop(ctx, peerPoll, client, registry, nodes)
+		relayGossipStore := func(id, name string, hints []string) {
+			registry.MergePeers([]peerEntry{{
+				ChannelID: id, Name: name, Hints: hints, LastSeen: time.Now(),
+			}})
+		}
+		go gossipPollLoop(ctx, client, nodes, relayGossipStore, peerPoll)
 	}
 	if len(extPeerTargets) > 0 && peerReg != nil {
 		go peerPollLoop(ctx, client, extPeerTargets, peerReg, 5*time.Minute)
@@ -473,27 +478,9 @@ func cmdRelay(args []string) {
 	// Config watcher — periodically check for config changes.
 	// Reloadable: channels, node (re-discover and sync with registry).
 	if *configPath != "" {
-		cfgWatcher := newConfigWatcher(*configPath)
-		go func() {
-			reloadTicker := time.NewTicker(30 * time.Second)
-			defer reloadTicker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-reloadTicker.C:
-					if !cfgWatcher.Changed() {
-						continue
-					}
-					newCfg, err := loadDaemonConfig(cfgWatcher.path)
-					if err != nil {
-						logErrorf("config reload failed: %v (keeping current)", err)
-						continue
-					}
-					relayReloadConfig(newCfg, client, registry)
-				}
-			}
-		}()
+		go configReloadLoop(ctx, newConfigWatcher(*configPath), func(cfg map[string]interface{}) {
+			relayReloadConfig(cfg, client, registry)
+		})
 	}
 
 	// Wait for shutdown signal
@@ -528,7 +515,7 @@ func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *
 					continue
 				}
 
-				res, err := relayFetchAndVerifyMetadata(client, ch.ChannelID, ch.Hints)
+				res, err := fetchAndVerifyMetadata(client, ch.ChannelID, ch.Hints)
 				if err != nil {
 					logErrorf("meta poll %s: %v", ch.ChannelID, err)
 					continue
@@ -541,7 +528,7 @@ func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *
 				}
 
 				// Re-check access (channel may have gone private/on-demand/retired)
-				if err := relayCheckAccess(res.Doc); err != nil {
+				if err := checkChannelAccess(res.Doc); err != nil {
 					logInfof("channel %s now %s, stopping relay", ch.ChannelID, err)
 					registry.RemoveChannel(ch.ChannelID)
 					continue
@@ -588,7 +575,7 @@ func relayReloadConfig(cfg map[string]interface{}, client *Client, registry *rel
 		if registry.GetChannel(t.ChannelID) != nil {
 			continue // already relaying
 		}
-		res, err := relayFetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
+		res, err := fetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
 		if err != nil {
 			logErrorf("config reload: skip %s: %v", t.ChannelID, err)
 			continue
@@ -596,7 +583,7 @@ func relayReloadConfig(cfg map[string]interface{}, client *Client, registry *rel
 		if res.IsMigration {
 			continue
 		}
-		if err := relayCheckAccess(res.Doc); err != nil {
+		if err := checkChannelAccess(res.Doc); err != nil {
 			logErrorf("config reload: skip %s: %v", t.ChannelID, err)
 			continue
 		}
@@ -651,85 +638,4 @@ func relayGuidePollLoop(ctx context.Context, interval time.Duration, client *Cli
 	}
 }
 
-// relayPeerPollLoop periodically fetches peers from known nodes and validates them.
-func relayPeerPollLoop(ctx context.Context, interval time.Duration, client *Client, registry *relayRegistry, nodes []string) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			for _, node := range nodes {
-				node = normalizeHost(node)
-				exchange, err := client.FetchPeers(node)
-				if err != nil {
-					logErrorf("peer poll %s: %v", node, err)
-					continue
-				}
-
-				var validated []relayPeerInfo
-				for _, p := range exchange.Peers {
-					// Validate: fetch node info from first hint, verify channel is listed
-					if len(p.Hints) == 0 {
-						continue
-					}
-					hint := p.Hints[0]
-
-					info, err := client.FetchNodeInfo(hint)
-					if err != nil {
-						continue
-					}
-
-					// Check the channel is actually served there
-					found := false
-					for _, ch := range info.Channels {
-						if ch.ID == p.ID {
-							found = true
-							break
-						}
-					}
-					if !found {
-						for _, ch := range info.Relaying {
-							if ch.ID == p.ID {
-								found = true
-								break
-							}
-						}
-					}
-					if !found {
-						continue
-					}
-
-					// Step 3 (spec 11.5): verify signed metadata before adding peer
-					metaRes, err := relayFetchAndVerifyMetadata(client, p.ID, []string{hint})
-					if err != nil {
-						continue
-					}
-					if metaRes.IsMigration {
-						continue
-					}
-
-					lastSeen := time.Now()
-					if p.LastSeen != "" {
-						if t, err := time.Parse(timestampFormat, p.LastSeen); err == nil {
-							lastSeen = t
-						}
-					}
-
-					validated = append(validated, relayPeerInfo{
-						ChannelID: p.ID,
-						Name:      p.Name,
-						Hints:     p.Hints,
-						LastSeen:  lastSeen,
-					})
-				}
-
-				if len(validated) > 0 {
-					registry.MergePeers(validated)
-				}
-			}
-		}
-	}
-}

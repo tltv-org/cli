@@ -117,7 +117,7 @@ func TestRelayFetchAndVerifyMetadata(t *testing.T) {
 	defer upstream.Close()
 
 	client := newClient(false)
-	res, err := relayFetchAndVerifyMetadata(client, channelID, []string{hostFromURL(upstream.URL)})
+	res, err := fetchAndVerifyMetadata(client, channelID, []string{hostFromURL(upstream.URL)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestRelayFetchAndVerifyMetadata_BadSignature(t *testing.T) {
 	defer ts.Close()
 
 	client := newClient(false)
-	_, err := relayFetchAndVerifyMetadata(client, channelID, []string{hostFromURL(ts.URL)})
+	_, err := fetchAndVerifyMetadata(client, channelID, []string{hostFromURL(ts.URL)})
 	if err == nil {
 		t.Error("should fail with bad signature")
 	}
@@ -192,28 +192,28 @@ func TestRelayFetchAndVerifyGuide(t *testing.T) {
 
 func TestRelayCheckAccess_Public(t *testing.T) {
 	doc := map[string]interface{}{"access": "public", "status": "active"}
-	if err := relayCheckAccess(doc); err != nil {
+	if err := checkChannelAccess(doc); err != nil {
 		t.Errorf("public channel should be allowed: %v", err)
 	}
 }
 
 func TestRelayCheckAccess_Private(t *testing.T) {
 	doc := map[string]interface{}{"access": "token", "status": "active"}
-	if err := relayCheckAccess(doc); err == nil {
+	if err := checkChannelAccess(doc); err == nil {
 		t.Error("private channel should be rejected")
 	}
 }
 
 func TestRelayCheckAccess_OnDemand(t *testing.T) {
 	doc := map[string]interface{}{"access": "public", "on_demand": true}
-	if err := relayCheckAccess(doc); err == nil {
+	if err := checkChannelAccess(doc); err == nil {
 		t.Error("on-demand channel should be rejected")
 	}
 }
 
 func TestRelayCheckAccess_Retired(t *testing.T) {
 	doc := map[string]interface{}{"access": "public", "status": "retired"}
-	if err := relayCheckAccess(doc); err == nil {
+	if err := checkChannelAccess(doc); err == nil {
 		t.Error("retired channel should be rejected")
 	}
 }
@@ -238,15 +238,17 @@ func TestRelayLoadConfig(t *testing.T) {
 		"nodes": ["origin.example.com:443", "backup.example.com:443"]
 	}`), 0644)
 
-	cfg, err := relayLoadConfig(f)
+	cfg, err := loadDaemonConfig(f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Channels) != 1 {
-		t.Errorf("channels: %d", len(cfg.Channels))
+	channels, _ := cfg["channels"].([]interface{})
+	nodes, _ := cfg["nodes"].([]interface{})
+	if len(channels) != 1 {
+		t.Errorf("channels: %d", len(channels))
 	}
-	if len(cfg.Nodes) != 2 {
-		t.Errorf("nodes: %d", len(cfg.Nodes))
+	if len(nodes) != 2 {
+		t.Errorf("nodes: %d", len(nodes))
 	}
 }
 
@@ -304,7 +306,7 @@ func TestRelayRegistry_GuideUpdate(t *testing.T) {
 	r := newRelayRegistry("", false, 100, 7)
 	r.UpdateChannel("TVtest123", []byte(`{}`), map[string]interface{}{"name": "x"}, nil)
 
-	entries := []bridgeGuideEntry{{Start: "2026-01-01T00:00:00Z", End: "2026-01-02T00:00:00Z", Title: "Show"}}
+	entries := []guideEntry{{Start: "2026-01-01T00:00:00Z", End: "2026-01-02T00:00:00Z", Title: "Show"}}
 	r.UpdateGuide("TVtest123", []byte(`{"entries":[]}`), entries)
 
 	ch := r.GetChannel("TVtest123")
@@ -468,7 +470,7 @@ func TestRelayEndToEnd_StreamProxy(t *testing.T) {
 	hint := hostFromURL(upstream.URL)
 
 	// Fetch and verify metadata
-	res, err := relayFetchAndVerifyMetadata(client, channelID, []string{hint})
+	res, err := fetchAndVerifyMetadata(client, channelID, []string{hint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +513,7 @@ func TestRelayEndToEnd_GuideServing(t *testing.T) {
 	client := newClient(false)
 	hint := hostFromURL(upstream.URL)
 
-	res, err := relayFetchAndVerifyMetadata(client, channelID, []string{hint})
+	res, err := fetchAndVerifyMetadata(client, channelID, []string{hint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +652,7 @@ func TestRelayExtractGuideEntries(t *testing.T) {
 		},
 	}
 
-	entries := relayExtractGuideEntries(doc)
+	entries := extractGuideEntries(doc)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -718,7 +720,7 @@ func TestRelayMergePeers(t *testing.T) {
 	r := newRelayRegistry("", true, 100, 7) // gossip enabled to see merged peers
 
 	// Add peers
-	r.MergePeers([]relayPeerInfo{
+	r.MergePeers([]peerEntry{
 		{ChannelID: "TVa", Name: "A", Hints: []string{"a.example.com:443"}, LastSeen: time.Now()},
 		{ChannelID: "TVb", Name: "B", Hints: []string{"b.example.com:443"}, LastSeen: time.Now()},
 	})
@@ -729,7 +731,7 @@ func TestRelayMergePeers(t *testing.T) {
 	}
 
 	// Merge with overlap (should update, not duplicate)
-	r.MergePeers([]relayPeerInfo{
+	r.MergePeers([]peerEntry{
 		{ChannelID: "TVa", Name: "A Updated", Hints: []string{"a2.example.com:443"}, LastSeen: time.Now()},
 	})
 	peers = r.ListPeers()
@@ -742,7 +744,7 @@ func TestRelayMergePeers_Staleness(t *testing.T) {
 	r := newRelayRegistry("", true, 100, 1) // gossip enabled, 1-day staleness
 
 	staleTime := time.Now().Add(-48 * time.Hour)
-	r.MergePeers([]relayPeerInfo{
+	r.MergePeers([]peerEntry{
 		{ChannelID: "TVstale", Name: "Stale", Hints: []string{"old.com:443"}, LastSeen: staleTime},
 		{ChannelID: "TVfresh", Name: "Fresh", Hints: []string{"new.com:443"}, LastSeen: time.Now()},
 	})
@@ -761,7 +763,7 @@ func TestRelayMergePeers_Staleness(t *testing.T) {
 func TestRelayServerPeers(t *testing.T) {
 	r := newRelayRegistry("relay.example.com:443", false, 100, 7)
 	r.UpdateChannel("TVtest1", []byte(`{"name":"Test"}`), map[string]interface{}{"name": "Test"}, []string{"origin.com:443"})
-	r.MergePeers([]relayPeerInfo{
+	r.MergePeers([]peerEntry{
 		{ChannelID: "TVpeer1", Name: "Peer Channel", Hints: []string{"peer.com:443"}, LastSeen: time.Now()},
 	})
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -168,7 +169,7 @@ func configGetStringSlice(cfg map[string]interface{}, key string) ([]string, boo
 //	"guide": {"entries": [...]}  → inline guide entries (entries populated, filePath empty)
 //	"guide": "guide.json"        → file reference (entries nil, filePath populated)
 //	omitted or null              → use default (both nil/empty)
-func parseGuideConfig(v interface{}) (entries []bridgeGuideEntry, filePath string, err error) {
+func parseGuideConfig(v interface{}) (entries []guideEntry, filePath string, err error) {
 	if v == nil {
 		return nil, "", nil
 	}
@@ -200,7 +201,7 @@ func parseGuideConfig(v interface{}) (entries []bridgeGuideEntry, filePath strin
 			continue
 		}
 
-		entry := bridgeGuideEntry{}
+		entry := guideEntry{}
 		if s, ok := entryMap["start"].(string); ok {
 			entry.Start = s
 		}
@@ -259,6 +260,33 @@ func (w *configWatcher) Changed() bool {
 	return false
 }
 
+// ---------- Config Reload Loop ----------
+
+// configReloadLoop watches a config file and calls reloadFn when it changes.
+// Runs until ctx is cancelled. Check interval: 30 seconds.
+// Each daemon provides its own reloadFn closure.
+func configReloadLoop(ctx context.Context, watcher *configWatcher, reloadFn func(map[string]interface{})) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !watcher.Changed() {
+				continue
+			}
+			cfg, err := loadDaemonConfig(watcher.path)
+			if err != nil {
+				logErrorf("config reload failed: %v (keeping current)", err)
+				continue
+			}
+			reloadFn(cfg)
+		}
+	}
+}
+
 // ---------- Config Dump ----------
 
 // dumpDaemonConfig writes a config map as indented JSON to w.
@@ -293,7 +321,7 @@ func dumpDaemonConfig(cfg map[string]interface{}, w io.Writer) error {
 			}
 			out[k] = arr
 			continue
-		case []bridgeGuideEntry:
+		case []guideEntry:
 			if len(val) == 0 {
 				continue
 			}

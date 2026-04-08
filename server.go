@@ -183,7 +183,7 @@ func cmdServerTest(args []string) {
 
 	// Load config file (if specified). Config values fill in unset flags.
 	var serverCfg map[string]interface{}
-	var serverGuideEntries []bridgeGuideEntry // from config inline guide
+	var serverGuideEntries []guideEntry // from config inline guide
 	if *configPath != "" {
 		var err error
 		serverCfg, err = loadDaemonConfig(*configPath)
@@ -454,7 +454,7 @@ func cmdServerTest(args []string) {
 		gossipReg = newPeerRegistry()
 		gossipNodes := gossipNodesFromPeers(peerTargets)
 		client := newClient(flagInsecure)
-		go gossipPollLoop(ctx, client, gossipNodes, gossipReg, 10*time.Minute)
+		go gossipPollLoop(ctx, client, gossipNodes, gossipReg.Update, 10*time.Minute)
 		logInfof("gossip: discovering channels from %d nodes", len(gossipNodes))
 	}
 
@@ -556,10 +556,18 @@ func cmdServerTest(args []string) {
 	resignTicker := time.NewTicker(5 * time.Minute)
 	defer resignTicker.Stop()
 
-	// Config watcher (if config file provided)
-	var cfgWatcher *configWatcher
+	// Atomic config for reloadable fields (written by config goroutine, read by resign ticker)
+	var serverLiveConfig atomic.Pointer[serverReloadableConfig]
+	serverLiveConfig.Store(&serverReloadableConfig{
+		channelName:  channelName,
+		guideEntries: serverGuideEntries,
+	})
+
+	// Config watcher goroutine (if config file provided)
 	if *configPath != "" {
-		cfgWatcher = newConfigWatcher(*configPath)
+		go configReloadLoop(ctx, newConfigWatcher(*configPath), func(cfg map[string]interface{}) {
+			serverApplyReloadedConfig(cfg, &serverLiveConfig)
+		})
 	}
 
 	for {
@@ -573,31 +581,10 @@ func cmdServerTest(args []string) {
 		case <-ticker.C:
 			state.generateSegment()
 		case <-resignTicker.C:
-			// Check config reload before re-signing
-			if cfgWatcher != nil && cfgWatcher.Changed() {
-				newCfg, err := loadDaemonConfig(cfgWatcher.path)
-				if err != nil {
-					logErrorf("config reload failed: %v (keeping current)", err)
-				} else {
-					if name, ok := configGetString(newCfg, "name"); ok && name != channelName {
-						channelName = name
-						state.channelName = strings.ToUpper(name)
-						logInfof("config: name changed to %q", name)
-					}
-					if guideVal, ok := newCfg["guide"]; ok {
-						entries, _, gerr := parseGuideConfig(guideVal)
-						if gerr == nil && len(entries) > 0 {
-							serverGuideEntries = entries
-							logInfof("config: guide updated (%d entries)", len(entries))
-						} else if gerr != nil {
-							logErrorf("config: guide: %v", gerr)
-						}
-					}
-					logInfof("config reloaded")
-				}
-			}
-			metadata, guide = serverSignDocs(channelID, channelName, hostname, privKey, serverGuideEntries)
-			serverUpdateDocs(channelID, channelName, metadata, guide)
+			lc := serverLiveConfig.Load()
+			state.channelName = strings.ToUpper(lc.channelName)
+			metadata, guide = serverSignDocs(channelID, lc.channelName, hostname, privKey, lc.guideEntries)
+			serverUpdateDocs(channelID, lc.channelName, metadata, guide)
 		}
 	}
 }
@@ -722,7 +709,7 @@ func (s *serverState) generateSegment() {
 
 // serverSignDocs signs metadata and guide documents for the server channel.
 // Pass customGuide to use specific entries; nil falls back to ephemeral midnight-to-midnight.
-func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.PrivateKey, customGuide []bridgeGuideEntry) ([]byte, []byte) {
+func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.PrivateKey, customGuide []guideEntry) ([]byte, []byte) {
 	now := time.Now().UTC()
 
 	// --- Metadata ---
@@ -753,7 +740,7 @@ func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.Pri
 	// midnight-to-midnight UTC guide (regenerated every 5 minutes).
 	guideEntries := customGuide
 	if len(guideEntries) == 0 {
-		guideEntries = bridgeDefaultGuideEntries(channelName)
+		guideEntries = defaultGuideEntries(channelName)
 	}
 
 	var entries []interface{}
@@ -805,4 +792,45 @@ func serverUpdateDocs(channelID, channelName string, metadata, guide []byte) {
 		metadata:    metadata,
 		guide:       guide,
 	})
+}
+
+// ---------- Config Reload ----------
+
+// serverReloadableConfig holds server fields that can be changed via config hot-reload.
+// Written by configReloadLoop, read by the resign ticker.
+type serverReloadableConfig struct {
+	channelName  string
+	guideEntries []guideEntry
+}
+
+// serverApplyReloadedConfig applies reloaded config values to the atomic config pointer.
+func serverApplyReloadedConfig(cfg map[string]interface{}, liveConfig *atomic.Pointer[serverReloadableConfig]) {
+	current := liveConfig.Load()
+	newName := current.channelName
+	newEntries := current.guideEntries
+	changed := false
+
+	if name, ok := configGetString(cfg, "name"); ok && name != current.channelName {
+		newName = name
+		logInfof("config: name changed to %q", name)
+		changed = true
+	}
+	if guideVal, ok := cfg["guide"]; ok {
+		entries, _, gerr := parseGuideConfig(guideVal)
+		if gerr == nil && len(entries) > 0 {
+			newEntries = entries
+			logInfof("config: guide updated (%d entries)", len(entries))
+			changed = true
+		} else if gerr != nil {
+			logErrorf("config: guide: %v", gerr)
+		}
+	}
+
+	if changed {
+		liveConfig.Store(&serverReloadableConfig{
+			channelName:  newName,
+			guideEntries: newEntries,
+		})
+		logInfof("config reloaded")
+	}
 }

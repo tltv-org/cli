@@ -168,7 +168,7 @@ func peerPollLoop(ctx context.Context, client *Client, targets []peerTarget,
 // peerVerifyAndUpdate fetches metadata for a single peer target, verifies it,
 // and updates the registry. On failure, removes the entry.
 func peerVerifyAndUpdate(client *Client, target peerTarget, registry *peerRegistry) {
-	res, err := relayFetchAndVerifyMetadata(client, target.ChannelID, target.Hints)
+	res, err := fetchAndVerifyMetadata(client, target.ChannelID, target.Hints)
 	if err != nil {
 		logDebugf("peer %s: verify failed: %v", target.ChannelID, err)
 		return // keep stale entry — don't remove on transient failure
@@ -181,7 +181,7 @@ func peerVerifyAndUpdate(client *Client, target peerTarget, registry *peerRegist
 	}
 
 	// Check not private/retired/on-demand
-	if err := relayCheckAccess(res.Doc); err != nil {
+	if err := checkChannelAccess(res.Doc); err != nil {
 		logInfof("peer %s: %v, removing from peers", target.ChannelID, err)
 		registry.Remove(target.ChannelID)
 		return
@@ -245,14 +245,30 @@ func gossipNodesFromPeers(targets []peerTarget) []string {
 	return nodes
 }
 
+// nodeServesChannel checks whether a node's info lists the given channel ID
+// in either its channels or relaying arrays.
+func nodeServesChannel(info *NodeInfo, channelID string) bool {
+	for _, ch := range info.Channels {
+		if ch.ID == channelID {
+			return true
+		}
+	}
+	for _, ch := range info.Relaying {
+		if ch.ID == channelID {
+			return true
+		}
+	}
+	return false
+}
+
 // gossipPollLoop fetches /tltv/v1/peers from the given nodes, validates
-// discovered channels, and stores them in the gossip registry.
+// discovered channels, and stores them via storeFn.
 // Used by all three daemons when --gossip is enabled.
 // Runs an initial poll immediately, then at the given interval.
 func gossipPollLoop(ctx context.Context, client *Client, nodes []string,
-	gossipReg *peerRegistry, interval time.Duration) {
+	storeFn func(id, name string, hints []string), interval time.Duration) {
 
-	gossipPollOnce(client, nodes, gossipReg)
+	gossipPollOnce(client, nodes, storeFn)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -262,15 +278,16 @@ func gossipPollLoop(ctx context.Context, client *Client, nodes []string,
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			gossipPollOnce(client, nodes, gossipReg)
+			gossipPollOnce(client, nodes, storeFn)
 		}
 	}
 }
 
 // gossipPollOnce performs a single gossip cycle: fetch peers from each node,
 // validate each discovered channel (node info → metadata verify → access check),
-// and add to the gossip registry.
-func gossipPollOnce(client *Client, nodes []string, gossipReg *peerRegistry) {
+// and store via storeFn. Bridge/server pass peerRegistry.Update; relay passes
+// a wrapper for relayRegistry.MergePeers.
+func gossipPollOnce(client *Client, nodes []string, storeFn func(id, name string, hints []string)) {
 	for _, node := range nodes {
 		node = normalizeHost(node)
 		exchange, err := client.FetchPeers(node)
@@ -290,27 +307,12 @@ func gossipPollOnce(client *Client, nodes []string, gossipReg *peerRegistry) {
 			if err != nil {
 				continue
 			}
-			found := false
-			for _, ch := range info.Channels {
-				if ch.ID == p.ID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				for _, ch := range info.Relaying {
-					if ch.ID == p.ID {
-						found = true
-						break
-					}
-				}
-			}
-			if !found {
+			if !nodeServesChannel(info, p.ID) {
 				continue
 			}
 
 			// Step 2: fetch and verify signed metadata
-			metaRes, err := relayFetchAndVerifyMetadata(client, p.ID, []string{hint})
+			metaRes, err := fetchAndVerifyMetadata(client, p.ID, []string{hint})
 			if err != nil {
 				continue
 			}
@@ -319,12 +321,12 @@ func gossipPollOnce(client *Client, nodes []string, gossipReg *peerRegistry) {
 			}
 
 			// Step 3: check not private/retired/on-demand
-			if err := relayCheckAccess(metaRes.Doc); err != nil {
+			if err := checkChannelAccess(metaRes.Doc); err != nil {
 				continue
 			}
 
 			name := getString(metaRes.Doc, "name")
-			gossipReg.Update(p.ID, name, p.Hints)
+			storeFn(p.ID, name, p.Hints)
 		}
 	}
 }

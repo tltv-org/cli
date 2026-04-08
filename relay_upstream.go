@@ -1,25 +1,23 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 )
 
 // ---------- Metadata Fetching ----------
 
-// relayFetchResult holds the result of fetching upstream metadata.
-type relayFetchResult struct {
+// fetchResult holds the result of fetching upstream metadata.
+type fetchResult struct {
 	Raw         []byte                 // exact bytes from upstream (served verbatim)
 	Doc         map[string]interface{} // parsed document (for field extraction)
 	IsMigration bool
 	MigratedTo  string // only if IsMigration
 }
 
-// relayFetchAndVerifyMetadata fetches channel metadata from upstream hints,
+// fetchAndVerifyMetadata fetches channel metadata from upstream hints,
 // verifies the signature, and returns both raw bytes and parsed document.
 // Tries hints in order, returns first success.
-func relayFetchAndVerifyMetadata(client *Client, channelID string, hints []string) (*relayFetchResult, error) {
+func fetchAndVerifyMetadata(client *Client, channelID string, hints []string) (*fetchResult, error) {
 	var lastErr error
 
 	for _, hint := range hints {
@@ -48,7 +46,7 @@ func relayFetchAndVerifyMetadata(client *Client, channelID string, hints []strin
 				continue
 			}
 			to, _ := doc["to"].(string)
-			return &relayFetchResult{
+			return &fetchResult{
 				Raw:         body,
 				Doc:         doc,
 				IsMigration: true,
@@ -62,7 +60,7 @@ func relayFetchAndVerifyMetadata(client *Client, channelID string, hints []strin
 			continue
 		}
 
-		return &relayFetchResult{Raw: body, Doc: doc}, nil
+		return &fetchResult{Raw: body, Doc: doc}, nil
 	}
 
 	if lastErr != nil {
@@ -73,12 +71,12 @@ func relayFetchAndVerifyMetadata(client *Client, channelID string, hints []strin
 
 // relayFollowMigration follows a migration chain up to maxHops.
 // Returns the final channel ID and verified metadata, or an error.
-func relayFollowMigration(client *Client, startID string, hints []string, maxHops int) (finalID string, result *relayFetchResult, err error) {
+func relayFollowMigration(client *Client, startID string, hints []string, maxHops int) (finalID string, result *fetchResult, err error) {
 	seen := map[string]bool{startID: true}
 	currentID := startID
 
 	for hop := 0; hop < maxHops; hop++ {
-		res, err := relayFetchAndVerifyMetadata(client, currentID, hints)
+		res, err := fetchAndVerifyMetadata(client, currentID, hints)
 		if err != nil {
 			return "", nil, fmt.Errorf("hop %d (%s): %w", hop, currentID, err)
 		}
@@ -105,7 +103,7 @@ func relayFollowMigration(client *Client, startID string, hints []string, maxHop
 
 // relayFetchAndVerifyGuide fetches a channel guide from upstream, verifies it,
 // and returns raw bytes plus parsed entries (for XMLTV generation).
-func relayFetchAndVerifyGuide(client *Client, channelID string, hints []string) (raw []byte, entries []bridgeGuideEntry, err error) {
+func relayFetchAndVerifyGuide(client *Client, channelID string, hints []string) (raw []byte, entries []guideEntry, err error) {
 	var lastErr error
 
 	for _, hint := range hints {
@@ -134,7 +132,7 @@ func relayFetchAndVerifyGuide(client *Client, channelID string, hints []string) 
 			continue
 		}
 
-		parsed := relayExtractGuideEntries(doc)
+		parsed := extractGuideEntries(doc)
 		return body, parsed, nil
 	}
 
@@ -146,9 +144,9 @@ func relayFetchAndVerifyGuide(client *Client, channelID string, hints []string) 
 
 // ---------- Access Checks ----------
 
-// relayCheckAccess verifies that metadata allows relaying.
+// checkChannelAccess verifies that metadata allows relaying.
 // Returns an error describing why relaying is not permitted.
-func relayCheckAccess(doc map[string]interface{}) error {
+func checkChannelAccess(doc map[string]interface{}) error {
 	if access, _ := doc["access"].(string); access == "token" {
 		return fmt.Errorf("private channel (access=token)")
 	}
@@ -169,20 +167,20 @@ func relayIsMigration(doc map[string]interface{}) bool {
 	return docType == "migration"
 }
 
-// relayExtractGuideEntries parses guide entries from a verified guide document.
-func relayExtractGuideEntries(doc map[string]interface{}) []bridgeGuideEntry {
+// extractGuideEntries parses guide entries from a verified guide document.
+func extractGuideEntries(doc map[string]interface{}) []guideEntry {
 	entriesRaw, ok := doc["entries"].([]interface{})
 	if !ok {
 		return nil
 	}
 
-	var entries []bridgeGuideEntry
+	var entries []guideEntry
 	for _, raw := range entriesRaw {
 		e, ok := raw.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		entry := bridgeGuideEntry{
+		entry := guideEntry{
 			Start: getString(e, "start"),
 			End:   getString(e, "end"),
 			Title: getString(e, "title"),
@@ -200,29 +198,10 @@ func relayExtractGuideEntries(doc map[string]interface{}) []bridgeGuideEntry {
 
 // ---------- Config File ----------
 
-// relayConfig is the JSON config file format for tltv relay.
-type relayConfig struct {
-	Channels []string `json:"channels"` // tltv:// URIs or id@host:port
-	Nodes    []string `json:"nodes"`    // host:port to relay all public channels from
-}
-
 // relayTarget is a channel to relay with its upstream hints.
 type relayTarget struct {
 	ChannelID string
 	Hints     []string
-}
-
-// relayLoadConfig loads a relay config file.
-func relayLoadConfig(path string) (*relayConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var cfg relayConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-	return &cfg, nil
 }
 
 // relayDiscoverTargets resolves all configured sources into relay targets.

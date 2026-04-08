@@ -30,8 +30,8 @@ type bridgeChannel struct {
 	OnDemand    bool     `json:"on_demand,omitempty"`
 }
 
-// bridgeGuideEntry represents a programme in a channel guide.
-type bridgeGuideEntry struct {
+// guideEntry represents a programme in a channel guide.
+type guideEntry struct {
 	Channel     string `json:"channel,omitempty"` // only in JSON guide input
 	Start       string `json:"start"`
 	End         string `json:"end"`
@@ -50,7 +50,7 @@ type bridgeSidecar struct {
 	Access      string             `json:"access"`
 	Token       string             `json:"token"`
 	OnDemand    bool               `json:"on_demand"`
-	Guide       []bridgeGuideEntry `json:"guide"`
+	Guide       []guideEntry `json:"guide"`
 }
 
 // ---------- Source Client ----------
@@ -61,7 +61,7 @@ var bridgeSourceClient = &http.Client{Timeout: 30 * time.Second}
 
 // bridgePollSource discovers channels from the --stream source.
 // Returns channels and any embedded guide data (from sidecar JSON in directory mode).
-func bridgePollSource(source, name string, onDemand bool) ([]bridgeChannel, map[string][]bridgeGuideEntry, error) {
+func bridgePollSource(source, name string, onDemand bool) ([]bridgeChannel, map[string][]guideEntry, error) {
 	// Check if source is a local directory
 	info, err := os.Stat(source)
 	if err == nil && info.IsDir() {
@@ -260,14 +260,14 @@ func bridgeParseJSONChannels(data []byte) ([]bridgeChannel, error) {
 // ---------- Directory Scanning ----------
 
 // bridgeScanDirectory scans a directory for .m3u8 files and optional sidecar .json files.
-func bridgeScanDirectory(dir string) ([]bridgeChannel, map[string][]bridgeGuideEntry, error) {
+func bridgeScanDirectory(dir string) ([]bridgeChannel, map[string][]guideEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var channels []bridgeChannel
-	guideMap := make(map[string][]bridgeGuideEntry)
+	guideMap := make(map[string][]guideEntry)
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".m3u8") {
@@ -329,7 +329,7 @@ func bridgeScanDirectory(dir string) ([]bridgeChannel, map[string][]bridgeGuideE
 
 // bridgePollGuide fetches guide data from the --guide source.
 // Returns entries grouped by upstream channel ID.
-func bridgePollGuide(source string) (map[string][]bridgeGuideEntry, error) {
+func bridgePollGuide(source string) (map[string][]guideEntry, error) {
 	content, err := bridgeFetchContent(source)
 	if err != nil {
 		return nil, fmt.Errorf("fetching guide source: %w", err)
@@ -368,13 +368,13 @@ type bridgeXMLTVProgramme struct {
 }
 
 // bridgeParseXMLTVGuide parses XMLTV data into guide entries grouped by channel.
-func bridgeParseXMLTVGuide(data []byte) (map[string][]bridgeGuideEntry, error) {
+func bridgeParseXMLTVGuide(data []byte) (map[string][]guideEntry, error) {
 	var doc bridgeXMLTVDoc
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parsing XMLTV: %w", err)
 	}
 
-	result := make(map[string][]bridgeGuideEntry)
+	result := make(map[string][]guideEntry)
 	for _, p := range doc.Programmes {
 		start, err := bridgeXMLTVToISO(p.Start)
 		if err != nil {
@@ -385,7 +385,7 @@ func bridgeParseXMLTVGuide(data []byte) (map[string][]bridgeGuideEntry, error) {
 			continue
 		}
 
-		entry := bridgeGuideEntry{
+		entry := guideEntry{
 			Start:       start,
 			End:         end,
 			Title:       p.Title,
@@ -409,9 +409,9 @@ func bridgeXMLTVToISO(ts string) (string, error) {
 	return t.UTC().Format(timestampFormat), nil
 }
 
-// bridgeISOToXMLTV converts an ISO 8601 timestamp to XMLTV format.
+// isoToXMLTV converts an ISO 8601 timestamp to XMLTV format.
 // "2026-03-15T12:00:00Z" -> "20260315120000 +0000"
-func bridgeISOToXMLTV(ts string) string {
+func isoToXMLTV(ts string) string {
 	s := strings.TrimSpace(ts)
 	s = strings.ReplaceAll(s, "-", "")
 	s = strings.ReplaceAll(s, ":", "")
@@ -423,13 +423,13 @@ func bridgeISOToXMLTV(ts string) string {
 // ---------- JSON Guide Parsing ----------
 
 // bridgeParseJSONGuide parses JSON guide data into entries grouped by channel.
-func bridgeParseJSONGuide(data []byte) (map[string][]bridgeGuideEntry, error) {
-	var entries []bridgeGuideEntry
+func bridgeParseJSONGuide(data []byte) (map[string][]guideEntry, error) {
+	var entries []guideEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, fmt.Errorf("parsing JSON guide: %w", err)
 	}
 
-	result := make(map[string][]bridgeGuideEntry)
+	result := make(map[string][]guideEntry)
 	for _, e := range entries {
 		if e.Channel != "" {
 			result[e.Channel] = append(result[e.Channel], e)

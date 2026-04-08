@@ -345,7 +345,7 @@ func TestBridgePeersEndpoint_NoHostname(t *testing.T) {
 func TestRelayPeers_GossipDisabled(t *testing.T) {
 	r := newRelayRegistry("relay.example.com:443", false, 100, 7)
 	r.UpdateChannel("TVown", []byte(`{}`), map[string]interface{}{"name": "Own"}, nil)
-	r.MergePeers([]relayPeerInfo{
+	r.MergePeers([]peerEntry{
 		{ChannelID: "TVgossip", Name: "Gossip", Hints: []string{"gossip.tv:443"}, LastSeen: time.Now()},
 	})
 
@@ -362,7 +362,7 @@ func TestRelayPeers_GossipDisabled(t *testing.T) {
 func TestRelayPeers_GossipEnabled(t *testing.T) {
 	r := newRelayRegistry("relay.example.com:443", true, 100, 7)
 	r.UpdateChannel("TVown", []byte(`{}`), map[string]interface{}{"name": "Own"}, nil)
-	r.MergePeers([]relayPeerInfo{
+	r.MergePeers([]peerEntry{
 		{ChannelID: "TVgossip", Name: "Gossip", Hints: []string{"gossip.tv:443"}, LastSeen: time.Now()},
 	})
 
@@ -427,6 +427,45 @@ func TestHoistGlobalFlags_ShortAliases(t *testing.T) {
 	flagNoColor = false
 	flagInsecure = false
 	flagLocal = false
+}
+
+// ---------- nodeServesChannel ----------
+
+func TestNodeServesChannel_InChannels(t *testing.T) {
+	info := &NodeInfo{
+		Channels: []ChannelRef{{ID: "TVabc", Name: "Test"}},
+		Relaying: []ChannelRef{},
+	}
+	if !nodeServesChannel(info, "TVabc") {
+		t.Error("should find channel in Channels")
+	}
+}
+
+func TestNodeServesChannel_InRelaying(t *testing.T) {
+	info := &NodeInfo{
+		Channels: []ChannelRef{},
+		Relaying: []ChannelRef{{ID: "TVxyz", Name: "Relay"}},
+	}
+	if !nodeServesChannel(info, "TVxyz") {
+		t.Error("should find channel in Relaying")
+	}
+}
+
+func TestNodeServesChannel_NotFound(t *testing.T) {
+	info := &NodeInfo{
+		Channels: []ChannelRef{{ID: "TVabc", Name: "Test"}},
+		Relaying: []ChannelRef{{ID: "TVxyz", Name: "Relay"}},
+	}
+	if nodeServesChannel(info, "TVother") {
+		t.Error("should not find missing channel")
+	}
+}
+
+func TestNodeServesChannel_Empty(t *testing.T) {
+	info := &NodeInfo{}
+	if nodeServesChannel(info, "TVabc") {
+		t.Error("should not find channel in empty node info")
+	}
 }
 
 func TestHoistGlobalFlags_AllShortFlags(t *testing.T) {

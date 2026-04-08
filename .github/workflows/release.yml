@@ -43,6 +43,30 @@ jobs:
             rm "dist/${BIN}"
           done
 
+      - name: Build .deb packages
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+
+          for arch in amd64 arm64; do
+            echo "Building .deb for ${arch}..."
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -ldflags "$LDFLAGS" -o dist/tltv-deb .
+            mkdir -p dist/pkg/DEBIAN dist/pkg/usr/bin
+            cp dist/tltv-deb dist/pkg/usr/bin/tltv
+
+            cat > dist/pkg/DEBIAN/control << EOF
+          Package: tltv
+          Version: ${VERSION#v}
+          Architecture: ${arch}
+          Maintainer: Philo Farnsworth <farnsworth27@protonmail.com>
+          Description: Command-line tool for the TLTV Federation Protocol
+           Single static binary, zero dependencies.
+          EOF
+
+            dpkg-deb --build dist/pkg "dist/tltv-cli_${VERSION}_${arch}.deb"
+            rm -rf dist/pkg dist/tltv-deb
+          done
+
       - name: Verify Linux amd64 is static
         run: |
           CGO_ENABLED=0 go build -ldflags "-s -w" -o tltv-check .

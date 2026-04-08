@@ -63,25 +63,20 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *relayServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	channels := s.registry.ListChannels()
 
-	type channelEntry struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-
-	var relaying []channelEntry
+	var relaying []ChannelRef
 	for _, ch := range channels {
 		// Skip migrated entries (they have no stream, just the migration doc)
 		if ch.Name == "(migrated)" {
 			continue
 		}
-		relaying = append(relaying, channelEntry{ID: ch.ChannelID, Name: ch.Name})
+		relaying = append(relaying, ChannelRef{ID: ch.ChannelID, Name: ch.Name})
 	}
 	if relaying == nil {
-		relaying = []channelEntry{}
+		relaying = []ChannelRef{}
 	}
 
 	w.Header().Set("Cache-Control", "max-age=60")
-	bridgeWriteJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"protocol": "tltv",
 		"versions": []int{1},
 		"channels": []interface{}{},
@@ -93,16 +88,7 @@ func (s *relayServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 // Returns relayed channels + gossip (if --gossip) + verified external peers (--peers).
 func (s *relayServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 	// Relayed channels + gossip (from relay registry)
-	registryPeers := s.registry.ListPeers()
-	var own []peerEntry
-	for _, p := range registryPeers {
-		own = append(own, peerEntry{
-			ChannelID: p.ChannelID,
-			Name:      p.Name,
-			Hints:     p.Hints,
-			LastSeen:  p.LastSeen,
-		})
-	}
+	own := s.registry.ListPeers()
 
 	// External verified peers from --peers
 	var external []peerEntry
@@ -112,7 +98,7 @@ func (s *relayServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 
 	peers := buildPeersResponse(own, external)
 	w.Header().Set("Cache-Control", "max-age=300")
-	bridgeWriteJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"peers": peers,
 	}, http.StatusOK)
 }
@@ -123,7 +109,7 @@ func (s *relayServer) handleChannelMeta(w http.ResponseWriter, r *http.Request) 
 	id := r.PathValue("id")
 	ch := s.registry.GetChannel(id)
 	if ch == nil || ch.Metadata == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
@@ -139,7 +125,7 @@ func (s *relayServer) handleChannelPath(w http.ResponseWriter, r *http.Request) 
 
 	ch := s.registry.GetChannel(id)
 	if ch == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
@@ -155,7 +141,7 @@ func (s *relayServer) handleChannelPath(w http.ResponseWriter, r *http.Request) 
 
 // handleHealth serves GET /health
 func (s *relayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	bridgeWriteJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"status":   "ok",
 		"relaying": s.registry.ChannelCount(),
 	}, http.StatusOK)
@@ -163,7 +149,7 @@ func (s *relayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleMethodNotAllowed returns 400 for non-GET methods.
 func (s *relayServer) handleMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
-	bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+	jsonError(w, "invalid_request", http.StatusBadRequest)
 }
 
 // ---------- Guide Serving ----------
@@ -171,7 +157,7 @@ func (s *relayServer) handleMethodNotAllowed(w http.ResponseWriter, r *http.Requ
 // serveGuideJSON serves the raw verified guide bytes verbatim.
 func (s *relayServer) serveGuideJSON(w http.ResponseWriter, ch *relayRegisteredChannel) {
 	if ch.Guide == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
@@ -184,16 +170,16 @@ func (s *relayServer) serveGuideJSON(w http.ResponseWriter, ch *relayRegisteredC
 func (s *relayServer) serveGuideXML(w http.ResponseWriter, ch *relayRegisteredChannel) {
 	entries := ch.GuideEntries
 	if len(entries) == 0 && ch.Guide == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 	if len(entries) == 0 {
-		entries = bridgeDefaultGuideEntries(ch.Name)
+		entries = defaultGuideEntries(ch.Name)
 	}
 
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("Cache-Control", "max-age=300")
-	w.Write([]byte(bridgeGuideToXMLTV(ch.ChannelID, ch.Name, entries)))
+	w.Write([]byte(guideToXMLTV(ch.ChannelID, ch.Name, entries)))
 }
 
 // ---------- Stream Proxying ----------
@@ -203,13 +189,13 @@ func (s *relayServer) serveGuideXML(w http.ResponseWriter, ch *relayRegisteredCh
 // When cache is enabled, uses singleflight deduplication and protocol-compliant
 // TTLs (1s for manifests, 3600s for segments) per spec section 9.10.
 func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *relayRegisteredChannel, subPath string) {
-	if !bridgeValidateSubPath(subPath) {
-		bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+	if !validateSubPath(subPath) {
+		jsonError(w, "invalid_request", http.StatusBadRequest)
 		return
 	}
 
 	if ch.StreamHint == "" {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -223,12 +209,12 @@ func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *re
 	} else {
 		parsed, err := url.Parse(manifestURL)
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		ref, err := url.Parse(subPath)
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		parsed.Path = path.Dir(parsed.Path) + "/"
@@ -245,58 +231,58 @@ func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *re
 			}
 			// Rewrite manifests before caching
 			if strings.HasSuffix(subPath, ".m3u8") {
-				rewritten := bridgeRewriteManifest(manifestURL, fr.data, "")
+				rewritten := rewriteManifest(manifestURL, fr.data, "")
 				fr.data = rewritten
 			}
 			return fr, nil
 		})
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
-		bridgeSetStreamHeaders(w, subPath, false)
+		setStreamHeaders(w, subPath, false)
 		if hit {
 			w.Header().Set("Cache-Status", "HIT")
 		} else {
 			w.Header().Set("Cache-Status", "MISS")
 		}
 		w.Write(data)
-		_ = contentType // headers set by bridgeSetStreamHeaders
+		_ = contentType // headers set by setStreamHeaders
 		return
 	}
 
 	// Non-cache path: direct proxy
 	req, err := http.NewRequestWithContext(r.Context(), "GET", fetchURL, nil)
 	if err != nil {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	req.Header.Set("User-Agent", "tltv-cli/"+version)
 
 	resp, err := s.client.http.Do(req)
 	if err != nil {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Set headers (no private channel handling -- relay never has private channels)
-	bridgeSetStreamHeaders(w, subPath, false)
+	setStreamHeaders(w, subPath, false)
 
 	if strings.HasSuffix(subPath, ".m3u8") {
-		body, err := io.ReadAll(io.LimitReader(resp.Body, bridgeMaxManifestSize))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestSize))
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		// Rewrite absolute-to-relative, no token (relay has no private channels)
-		rewritten := bridgeRewriteManifest(manifestURL, body, "")
+		rewritten := rewriteManifest(manifestURL, body, "")
 		w.Write(rewritten)
 		return
 	}

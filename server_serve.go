@@ -53,7 +53,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		docs := serverDocsState.Load()
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "max-age=60")
-		bridgeWriteJSON(w, map[string]interface{}{
+		writeJSON(w, map[string]interface{}{
 			"protocol": "tltv",
 			"versions": []int{1},
 			"channels": []interface{}{
@@ -72,11 +72,11 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		id := r.PathValue("id")
 		if id != docs.channelID {
-			bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+			jsonError(w, "channel_not_found", http.StatusNotFound)
 			return
 		}
 		if docs.metadata == nil {
-			bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+			jsonError(w, "channel_not_found", http.StatusNotFound)
 			return
 		}
 		if cache != nil {
@@ -108,14 +108,14 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		subPath := r.PathValue("path")
 
 		if id != docs.channelID {
-			bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+			jsonError(w, "channel_not_found", http.StatusNotFound)
 			return
 		}
 
 		switch subPath {
 		case "guide.json":
 			if docs.guide == nil {
-				bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+				jsonError(w, "channel_not_found", http.StatusNotFound)
 				return
 			}
 			if cache != nil {
@@ -140,7 +140,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 
 		case "guide.xml":
 			if docs.guide == nil {
-				bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+				jsonError(w, "channel_not_found", http.StatusNotFound)
 				return
 			}
 			if cache != nil {
@@ -236,7 +236,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			external = append(external, gossipReg.ListPeers()...)
 		}
 		peers := buildPeersResponse(nil, external)
-		bridgeWriteJSON(w, map[string]interface{}{
+		writeJSON(w, map[string]interface{}{
 			"peers": peers,
 		}, http.StatusOK)
 	})
@@ -244,7 +244,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 	// Health
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		bridgeWriteJSON(w, map[string]interface{}{
+		writeJSON(w, map[string]interface{}{
 			"status":   "ok",
 			"channels": 1,
 		}, http.StatusOK)
@@ -259,7 +259,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+		jsonError(w, "invalid_request", http.StatusBadRequest)
 	})
 
 	mux.HandleFunc("/tltv/", func(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +271,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			return
 		}
 		if r.Method != "GET" {
-			bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+			jsonError(w, "invalid_request", http.StatusBadRequest)
 			return
 		}
 		http.NotFound(w, r)
@@ -292,13 +292,13 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 
 // serverGuideToXMLTV generates XMLTV from the signed guide JSON bytes.
 // Parses the guide document to extract entries, then formats as XMLTV using
-// the shared bridgeGuideToXMLTV helper.
+// the shared guideToXMLTV helper.
 func serverGuideToXMLTV(guideJSON []byte, channelID, channelName string) string {
 	var doc map[string]interface{}
 	if err := json.Unmarshal(guideJSON, &doc); err != nil {
 		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tv/>\n"
 	}
 
-	entries := relayExtractGuideEntries(doc)
-	return bridgeGuideToXMLTV(channelID, channelName, entries)
+	entries := extractGuideEntries(doc)
+	return guideToXMLTV(channelID, channelName, entries)
 }

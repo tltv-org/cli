@@ -358,7 +358,7 @@ func TestGenerateFontTest(t *testing.T) {
 }
 
 func TestServerSignDocs_EphemeralGuide(t *testing.T) {
-	// Server should produce a valid signed guide using bridgeDefaultGuideEntries
+	// Server should produce a valid signed guide using defaultGuideEntries
 	// pattern: midnight-to-midnight UTC, channel name as title.
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)

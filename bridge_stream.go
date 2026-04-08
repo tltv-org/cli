@@ -14,7 +14,7 @@ import (
 
 // ---------- Constants ----------
 
-const bridgeMaxManifestSize = 10 * 1024 * 1024 // 10 MB
+const maxManifestSize = 10 * 1024 * 1024 // 10 MB
 
 var bridgeStreamClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -32,10 +32,10 @@ var bridgeURITags = []string{
 
 // ---------- Path Validation ----------
 
-// bridgeValidateSubPath rejects path traversal attempts in stream sub-paths.
+// validateSubPath rejects path traversal attempts in stream sub-paths.
 // Go's http.ServeMux cleans ".." from URL paths before routing, but this is
 // defense-in-depth for deployments without a reverse proxy in front.
-func bridgeValidateSubPath(subPath string) bool {
+func validateSubPath(subPath string) bool {
 	for _, seg := range strings.Split(subPath, "/") {
 		if seg == ".." {
 			return false
@@ -48,8 +48,8 @@ func bridgeValidateSubPath(subPath string) bool {
 
 // bridgeServeStream dispatches to local or upstream stream serving.
 func bridgeServeStream(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel, subPath, token string) {
-	if !bridgeValidateSubPath(subPath) {
-		bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+	if !validateSubPath(subPath) {
+		jsonError(w, "invalid_request", http.StatusBadRequest)
 		return
 	}
 
@@ -75,36 +75,36 @@ func bridgeServeLocalStream(w http.ResponseWriter, r *http.Request, manifestPath
 	absPath, err := filepath.EvalSymlinks(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		} else {
-			bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+			jsonError(w, "invalid_request", http.StatusBadRequest)
 		}
 		return
 	}
 
 	baseDir, err := filepath.EvalSymlinks(filepath.Dir(manifestPath))
 	if err != nil {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Append separator to prevent /data/ch1_evil matching /data/ch1
 	baseDirPrefix := baseDir + string(filepath.Separator)
 	if absPath != baseDir && !strings.HasPrefix(absPath, baseDirPrefix) {
-		bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+		jsonError(w, "invalid_request", http.StatusBadRequest)
 		return
 	}
 
-	bridgeSetStreamHeaders(w, subPath, private)
+	setStreamHeaders(w, subPath, private)
 
 	// For m3u8 with token, rewrite manifest to inject tokens
 	if strings.HasSuffix(subPath, ".m3u8") && token != "" {
 		data, err := os.ReadFile(absPath)
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		rewritten := bridgeRewriteManifest("", data, token)
+		rewritten := rewriteManifest("", data, token)
 		w.Write(rewritten)
 		return
 	}
@@ -123,12 +123,12 @@ func bridgeServeUpstreamStream(w http.ResponseWriter, r *http.Request, manifestU
 		// Resolve subPath relative to manifest directory
 		base, err := url.Parse(manifestURL)
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		ref, err := url.Parse(subPath)
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		// Set base path to the directory of the manifest
@@ -138,32 +138,32 @@ func bridgeServeUpstreamStream(w http.ResponseWriter, r *http.Request, manifestU
 
 	req, err := http.NewRequestWithContext(r.Context(), "GET", fetchURL, nil)
 	if err != nil {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
 	resp, err := bridgeStreamClient.Do(req)
 	if err != nil {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	bridgeSetStreamHeaders(w, subPath, private)
+	setStreamHeaders(w, subPath, private)
 
 	if strings.HasSuffix(subPath, ".m3u8") {
 		// Read and rewrite manifest
-		body, err := io.ReadAll(io.LimitReader(resp.Body, bridgeMaxManifestSize))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestSize))
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		rewritten := bridgeRewriteManifest(manifestURL, body, token)
+		rewritten := rewriteManifest(manifestURL, body, token)
 		w.Write(rewritten)
 		return
 	}
@@ -174,13 +174,13 @@ func bridgeServeUpstreamStream(w http.ResponseWriter, r *http.Request, manifestU
 
 // ---------- Manifest Rewriting ----------
 
-// bridgeRewriteManifest rewrites an HLS manifest:
+// rewriteManifest rewrites an HLS manifest:
 // - Converts absolute URLs to relative (same-origin only)
 // - Injects ?token= on every URI for private channels
 //
 // manifestURL may be empty for local files (no URL rewriting needed).
 // token may be empty for public channels (no token injection).
-func bridgeRewriteManifest(manifestURL string, body []byte, token string) []byte {
+func rewriteManifest(manifestURL string, body []byte, token string) []byte {
 	var baseDirStr string
 	if manifestURL != "" {
 		base, err := url.Parse(manifestURL)
@@ -274,9 +274,9 @@ func bridgeAppendToken(uri, token string) string {
 
 // ---------- Headers ----------
 
-// bridgeSetStreamHeaders sets Content-Type and Cache-Control for stream responses.
-func bridgeSetStreamHeaders(w http.ResponseWriter, subPath string, private bool) {
-	w.Header().Set("Content-Type", bridgeStreamContentType(subPath))
+// setStreamHeaders sets Content-Type and Cache-Control for stream responses.
+func setStreamHeaders(w http.ResponseWriter, subPath string, private bool) {
+	w.Header().Set("Content-Type", streamContentType(subPath))
 
 	if private {
 		w.Header().Set("Cache-Control", "private, no-store")
@@ -291,8 +291,8 @@ func bridgeSetStreamHeaders(w http.ResponseWriter, subPath string, private bool)
 	}
 }
 
-// bridgeStreamContentType returns the Content-Type for a stream file.
-func bridgeStreamContentType(name string) string {
+// streamContentType returns the Content-Type for a stream file.
+func streamContentType(name string) string {
 	switch {
 	case strings.HasSuffix(name, ".m3u8"):
 		return "application/vnd.apple.mpegurl"

@@ -285,7 +285,7 @@ func cmdViewer(args []string) {
 
 func (s *viewerServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	subPath := strings.TrimPrefix(r.URL.Path, "/stream/")
-	if !bridgeValidateSubPath(subPath) {
+	if !validateSubPath(subPath) {
 		http.NotFound(w, r)
 		return
 	}
@@ -328,9 +328,9 @@ func (s *viewerServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set content type and cache headers
-	w.Header().Set("Content-Type", bridgeStreamContentType(subPath))
+	w.Header().Set("Content-Type", streamContentType(subPath))
 	if strings.HasSuffix(subPath, ".m3u8") {
-		body = bridgeRewriteManifest(upstreamURL, body, "")
+		body = rewriteManifest(upstreamURL, body, "")
 		w.Header().Set("Cache-Control", "max-age=1, no-cache")
 	} else {
 		w.Header().Set("Cache-Control", "max-age=3600")

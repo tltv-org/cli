@@ -65,23 +65,18 @@ func (s *bridgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *bridgeServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	channels := s.registry.ListChannels()
 
-	type channelEntry struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-
-	var list []channelEntry
+	var list []ChannelRef
 	for _, ch := range channels {
 		if !ch.IsPrivate() {
-			list = append(list, channelEntry{ID: ch.ChannelID, Name: ch.Name})
+			list = append(list, ChannelRef{ID: ch.ChannelID, Name: ch.Name})
 		}
 	}
 	if list == nil {
-		list = []channelEntry{}
+		list = []ChannelRef{}
 	}
 
 	w.Header().Set("Cache-Control", "max-age=60")
-	bridgeWriteJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"protocol": "tltv",
 		"versions": []int{1},
 		"channels": list,
@@ -121,7 +116,7 @@ func (s *bridgeServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 
 	peers := buildPeersResponse(own, external)
 	w.Header().Set("Cache-Control", "max-age=300")
-	bridgeWriteJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"peers": peers,
 	}, http.StatusOK)
 }
@@ -131,22 +126,22 @@ func (s *bridgeServer) handleChannelMeta(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	ch := s.registry.GetChannel(id)
 	if ch == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
-	if !bridgeCheckToken(w, r, ch) {
+	if !checkToken(w, r, ch) {
 		return
 	}
 
 	if ch.metadata == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "max-age=60")
-	bridgeSetPrivateHeaders(w, ch)
+	setPrivateHeaders(w, ch)
 	w.Write(ch.metadata)
 }
 
@@ -157,11 +152,11 @@ func (s *bridgeServer) handleChannelPath(w http.ResponseWriter, r *http.Request)
 
 	ch := s.registry.GetChannel(id)
 	if ch == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
-	if !bridgeCheckToken(w, r, ch) {
+	if !checkToken(w, r, ch) {
 		return
 	}
 
@@ -190,7 +185,7 @@ func (s *bridgeServer) handleChannelPath(w http.ResponseWriter, r *http.Request)
 
 // handleHealth serves GET /health
 func (s *bridgeServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	bridgeWriteJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"status":   "ok",
 		"channels": s.registry.PublicChannelCount(),
 	}, http.StatusOK)
@@ -198,7 +193,7 @@ func (s *bridgeServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleMethodNotAllowed returns 400 for non-GET methods on protocol endpoints.
 func (s *bridgeServer) handleMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
-	bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+	jsonError(w, "invalid_request", http.StatusBadRequest)
 }
 
 // ---------- Guide Serving ----------
@@ -206,32 +201,32 @@ func (s *bridgeServer) handleMethodNotAllowed(w http.ResponseWriter, r *http.Req
 // serveGuideJSON serves the signed guide JSON document.
 func (s *bridgeServer) serveGuideJSON(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel) {
 	if ch.guideDoc == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "max-age=300")
-	bridgeSetPrivateHeaders(w, ch)
+	setPrivateHeaders(w, ch)
 	w.Write(ch.guideDoc)
 }
 
 // serveGuideXML generates and serves an XMLTV guide document.
 func (s *bridgeServer) serveGuideXML(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel) {
 	if ch.guideDoc == nil {
-		bridgeJSONError(w, "channel_not_found", http.StatusNotFound)
+		jsonError(w, "channel_not_found", http.StatusNotFound)
 		return
 	}
 
 	entries := ch.Guide
 	if len(entries) == 0 {
-		entries = bridgeDefaultGuideEntries(ch.Name)
+		entries = defaultGuideEntries(ch.Name)
 	}
 
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("Cache-Control", "max-age=300")
-	bridgeSetPrivateHeaders(w, ch)
-	w.Write([]byte(bridgeGuideToXMLTV(ch.ChannelID, ch.Name, entries)))
+	setPrivateHeaders(w, ch)
+	w.Write([]byte(guideToXMLTV(ch.ChannelID, ch.Name, entries)))
 }
 
 // ---------- Cached Stream Serving ----------
@@ -240,8 +235,8 @@ func (s *bridgeServer) serveGuideXML(w http.ResponseWriter, r *http.Request, ch 
 // Same pattern as relay_server.go's serveStream — singleflight dedup,
 // protocol-compliant TTLs, manifests rewritten before caching.
 func (s *bridgeServer) serveCachedStream(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel, subPath, token string) {
-	if !bridgeValidateSubPath(subPath) {
-		bridgeJSONError(w, "invalid_request", http.StatusBadRequest)
+	if !validateSubPath(subPath) {
+		jsonError(w, "invalid_request", http.StatusBadRequest)
 		return
 	}
 
@@ -253,12 +248,12 @@ func (s *bridgeServer) serveCachedStream(w http.ResponseWriter, r *http.Request,
 	} else {
 		base, err := url.Parse(manifestURL)
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		ref, err := url.Parse(subPath)
 		if err != nil {
-			bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+			jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		base.Path = path.Dir(base.Path) + "/"
@@ -273,17 +268,17 @@ func (s *bridgeServer) serveCachedStream(w http.ResponseWriter, r *http.Request,
 		}
 		// Rewrite manifests before caching (same as relay)
 		if strings.HasSuffix(subPath, ".m3u8") {
-			rewritten := bridgeRewriteManifest(manifestURL, fr.data, token)
+			rewritten := rewriteManifest(manifestURL, fr.data, token)
 			fr.data = rewritten
 		}
 		return fr, nil
 	})
 	if err != nil {
-		bridgeJSONError(w, "stream_unavailable", http.StatusServiceUnavailable)
+		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	bridgeSetStreamHeaders(w, subPath, ch.IsPrivate())
+	setStreamHeaders(w, subPath, ch.IsPrivate())
 	if hit {
 		w.Header().Set("Cache-Status", "HIT")
 	} else {
@@ -294,8 +289,8 @@ func (s *bridgeServer) serveCachedStream(w http.ResponseWriter, r *http.Request,
 
 // ---------- Helpers ----------
 
-// bridgeWriteJSON writes a JSON response with the given status code.
-func bridgeWriteJSON(w http.ResponseWriter, v interface{}, status int) {
+// writeJSON writes a JSON response with the given status code.
+func writeJSON(w http.ResponseWriter, v interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
@@ -303,27 +298,27 @@ func bridgeWriteJSON(w http.ResponseWriter, v interface{}, status int) {
 	enc.Encode(v)
 }
 
-// bridgeJSONError writes a JSON error response.
-func bridgeJSONError(w http.ResponseWriter, code string, status int) {
-	bridgeWriteJSON(w, map[string]string{"error": code}, status)
+// jsonError writes a JSON error response.
+func jsonError(w http.ResponseWriter, code string, status int) {
+	writeJSON(w, map[string]string{"error": code}, status)
 }
 
-// bridgeCheckToken validates the access token for private channels.
+// checkToken validates the access token for private channels.
 // Returns true if access is allowed. Writes 403 and returns false if denied.
-func bridgeCheckToken(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel) bool {
+func checkToken(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel) bool {
 	if !ch.IsPrivate() {
 		return true
 	}
 	token := r.URL.Query().Get("token")
 	if token != ch.Token {
-		bridgeJSONError(w, "access_denied", http.StatusForbidden)
+		jsonError(w, "access_denied", http.StatusForbidden)
 		return false
 	}
 	return true
 }
 
-// bridgeSetPrivateHeaders sets Referrer-Policy and overrides Cache-Control for private channels.
-func bridgeSetPrivateHeaders(w http.ResponseWriter, ch *bridgeRegisteredChannel) {
+// setPrivateHeaders sets Referrer-Policy and overrides Cache-Control for private channels.
+func setPrivateHeaders(w http.ResponseWriter, ch *bridgeRegisteredChannel) {
 	if !ch.IsPrivate() {
 		return
 	}
@@ -331,8 +326,8 @@ func bridgeSetPrivateHeaders(w http.ResponseWriter, ch *bridgeRegisteredChannel)
 	w.Header().Set("Cache-Control", "private, no-store")
 }
 
-// bridgeXMLEscape escapes special XML characters.
-func bridgeXMLEscape(s string) string {
+// xmlEscape escapes special XML characters.
+func xmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
@@ -340,24 +335,24 @@ func bridgeXMLEscape(s string) string {
 	return s
 }
 
-// bridgeGuideToXMLTV generates an XMLTV document from guide entries.
+// guideToXMLTV generates an XMLTV document from guide entries.
 // Used by bridge, relay, and server XMLTV endpoints.
-func bridgeGuideToXMLTV(channelID, channelName string, entries []bridgeGuideEntry) string {
+func guideToXMLTV(channelID, channelName string, entries []guideEntry) string {
 	var sb strings.Builder
 	sb.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
 	sb.WriteString("<tv>\n")
-	sb.WriteString("  <channel id=\"" + bridgeXMLEscape(channelID) + "\">\n")
-	sb.WriteString("    <display-name>" + bridgeXMLEscape(channelName) + "</display-name>\n")
+	sb.WriteString("  <channel id=\"" + xmlEscape(channelID) + "\">\n")
+	sb.WriteString("    <display-name>" + xmlEscape(channelName) + "</display-name>\n")
 	sb.WriteString("  </channel>\n")
 
 	for _, e := range entries {
-		sb.WriteString("  <programme start=\"" + bridgeISOToXMLTV(e.Start) + "\" stop=\"" + bridgeISOToXMLTV(e.End) + "\" channel=\"" + bridgeXMLEscape(channelID) + "\">\n")
-		sb.WriteString("    <title>" + bridgeXMLEscape(e.Title) + "</title>\n")
+		sb.WriteString("  <programme start=\"" + isoToXMLTV(e.Start) + "\" stop=\"" + isoToXMLTV(e.End) + "\" channel=\"" + xmlEscape(channelID) + "\">\n")
+		sb.WriteString("    <title>" + xmlEscape(e.Title) + "</title>\n")
 		if e.Description != "" {
-			sb.WriteString("    <desc>" + bridgeXMLEscape(e.Description) + "</desc>\n")
+			sb.WriteString("    <desc>" + xmlEscape(e.Description) + "</desc>\n")
 		}
 		if e.Category != "" {
-			sb.WriteString("    <category>" + bridgeXMLEscape(e.Category) + "</category>\n")
+			sb.WriteString("    <category>" + xmlEscape(e.Category) + "</category>\n")
 		}
 		sb.WriteString("  </programme>\n")
 	}

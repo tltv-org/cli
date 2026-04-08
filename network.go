@@ -1002,8 +1002,8 @@ func outputXMLTV(channelID string, guide map[string]interface{}) {
 	fmt.Println(`<?xml version="1.0" encoding="UTF-8"?>`)
 	fmt.Printf("<tv generator-info-name=\"tltv-cli/%s\">\n", version)
 
-	fmt.Printf("  <channel id=\"%s\">\n", bridgeXMLEscape(channelID))
-	fmt.Printf("    <display-name>%s</display-name>\n", bridgeXMLEscape(channelID))
+	fmt.Printf("  <channel id=\"%s\">\n", xmlEscape(channelID))
+	fmt.Printf("    <display-name>%s</display-name>\n", xmlEscape(channelID))
 	fmt.Println("  </channel>")
 
 	entries, _ := guide["entries"].([]interface{})
@@ -1013,17 +1013,17 @@ func outputXMLTV(channelID string, guide map[string]interface{}) {
 			continue
 		}
 
-		start := bridgeISOToXMLTV(getString(entry, "start"))
-		stop := bridgeISOToXMLTV(getString(entry, "end"))
+		start := isoToXMLTV(getString(entry, "start"))
+		stop := isoToXMLTV(getString(entry, "end"))
 
 		fmt.Printf("  <programme start=\"%s\" stop=\"%s\" channel=\"%s\">\n",
-			start, stop, bridgeXMLEscape(channelID))
-		fmt.Printf("    <title>%s</title>\n", bridgeXMLEscape(getString(entry, "title")))
+			start, stop, xmlEscape(channelID))
+		fmt.Printf("    <title>%s</title>\n", xmlEscape(getString(entry, "title")))
 		if desc := getString(entry, "description"); desc != "" {
-			fmt.Printf("    <desc>%s</desc>\n", bridgeXMLEscape(desc))
+			fmt.Printf("    <desc>%s</desc>\n", xmlEscape(desc))
 		}
 		if cat := getString(entry, "category"); cat != "" {
-			fmt.Printf("    <category>%s</category>\n", bridgeXMLEscape(cat))
+			fmt.Printf("    <category>%s</category>\n", xmlEscape(cat))
 		}
 		fmt.Println("  </programme>")
 	}

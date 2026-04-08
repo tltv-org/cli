@@ -33,7 +33,7 @@ type bridgeRegisteredChannel struct {
 	Tags        []string
 	OnDemand    bool
 
-	Guide    []bridgeGuideEntry // source guide entries (may be empty)
+	Guide    []guideEntry // source guide entries (may be empty)
 	metadata []byte             // cached signed metadata JSON
 	guideDoc []byte             // cached signed guide JSON
 }
@@ -177,7 +177,7 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 }
 
 // UpdateGuide updates guide entries for channels. Keys are upstream channel IDs.
-func (r *bridgeRegistry) UpdateGuide(guide map[string][]bridgeGuideEntry) {
+func (r *bridgeRegistry) UpdateGuide(guide map[string][]guideEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -334,7 +334,7 @@ func bridgeSignGuide(ch *bridgeRegisteredChannel) ([]byte, error) {
 
 	guideEntries := ch.Guide
 	if len(guideEntries) == 0 {
-		guideEntries = bridgeDefaultGuideEntries(ch.Name)
+		guideEntries = defaultGuideEntries(ch.Name)
 	}
 
 	// Spec section 6.3: entries MUST be ordered by start time
@@ -394,12 +394,12 @@ func bridgeSignGuide(ch *bridgeRegisteredChannel) ([]byte, error) {
 	return data, nil
 }
 
-// bridgeDefaultGuideEntries generates a single entry spanning today midnight-to-midnight UTC.
-func bridgeDefaultGuideEntries(name string) []bridgeGuideEntry {
+// defaultGuideEntries generates a single entry spanning today midnight-to-midnight UTC.
+func defaultGuideEntries(name string) []guideEntry {
 	now := time.Now().UTC()
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	tomorrowStart := todayStart.Add(24 * time.Hour)
-	return []bridgeGuideEntry{{
+	return []guideEntry{{
 		Start: todayStart.Format(timestampFormat),
 		End:   tomorrowStart.Format(timestampFormat),
 		Title: name,

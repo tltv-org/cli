@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -316,7 +318,7 @@ func TestDumpDaemonConfig_StringSlice(t *testing.T) {
 
 func TestDumpDaemonConfig_GuideEntries(t *testing.T) {
 	cfg := map[string]interface{}{
-		"guide": []bridgeGuideEntry{
+		"guide": []guideEntry{
 			{Start: "2026-01-01T00:00:00Z", End: "2026-01-02T00:00:00Z", Title: "Show"},
 		},
 	}
@@ -464,6 +466,215 @@ func TestGossipNodesFromPeers_Basic(t *testing.T) {
 	nodes := gossipNodesFromPeers(targets)
 	if len(nodes) != 2 {
 		t.Errorf("expected 2 unique nodes, got %d: %v", len(nodes), nodes)
+	}
+}
+
+// ---------- configReloadLoop ----------
+
+func TestConfigReloadLoop_CallsReloadFn(t *testing.T) {
+	// Create a config file
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	os.WriteFile(cfgPath, []byte(`{"name": "original"}`), 0644)
+
+	watcher := newConfigWatcher(cfgPath)
+
+	// Touch the file to trigger a change
+	time.Sleep(50 * time.Millisecond)
+	os.WriteFile(cfgPath, []byte(`{"name": "updated"}`), 0644)
+
+	called := make(chan map[string]interface{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go configReloadLoop(ctx, watcher, func(cfg map[string]interface{}) {
+		called <- cfg
+	})
+
+	// The loop checks every 30s, but we can verify by waiting briefly
+	// and then cancelling. Instead, call Changed + load directly to test
+	// the watcher/reload integration.
+	select {
+	case cfg := <-called:
+		if name, ok := cfg["name"].(string); !ok || name != "updated" {
+			t.Errorf("expected name=updated, got %v", cfg["name"])
+		}
+	case <-time.After(35 * time.Second):
+		t.Fatal("reloadFn not called within 35s")
+	}
+}
+
+func TestConfigReloadLoop_CancelsCleanly(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	os.WriteFile(cfgPath, []byte(`{}`), 0644)
+
+	watcher := newConfigWatcher(cfgPath)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		configReloadLoop(ctx, watcher, func(cfg map[string]interface{}) {})
+		close(done)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+		// ok — exited cleanly
+	case <-time.After(2 * time.Second):
+		t.Fatal("configReloadLoop did not exit after cancel")
+	}
+}
+
+// ---------- serverApplyReloadedConfig ----------
+
+func TestServerApplyReloadedConfig_NameChange(t *testing.T) {
+	var liveConfig atomic.Pointer[serverReloadableConfig]
+	liveConfig.Store(&serverReloadableConfig{
+		channelName:  "Original",
+		guideEntries: nil,
+	})
+
+	cfg := map[string]interface{}{
+		"name": "Updated",
+	}
+	serverApplyReloadedConfig(cfg, &liveConfig)
+
+	result := liveConfig.Load()
+	if result.channelName != "Updated" {
+		t.Errorf("channelName = %q, want Updated", result.channelName)
+	}
+}
+
+func TestServerApplyReloadedConfig_GuideEntries(t *testing.T) {
+	var liveConfig atomic.Pointer[serverReloadableConfig]
+	liveConfig.Store(&serverReloadableConfig{
+		channelName:  "Test",
+		guideEntries: nil,
+	})
+
+	cfg := map[string]interface{}{
+		"guide": map[string]interface{}{
+			"entries": []interface{}{
+				map[string]interface{}{
+					"start": "2026-04-08T00:00:00Z",
+					"end":   "2026-04-09T00:00:00Z",
+					"title": "Day Block",
+				},
+			},
+		},
+	}
+	serverApplyReloadedConfig(cfg, &liveConfig)
+
+	result := liveConfig.Load()
+	if len(result.guideEntries) != 1 {
+		t.Fatalf("expected 1 guide entry, got %d", len(result.guideEntries))
+	}
+	if result.guideEntries[0].Title != "Day Block" {
+		t.Errorf("title = %q, want Day Block", result.guideEntries[0].Title)
+	}
+}
+
+func TestServerApplyReloadedConfig_NoChange(t *testing.T) {
+	original := &serverReloadableConfig{
+		channelName:  "Test",
+		guideEntries: nil,
+	}
+	var liveConfig atomic.Pointer[serverReloadableConfig]
+	liveConfig.Store(original)
+
+	// Empty config — nothing to change
+	serverApplyReloadedConfig(map[string]interface{}{}, &liveConfig)
+
+	// Should still be the same pointer (no Store called)
+	if liveConfig.Load() != original {
+		t.Error("should not have stored new config when nothing changed")
+	}
+}
+
+// ---------- bridgeApplyReloadedConfig ----------
+
+func TestBridgeApplyReloadedConfig_StreamChange(t *testing.T) {
+	var liveConfig atomic.Pointer[bridgeReloadableConfig]
+	liveConfig.Store(&bridgeReloadableConfig{
+		stream: "http://old.tv/live.m3u8",
+		name:   "Test",
+		guide:  "",
+	})
+
+	cfg := map[string]interface{}{
+		"stream": "http://new.tv/live.m3u8",
+	}
+
+	registry := newBridgeRegistry("", "")
+	bridgeApplyReloadedConfig(cfg, &liveConfig, registry)
+
+	result := liveConfig.Load()
+	if result.stream != "http://new.tv/live.m3u8" {
+		t.Errorf("stream = %q, want http://new.tv/live.m3u8", result.stream)
+	}
+	if result.name != "Test" {
+		t.Errorf("name should be unchanged, got %q", result.name)
+	}
+}
+
+func TestBridgeApplyReloadedConfig_NameChange(t *testing.T) {
+	var liveConfig atomic.Pointer[bridgeReloadableConfig]
+	liveConfig.Store(&bridgeReloadableConfig{
+		stream: "http://src.tv/live.m3u8",
+		name:   "Old Name",
+		guide:  "",
+	})
+
+	cfg := map[string]interface{}{
+		"name": "New Name",
+	}
+
+	registry := newBridgeRegistry("", "")
+	bridgeApplyReloadedConfig(cfg, &liveConfig, registry)
+
+	result := liveConfig.Load()
+	if result.name != "New Name" {
+		t.Errorf("name = %q, want New Name", result.name)
+	}
+}
+
+func TestBridgeApplyReloadedConfig_GuideFilePath(t *testing.T) {
+	var liveConfig atomic.Pointer[bridgeReloadableConfig]
+	liveConfig.Store(&bridgeReloadableConfig{
+		stream: "http://src.tv/live.m3u8",
+		name:   "Test",
+		guide:  "old-guide.xml",
+	})
+
+	cfg := map[string]interface{}{
+		"guide": "new-guide.xml",
+	}
+
+	registry := newBridgeRegistry("", "")
+	bridgeApplyReloadedConfig(cfg, &liveConfig, registry)
+
+	result := liveConfig.Load()
+	if result.guide != "new-guide.xml" {
+		t.Errorf("guide = %q, want new-guide.xml", result.guide)
+	}
+}
+
+func TestBridgeApplyReloadedConfig_NoChange(t *testing.T) {
+	original := &bridgeReloadableConfig{
+		stream: "http://src.tv/live.m3u8",
+		name:   "Test",
+		guide:  "",
+	}
+	var liveConfig atomic.Pointer[bridgeReloadableConfig]
+	liveConfig.Store(original)
+
+	registry := newBridgeRegistry("", "")
+	bridgeApplyReloadedConfig(map[string]interface{}{}, &liveConfig, registry)
+
+	if liveConfig.Load() != original {
+		t.Error("should not have stored new config when nothing changed")
 	}
 }
 

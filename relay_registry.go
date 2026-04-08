@@ -15,17 +15,9 @@ type relayRegisteredChannel struct {
 	Hints        []string           // upstream host:port sources
 	Metadata     []byte             // raw verified metadata JSON (served verbatim)
 	Guide        []byte             // raw verified guide JSON (served verbatim)
-	GuideEntries []bridgeGuideEntry // parsed entries (for XMLTV generation)
+	GuideEntries []guideEntry // parsed entries (for XMLTV generation)
 	StreamHint   string             // best upstream for stream proxying
 	LastVerified time.Time
-}
-
-// relayPeerInfo tracks a known peer for gossip exchange.
-type relayPeerInfo struct {
-	ChannelID string
-	Name      string
-	Hints     []string
-	LastSeen  time.Time
 }
 
 // relayRegistry manages relayed channels and peer state.
@@ -33,7 +25,7 @@ type relayPeerInfo struct {
 type relayRegistry struct {
 	mu            sync.RWMutex
 	channels      map[string]*relayRegisteredChannel // channelID -> channel
-	peers         map[string]*relayPeerInfo          // channelID -> peer info (from gossip)
+	peers         map[string]*peerEntry          // channelID -> peer info (from gossip)
 	hostname      string
 	gossipEnabled bool // include gossip-discovered peers in the peers response
 	maxPeers      int
@@ -51,7 +43,7 @@ func newRelayRegistry(hostname string, gossipEnabled bool, maxPeers, staleDays i
 	}
 	return &relayRegistry{
 		channels:      make(map[string]*relayRegisteredChannel),
-		peers:         make(map[string]*relayPeerInfo),
+		peers:         make(map[string]*peerEntry),
 		hostname:      hostname,
 		gossipEnabled: gossipEnabled,
 		maxPeers:      maxPeers,
@@ -90,12 +82,12 @@ func (r *relayRegistry) ChannelCount() int {
 // Always includes relayed channels with our hostname as hint.
 // Gossip-discovered peers are only included when gossipEnabled is true.
 // Applies staleness cutoff and max limit.
-func (r *relayRegistry) ListPeers() []relayPeerInfo {
+func (r *relayRegistry) ListPeers() []peerEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	cutoff := time.Now().Add(-time.Duration(r.staleDays) * 24 * time.Hour)
-	var result []relayPeerInfo
+	var result []peerEntry
 
 	// Our own relayed channels
 	for _, ch := range r.channels {
@@ -103,7 +95,7 @@ func (r *relayRegistry) ListPeers() []relayPeerInfo {
 		if r.hostname != "" {
 			hints = []string{r.hostname}
 		}
-		result = append(result, relayPeerInfo{
+		result = append(result, peerEntry{
 			ChannelID: ch.ChannelID,
 			Name:      ch.Name,
 			Hints:     hints,
@@ -150,7 +142,7 @@ func (r *relayRegistry) UpdateChannel(channelID string, raw []byte, doc map[stri
 
 	// Preserve existing guide if we have one
 	var guide []byte
-	var guideEntries []bridgeGuideEntry
+	var guideEntries []guideEntry
 	if old, ok := r.channels[channelID]; ok {
 		guide = old.Guide
 		guideEntries = old.GuideEntries
@@ -169,7 +161,7 @@ func (r *relayRegistry) UpdateChannel(channelID string, raw []byte, doc map[stri
 }
 
 // UpdateGuide updates the cached guide for a relayed channel.
-func (r *relayRegistry) UpdateGuide(channelID string, raw []byte, entries []bridgeGuideEntry) {
+func (r *relayRegistry) UpdateGuide(channelID string, raw []byte, entries []guideEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -215,7 +207,7 @@ func (r *relayRegistry) StoreMigration(channelID string, raw []byte) {
 }
 
 // MergePeers adds validated peer entries from gossip exchange.
-func (r *relayRegistry) MergePeers(peers []relayPeerInfo) {
+func (r *relayRegistry) MergePeers(peers []peerEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

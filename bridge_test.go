@@ -191,9 +191,9 @@ func TestBridgeISOToXMLTV(t *testing.T) {
 		{"2026-01-01T00:00:00Z", "20260101000000 +0000"},
 	}
 	for _, tt := range tests {
-		got := bridgeISOToXMLTV(tt.in)
+		got := isoToXMLTV(tt.in)
 		if got != tt.want {
-			t.Errorf("bridgeISOToXMLTV(%q) = %q, want %q", tt.in, got, tt.want)
+			t.Errorf("isoToXMLTV(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }
@@ -319,7 +319,7 @@ func TestBridgeScanDirectory(t *testing.T) {
 
 func TestBridgeRewriteManifest_AbsoluteToRelative(t *testing.T) {
 	manifest := "#EXTM3U\n#EXTINF:2.0,\nhttp://upstream.example.com/live/seg-001.ts\n#EXTINF:2.0,\nhttp://upstream.example.com/live/seg-002.ts\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
 
 	if strings.Contains(result, "http://") {
 		t.Error("result still contains absolute URLs")
@@ -334,7 +334,7 @@ func TestBridgeRewriteManifest_AbsoluteToRelative(t *testing.T) {
 
 func TestBridgeRewriteManifest_RelativePassThrough(t *testing.T) {
 	manifest := "#EXTM3U\n#EXTINF:2.0,\nseg-001.ts\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
 
 	if !strings.Contains(result, "seg-001.ts") {
 		t.Error("relative URI should pass through")
@@ -343,7 +343,7 @@ func TestBridgeRewriteManifest_RelativePassThrough(t *testing.T) {
 
 func TestBridgeRewriteManifest_DifferentOriginLeftAbsolute(t *testing.T) {
 	manifest := "#EXTM3U\n#EXTINF:2.0,\nhttp://cdn.other.com/seg-001.ts\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
 
 	if !strings.Contains(result, "http://cdn.other.com/seg-001.ts") {
 		t.Error("different-origin URL should be left absolute")
@@ -352,7 +352,7 @@ func TestBridgeRewriteManifest_DifferentOriginLeftAbsolute(t *testing.T) {
 
 func TestBridgeRewriteManifest_TokenInjection(t *testing.T) {
 	manifest := "#EXTM3U\n#EXTINF:2.0,\nseg-001.ts\n#EXTINF:2.0,\nseg-002.ts\n"
-	result := string(bridgeRewriteManifest("", []byte(manifest), "secret123"))
+	result := string(rewriteManifest("", []byte(manifest), "secret123"))
 
 	if !strings.Contains(result, "seg-001.ts?token=secret123") {
 		t.Error("missing token on seg-001.ts")
@@ -364,7 +364,7 @@ func TestBridgeRewriteManifest_TokenInjection(t *testing.T) {
 
 func TestBridgeRewriteManifest_TokenOnAbsoluteRewritten(t *testing.T) {
 	manifest := "#EXTM3U\n#EXTINF:2.0,\nhttp://upstream.example.com/live/seg-001.ts\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), "tok"))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), "tok"))
 
 	if strings.Contains(result, "http://") {
 		t.Error("should be rewritten to relative")
@@ -376,7 +376,7 @@ func TestBridgeRewriteManifest_TokenOnAbsoluteRewritten(t *testing.T) {
 
 func TestBridgeRewriteManifest_NoTokenForPublic(t *testing.T) {
 	manifest := "#EXTM3U\n#EXTINF:2.0,\nseg-001.ts\n"
-	result := string(bridgeRewriteManifest("", []byte(manifest), ""))
+	result := string(rewriteManifest("", []byte(manifest), ""))
 
 	if strings.Contains(result, "token=") {
 		t.Error("public channels should have no token")
@@ -385,7 +385,7 @@ func TestBridgeRewriteManifest_NoTokenForPublic(t *testing.T) {
 
 func TestBridgeRewriteManifest_MapURI(t *testing.T) {
 	manifest := "#EXTM3U\n#EXT-X-MAP:URI=\"http://upstream.example.com/live/init.mp4\"\n#EXTINF:2.0,\nseg.ts\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
 
 	if !strings.Contains(result, `URI="init.mp4"`) {
 		t.Errorf("MAP URI not rewritten to relative: %s", result)
@@ -394,7 +394,7 @@ func TestBridgeRewriteManifest_MapURI(t *testing.T) {
 
 func TestBridgeRewriteManifest_KeyURI(t *testing.T) {
 	manifest := "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"http://upstream.example.com/live/key.bin\"\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
 
 	if !strings.Contains(result, `URI="key.bin"`) {
 		t.Errorf("KEY URI not rewritten: %s", result)
@@ -403,7 +403,7 @@ func TestBridgeRewriteManifest_KeyURI(t *testing.T) {
 
 func TestBridgeRewriteManifest_MediaURI(t *testing.T) {
 	manifest := "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"http://upstream.example.com/live/audio.m3u8\"\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8", []byte(manifest), ""))
 
 	if !strings.Contains(result, `URI="audio.m3u8"`) {
 		t.Errorf("MEDIA URI not rewritten: %s", result)
@@ -416,7 +416,7 @@ func TestBridgeRewriteManifest_TagURIWithToken(t *testing.T) {
 		"#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x1234\n" +
 		"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"audio.m3u8\"\n" +
 		"#EXTINF:2.0,\nseg-001.ts\n"
-	result := string(bridgeRewriteManifest("", []byte(manifest), "secret"))
+	result := string(rewriteManifest("", []byte(manifest), "secret"))
 
 	if !strings.Contains(result, `URI="init.mp4?token=secret"`) {
 		t.Errorf("MAP URI missing token: %s", result)
@@ -434,7 +434,7 @@ func TestBridgeRewriteManifest_TagURIWithToken(t *testing.T) {
 
 func TestBridgeRewriteManifest_NonURITagsUntouched(t *testing.T) {
 	manifest := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:42\n#EXTINF:2.0,\nseg.ts\n"
-	result := string(bridgeRewriteManifest("", []byte(manifest), "tok"))
+	result := string(rewriteManifest("", []byte(manifest), "tok"))
 
 	if !strings.Contains(result, "#EXT-X-VERSION:3") {
 		t.Error("VERSION tag modified")
@@ -449,7 +449,7 @@ func TestBridgeRewriteManifest_NonURITagsUntouched(t *testing.T) {
 
 func TestBridgeRewriteManifest_UpstreamQueryStripped(t *testing.T) {
 	manifest := "#EXTM3U\n#EXTINF:2.0,\nhttp://upstream.example.com/live/seg-001.ts\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/stream.m3u8?key=abc&auth=xyz", []byte(manifest), ""))
+	result := string(rewriteManifest("http://upstream.example.com/live/stream.m3u8?key=abc&auth=xyz", []byte(manifest), ""))
 
 	if strings.Contains(result, "http://") {
 		t.Error("should still rewrite to relative even with query on manifest URL")
@@ -465,7 +465,7 @@ func TestBridgeRewriteManifest_TokenOnVariantPlaylist(t *testing.T) {
 		"video-720p.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n" +
 		"video-360p.m3u8\n"
-	result := string(bridgeRewriteManifest("", []byte(manifest), "tok"))
+	result := string(rewriteManifest("", []byte(manifest), "tok"))
 
 	if !strings.Contains(result, "video-720p.m3u8?token=tok") {
 		t.Error("variant 720p missing token")
@@ -482,7 +482,7 @@ func TestBridgeRewriteManifest_FullPrivateScenario(t *testing.T) {
 		"http://upstream.example.com/live/video.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=800000\n" +
 		"http://upstream.example.com/live/video-low.m3u8\n"
-	result := string(bridgeRewriteManifest("http://upstream.example.com/live/master.m3u8", []byte(manifest), "mytoken"))
+	result := string(rewriteManifest("http://upstream.example.com/live/master.m3u8", []byte(manifest), "mytoken"))
 
 	if strings.Contains(result, "http://") {
 		t.Error("all absolute URLs should be rewritten to relative")
@@ -507,7 +507,7 @@ func TestBridgeRewriteManifest_FullPrivateMediaPlaylist(t *testing.T) {
 		"#EXTINF:2.0,\nseg-100.m4s\n" +
 		"#EXTINF:2.0,\nseg-101.m4s\n" +
 		"#EXTINF:2.0,\nseg-102.m4s\n"
-	result := string(bridgeRewriteManifest("", []byte(manifest), "tok"))
+	result := string(rewriteManifest("", []byte(manifest), "tok"))
 
 	if !strings.Contains(result, `URI="init.mp4?token=tok"`) {
 		t.Error("MAP URI missing token")
@@ -1141,9 +1141,9 @@ func TestBridgeXMLEscape(t *testing.T) {
 		{`he said "hi"`, `he said &quot;hi&quot;`},
 	}
 	for _, tt := range tests {
-		got := bridgeXMLEscape(tt.in)
+		got := xmlEscape(tt.in)
 		if got != tt.want {
-			t.Errorf("bridgeXMLEscape(%q) = %q, want %q", tt.in, got, tt.want)
+			t.Errorf("xmlEscape(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }
@@ -1182,9 +1182,9 @@ func TestBridgeStreamContentType(t *testing.T) {
 		{"unknown.bin", "application/octet-stream"},
 	}
 	for _, tt := range tests {
-		got := bridgeStreamContentType(tt.name)
+		got := streamContentType(tt.name)
 		if got != tt.want {
-			t.Errorf("bridgeStreamContentType(%q) = %q, want %q", tt.name, got, tt.want)
+			t.Errorf("streamContentType(%q) = %q, want %q", tt.name, got, tt.want)
 		}
 	}
 }
@@ -1215,7 +1215,7 @@ func TestBridgeValidateSubPath(t *testing.T) {
 		"video/seg-000.ts", "init.mp4", "foo..bar.ts",
 	}
 	for _, p := range valid {
-		if !bridgeValidateSubPath(p) {
+		if !validateSubPath(p) {
 			t.Errorf("should accept %q", p)
 		}
 	}
@@ -1225,7 +1225,7 @@ func TestBridgeValidateSubPath(t *testing.T) {
 		"subdir/../../etc/passwd", "foo/../bar", "",
 	}
 	for _, p := range invalid {
-		if bridgeValidateSubPath(p) {
+		if validateSubPath(p) {
 			t.Errorf("should reject %q", p)
 		}
 	}
@@ -1512,7 +1512,7 @@ func TestBridgeUpdateGuide(t *testing.T) {
 	})
 
 	// Update with guide entries
-	r.UpdateGuide(map[string][]bridgeGuideEntry{
+	r.UpdateGuide(map[string][]guideEntry{
 		"src1": {
 			{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "Show A"},
 			{Start: "2026-03-15T13:00:00Z", End: "2026-03-15T14:00:00Z", Title: "Show B"},

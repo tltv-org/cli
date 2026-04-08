@@ -978,9 +978,9 @@ func TestXMLTVTimeConversion(t *testing.T) {
 		{"2026-03-15T23:59:59Z", "20260315235959 +0000"},
 	}
 	for _, tc := range cases {
-		got := bridgeISOToXMLTV(tc.input)
+		got := isoToXMLTV(tc.input)
 		if got != tc.expected {
-			t.Errorf("bridgeISOToXMLTV(%q): got %q, want %q", tc.input, got, tc.expected)
+			t.Errorf("isoToXMLTV(%q): got %q, want %q", tc.input, got, tc.expected)
 		}
 	}
 }
@@ -1009,15 +1009,15 @@ func TestExtractToken(t *testing.T) {
 	}
 }
 
-// ---------- bridgeGuideToXMLTV ----------
+// ---------- guideToXMLTV ----------
 
 func TestBridgeGuideToXMLTV(t *testing.T) {
-	entries := []bridgeGuideEntry{
+	entries := []guideEntry{
 		{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "Test Show", Description: "A test", Category: "Test"},
 		{Start: "2026-03-15T13:00:00Z", End: "2026-03-15T14:00:00Z", Title: "Show 2"},
 	}
 
-	xml := bridgeGuideToXMLTV("TVabc123", "My Channel", entries)
+	xml := guideToXMLTV("TVabc123", "My Channel", entries)
 
 	// Structure checks
 	if !strings.Contains(xml, `<?xml version="1.0" encoding="UTF-8"?>`) {
@@ -1051,7 +1051,7 @@ func TestBridgeGuideToXMLTV(t *testing.T) {
 }
 
 func TestBridgeGuideToXMLTV_Empty(t *testing.T) {
-	xml := bridgeGuideToXMLTV("TVabc", "Empty", nil)
+	xml := guideToXMLTV("TVabc", "Empty", nil)
 
 	if !strings.Contains(xml, "<tv>") {
 		t.Error("missing <tv>")
@@ -1065,11 +1065,11 @@ func TestBridgeGuideToXMLTV_Empty(t *testing.T) {
 }
 
 func TestBridgeGuideToXMLTV_XMLEscape(t *testing.T) {
-	entries := []bridgeGuideEntry{
+	entries := []guideEntry{
 		{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "News <Live> & More"},
 	}
 
-	xml := bridgeGuideToXMLTV("TV&test", "Ch <1>", entries)
+	xml := guideToXMLTV("TV&test", "Ch <1>", entries)
 
 	if !strings.Contains(xml, "TV&amp;test") {
 		t.Error("channel ID not escaped")

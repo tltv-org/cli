@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -131,7 +132,7 @@ func cmdBridge(args []string) {
 	}
 
 	// Load config file (if specified). Config values fill in unset flags.
-	var bridgeGuideEntries []bridgeGuideEntry // from config inline guide
+	var bridgeGuideEntries []guideEntry // from config inline guide
 	if *configPathBridge != "" {
 		cfg, err := loadDaemonConfig(*configPathBridge)
 		if err != nil {
@@ -264,7 +265,7 @@ func cmdBridge(args []string) {
 	// Initial guide poll
 	guide := sidecarGuide
 	if guide == nil {
-		guide = make(map[string][]bridgeGuideEntry)
+		guide = make(map[string][]guideEntry)
 	}
 	if *guideArg != "" {
 		externalGuide, err := bridgePollGuide(*guideArg)
@@ -317,13 +318,13 @@ func cmdBridge(args []string) {
 		gossipReg = newPeerRegistry()
 		gossipNodes := gossipNodesFromPeers(peerTargets)
 		client := newClient(flagInsecure)
-		go gossipPollLoop(ctx, client, gossipNodes, gossipReg, 10*time.Minute)
+		go gossipPollLoop(ctx, client, gossipNodes, gossipReg.Update, 10*time.Minute)
 		logInfof("gossip: discovering channels from %d nodes", len(gossipNodes))
 	}
 
 	// Apply inline guide entries from config (if any)
 	if len(bridgeGuideEntries) > 0 {
-		guideMap := make(map[string][]bridgeGuideEntry)
+		guideMap := make(map[string][]guideEntry)
 		for _, ch := range registry.ListChannels() {
 			guideMap[ch.ChannelID] = bridgeGuideEntries
 		}
@@ -414,14 +415,23 @@ func cmdBridge(args []string) {
 		startCacheGoroutines(cache, *cacheStatsInterval, ctx.Done())
 	}
 
-	// Config watcher (if config file provided)
-	var bridgeCfgWatcher *configWatcher
+	// Atomic config for reloadable fields (written by config goroutine, read by poll loop)
+	var bridgeLiveConfig atomic.Pointer[bridgeReloadableConfig]
+	bridgeLiveConfig.Store(&bridgeReloadableConfig{
+		stream: *streamArg,
+		name:   *nameArg,
+		guide:  *guideArg,
+	})
+
+	// Config watcher goroutine (if config file provided)
 	if *configPathBridge != "" {
-		bridgeCfgWatcher = newConfigWatcher(*configPathBridge)
+		go configReloadLoop(ctx, newConfigWatcher(*configPathBridge), func(cfg map[string]interface{}) {
+			bridgeApplyReloadedConfig(cfg, &bridgeLiveConfig, registry)
+		})
 	}
 
 	if pollDur > 0 {
-		go bridgePollLoop(ctx, pollDur, *streamArg, *guideArg, *nameArg, *onDemand, registry, bridgeCfgWatcher)
+		go bridgePollLoop(ctx, pollDur, &bridgeLiveConfig, *onDemand, registry)
 	}
 
 	// Wait for shutdown signal
@@ -438,9 +448,9 @@ func cmdBridge(args []string) {
 }
 
 // bridgePollLoop re-polls the source at the given interval.
-// If cfgWatcher is non-nil, checks for config changes each cycle and applies
-// reloadable fields (stream, name, guide) before polling.
-func bridgePollLoop(ctx context.Context, interval time.Duration, streamArg, guideArg, nameArg string, onDemand bool, registry *bridgeRegistry, cfgWatcher *configWatcher) {
+// Reads current config from the atomic pointer each cycle.
+func bridgePollLoop(ctx context.Context, interval time.Duration,
+	liveConfig *atomic.Pointer[bridgeReloadableConfig], onDemand bool, registry *bridgeRegistry) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -449,44 +459,8 @@ func bridgePollLoop(ctx context.Context, interval time.Duration, streamArg, guid
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Check config reload
-			if cfgWatcher != nil && cfgWatcher.Changed() {
-				newCfg, err := loadDaemonConfig(cfgWatcher.path)
-				if err != nil {
-					logErrorf("config reload failed: %v (keeping current)", err)
-				} else {
-					if s, ok := configGetString(newCfg, "stream"); ok && s != streamArg {
-						logInfof("config: stream changed to %q", s)
-						streamArg = s
-					}
-					if s, ok := configGetString(newCfg, "name"); ok && s != nameArg {
-						logInfof("config: name changed to %q", s)
-						nameArg = s
-					}
-					// Handle polymorphic guide from config
-					if guideVal, ok := newCfg["guide"]; ok {
-						entries, filePath, gerr := parseGuideConfig(guideVal)
-						if gerr != nil {
-							logErrorf("config: guide: %v", gerr)
-						} else if filePath != "" {
-							if filePath != guideArg {
-								logInfof("config: guide source changed to %q", filePath)
-								guideArg = filePath
-							}
-						} else if len(entries) > 0 {
-							// Apply inline guide entries directly
-							guideMap := make(map[string][]bridgeGuideEntry)
-							for _, ch := range registry.ListChannels() {
-								guideMap[ch.ChannelID] = entries
-							}
-							registry.UpdateGuide(guideMap)
-							logInfof("config: guide updated (%d inline entries)", len(entries))
-						}
-					}
-					logInfof("config reloaded")
-				}
-			}
-			bridgeDoPoll(streamArg, guideArg, nameArg, onDemand, registry)
+			cfg := liveConfig.Load()
+			bridgeDoPoll(cfg.stream, cfg.guide, cfg.name, onDemand, registry)
 		}
 	}
 }
@@ -506,7 +480,7 @@ func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *
 
 	guide := sidecarGuide
 	if guide == nil {
-		guide = make(map[string][]bridgeGuideEntry)
+		guide = make(map[string][]guideEntry)
 	}
 	if guideArg != "" {
 		externalGuide, err := bridgePollGuide(guideArg)
@@ -525,4 +499,66 @@ func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *
 	}
 
 	logDebugf("poll: %d channels", len(channels))
+}
+
+// ---------- Config Reload ----------
+
+// bridgeReloadableConfig holds bridge fields that can be changed via config hot-reload.
+// Written by configReloadLoop, read by bridgePollLoop.
+type bridgeReloadableConfig struct {
+	stream string
+	name   string
+	guide  string // guide file path or empty
+}
+
+// bridgeApplyReloadedConfig applies reloaded config values to the atomic config pointer.
+// Inline guide entries are applied directly to the registry.
+func bridgeApplyReloadedConfig(cfg map[string]interface{}, liveConfig *atomic.Pointer[bridgeReloadableConfig], registry *bridgeRegistry) {
+	current := liveConfig.Load()
+	newStream := current.stream
+	newName := current.name
+	newGuide := current.guide
+	changed := false
+
+	if s, ok := configGetString(cfg, "stream"); ok && s != current.stream {
+		logInfof("config: stream changed to %q", s)
+		newStream = s
+		changed = true
+	}
+	if s, ok := configGetString(cfg, "name"); ok && s != current.name {
+		logInfof("config: name changed to %q", s)
+		newName = s
+		changed = true
+	}
+	// Handle polymorphic guide from config
+	if guideVal, ok := cfg["guide"]; ok {
+		entries, filePath, gerr := parseGuideConfig(guideVal)
+		if gerr != nil {
+			logErrorf("config: guide: %v", gerr)
+		} else if filePath != "" {
+			if filePath != current.guide {
+				logInfof("config: guide source changed to %q", filePath)
+				newGuide = filePath
+				changed = true
+			}
+		} else if len(entries) > 0 {
+			// Apply inline guide entries directly to registry
+			guideMap := make(map[string][]guideEntry)
+			for _, ch := range registry.ListChannels() {
+				guideMap[ch.ChannelID] = entries
+			}
+			registry.UpdateGuide(guideMap)
+			logInfof("config: guide updated (%d inline entries)", len(entries))
+			changed = true
+		}
+	}
+
+	if changed {
+		liveConfig.Store(&bridgeReloadableConfig{
+			stream: newStream,
+			name:   newName,
+			guide:  newGuide,
+		})
+		logInfof("config reloaded")
+	}
 }
