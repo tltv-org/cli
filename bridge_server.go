@@ -13,20 +13,22 @@ import (
 
 // bridgeServer implements the TLTV protocol HTTP endpoints for bridged channels.
 type bridgeServer struct {
-	registry *bridgeRegistry
-	cache    *hlsCache        // optional response cache (nil = disabled)
-	peerReg  *peerRegistry    // optional external peers (nil = no --peers)
-	mux      *http.ServeMux
+	registry  *bridgeRegistry
+	cache     *hlsCache        // optional response cache (nil = disabled)
+	peerReg   *peerRegistry    // optional external peers (nil = no --peers)
+	gossipReg *peerRegistry    // optional gossip-discovered peers (nil = no --gossip)
+	mux       *http.ServeMux
 }
 
 // newBridgeServer creates a bridge HTTP server with all protocol endpoints registered.
-// Pass cache=nil to disable caching, peerReg=nil to disable external peers.
-func newBridgeServer(registry *bridgeRegistry, cache *hlsCache, peerReg *peerRegistry) *bridgeServer {
+// Pass cache/peerReg/gossipReg=nil to disable the corresponding feature.
+func newBridgeServer(registry *bridgeRegistry, cache *hlsCache, peerReg *peerRegistry, gossipReg *peerRegistry) *bridgeServer {
 	s := &bridgeServer{
-		registry: registry,
-		cache:    cache,
-		peerReg:  peerReg,
-		mux:      http.NewServeMux(),
+		registry:  registry,
+		cache:     cache,
+		peerReg:   peerReg,
+		gossipReg: gossipReg,
+		mux:       http.NewServeMux(),
 	}
 
 	// GET handlers for protocol endpoints
@@ -108,10 +110,13 @@ func (s *bridgeServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// External verified peers
+	// External verified peers + gossip-discovered peers
 	var external []peerEntry
 	if s.peerReg != nil {
 		external = s.peerReg.ListPeers()
+	}
+	if s.gossipReg != nil {
+		external = append(external, s.gossipReg.ListPeers()...)
 	}
 
 	peers := buildPeersResponse(own, external)

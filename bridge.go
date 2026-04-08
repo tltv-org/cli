@@ -49,6 +49,10 @@ func cmdBridge(args []string) {
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
 	peersStr := addPeersFlag(fs)
+	gossipEnabled := addGossipFlag(fs)
+
+	// --- Config ---
+	configPathBridge, dumpConfigBridge := addConfigFlags(fs)
 
 	// --- Cache ---
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -79,7 +83,11 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins field\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
-		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n\n")
+		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
+		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n\n")
+		fmt.Fprintf(os.Stderr, "Config:\n")
+		fmt.Fprintf(os.Stderr, "      --config PATH        config file (JSON)\n")
+		fmt.Fprintf(os.Stderr, "      --dump-config        print resolved config as JSON and exit\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                enable TLS (autocert via Let's Encrypt if no cert/key)\n")
 		fmt.Fprintf(os.Stderr, "      --tls-cert FILE      TLS certificate file (PEM)\n")
@@ -97,9 +105,10 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: STREAM, GUIDE, NAME, ON_DEMAND=1, POLL,\n")
-		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, TLS=1, TLS_CERT, TLS_KEY,\n")
-		fmt.Fprintf(os.Stderr, "TLS_STAGING=1, TLS_DIR, ACME_EMAIL, CACHE=1, CACHE_MAX_ENTRIES,\n")
-		fmt.Fprintf(os.Stderr, "CACHE_STATS, VIEWER=1, LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
+		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, GOSSIP=1, CONFIG,\n")
+		fmt.Fprintf(os.Stderr, "TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
+		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
+		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://example.com/live.m3u8 --name \"My Channel\"\n")
@@ -119,6 +128,93 @@ func cmdBridge(args []string) {
 	if err := setupLogging(*logLvl, *logFmt, *logPath, "bridge"); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Load config file (if specified). Config values fill in unset flags.
+	var bridgeGuideEntries []bridgeGuideEntry // from config inline guide
+	if *configPathBridge != "" {
+		cfg, err := loadDaemonConfig(*configPathBridge)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		applyConfigToFlags(fs, cfg)
+		// Handle polymorphic guide from config
+		if guideVal, ok := cfg["guide"]; ok {
+			entries, filePath, gerr := parseGuideConfig(guideVal)
+			if gerr != nil {
+				fmt.Fprintf(os.Stderr, "error: config guide: %v\n", gerr)
+				os.Exit(1)
+			}
+			if filePath != "" && *guideArg == "" {
+				*guideArg = filePath
+			}
+			bridgeGuideEntries = entries
+		}
+	}
+
+	// --dump-config: print resolved config and exit.
+	// Only includes fields that differ from compiled defaults.
+	if *dumpConfigBridge {
+		cfg := map[string]interface{}{}
+		if *streamArg != "" {
+			cfg["stream"] = *streamArg
+		}
+		if *nameArg != "" {
+			cfg["name"] = *nameArg
+		}
+		if *onDemand {
+			cfg["on_demand"] = true
+		}
+		if *pollStr != "60s" {
+			cfg["poll"] = *pollStr
+		}
+		if *hostnameArg != "" {
+			cfg["hostname"] = *hostnameArg
+		}
+		if *cacheEnabled {
+			cfg["cache"] = true
+		}
+		if *viewerEnabled {
+			cfg["viewer"] = true
+		}
+		if *gossipEnabled {
+			cfg["gossip"] = true
+		}
+		if *peersStr != "" {
+			cfg["peers"] = *peersStr
+		}
+		if *tlsEnabled {
+			cfg["tls"] = true
+		}
+		if *tlsCert != "" {
+			cfg["tls_cert"] = *tlsCert
+		}
+		if *tlsKey != "" {
+			cfg["tls_key"] = *tlsKey
+		}
+		if *acmeEmail != "" {
+			cfg["acme_email"] = *acmeEmail
+		}
+		if *tlsStaging {
+			cfg["tls_staging"] = true
+		}
+		if *logLvl != "" {
+			cfg["log_level"] = *logLvl
+		}
+		if *logFmt != "" {
+			cfg["log_format"] = *logFmt
+		}
+		if *logPath != "" {
+			cfg["log_file"] = *logPath
+		}
+		if len(bridgeGuideEntries) > 0 {
+			cfg["guide"] = bridgeGuideEntries
+		} else if *guideArg != "" {
+			cfg["guide"] = *guideArg
+		}
+		dumpDaemonConfig(cfg, os.Stdout)
+		return
 	}
 
 	if *streamArg == "" {
@@ -215,8 +311,27 @@ func cmdBridge(args []string) {
 		logInfof("peers: verifying %d external channels", len(peerTargets))
 	}
 
+	// Set up gossip registry (--gossip: discover channels from --peers nodes)
+	var gossipReg *peerRegistry
+	if *gossipEnabled && len(peerTargets) > 0 {
+		gossipReg = newPeerRegistry()
+		gossipNodes := gossipNodesFromPeers(peerTargets)
+		client := newClient(flagInsecure)
+		go gossipPollLoop(ctx, client, gossipNodes, gossipReg, 10*time.Minute)
+		logInfof("gossip: discovering channels from %d nodes", len(gossipNodes))
+	}
+
+	// Apply inline guide entries from config (if any)
+	if len(bridgeGuideEntries) > 0 {
+		guideMap := make(map[string][]bridgeGuideEntry)
+		for _, ch := range registry.ListChannels() {
+			guideMap[ch.ChannelID] = bridgeGuideEntries
+		}
+		registry.UpdateGuide(guideMap)
+	}
+
 	// Start HTTP server
-	server := newBridgeServer(registry, cache, peerReg)
+	server := newBridgeServer(registry, cache, peerReg, gossipReg)
 
 	// Embed viewer (first public channel)
 	var viewerChannelName string
@@ -299,8 +414,14 @@ func cmdBridge(args []string) {
 		startCacheGoroutines(cache, *cacheStatsInterval, ctx.Done())
 	}
 
+	// Config watcher (if config file provided)
+	var bridgeCfgWatcher *configWatcher
+	if *configPathBridge != "" {
+		bridgeCfgWatcher = newConfigWatcher(*configPathBridge)
+	}
+
 	if pollDur > 0 {
-		go bridgePollLoop(ctx, pollDur, *streamArg, *guideArg, *nameArg, *onDemand, registry)
+		go bridgePollLoop(ctx, pollDur, *streamArg, *guideArg, *nameArg, *onDemand, registry, bridgeCfgWatcher)
 	}
 
 	// Wait for shutdown signal
@@ -317,7 +438,9 @@ func cmdBridge(args []string) {
 }
 
 // bridgePollLoop re-polls the source at the given interval.
-func bridgePollLoop(ctx context.Context, interval time.Duration, streamArg, guideArg, nameArg string, onDemand bool, registry *bridgeRegistry) {
+// If cfgWatcher is non-nil, checks for config changes each cycle and applies
+// reloadable fields (stream, name, guide) before polling.
+func bridgePollLoop(ctx context.Context, interval time.Duration, streamArg, guideArg, nameArg string, onDemand bool, registry *bridgeRegistry, cfgWatcher *configWatcher) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -326,6 +449,43 @@ func bridgePollLoop(ctx context.Context, interval time.Duration, streamArg, guid
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Check config reload
+			if cfgWatcher != nil && cfgWatcher.Changed() {
+				newCfg, err := loadDaemonConfig(cfgWatcher.path)
+				if err != nil {
+					logErrorf("config reload failed: %v (keeping current)", err)
+				} else {
+					if s, ok := configGetString(newCfg, "stream"); ok && s != streamArg {
+						logInfof("config: stream changed to %q", s)
+						streamArg = s
+					}
+					if s, ok := configGetString(newCfg, "name"); ok && s != nameArg {
+						logInfof("config: name changed to %q", s)
+						nameArg = s
+					}
+					// Handle polymorphic guide from config
+					if guideVal, ok := newCfg["guide"]; ok {
+						entries, filePath, gerr := parseGuideConfig(guideVal)
+						if gerr != nil {
+							logErrorf("config: guide: %v", gerr)
+						} else if filePath != "" {
+							if filePath != guideArg {
+								logInfof("config: guide source changed to %q", filePath)
+								guideArg = filePath
+							}
+						} else if len(entries) > 0 {
+							// Apply inline guide entries directly
+							guideMap := make(map[string][]bridgeGuideEntry)
+							for _, ch := range registry.ListChannels() {
+								guideMap[ch.ChannelID] = entries
+							}
+							registry.UpdateGuide(guideMap)
+							logInfof("config: guide updated (%d inline entries)", len(entries))
+						}
+					}
+					logInfof("config reloaded")
+				}
+			}
 			bridgeDoPoll(streamArg, guideArg, nameArg, onDemand, registry)
 		}
 	}

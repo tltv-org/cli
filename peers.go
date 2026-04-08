@@ -71,7 +71,7 @@ func (r *peerRegistry) Remove(channelID string) {
 	delete(r.entries, channelID)
 }
 
-// ---------- Flag ----------
+// ---------- Flags ----------
 
 // addPeersFlag registers --peers / -P / PEERS env var on a FlagSet.
 // Takes comma-separated tltv:// URIs.
@@ -79,6 +79,23 @@ func addPeersFlag(fs *flag.FlagSet) *string {
 	peersStr := fs.String("peers", os.Getenv("PEERS"), "tltv:// URIs to advertise in peer exchange")
 	fs.StringVar(peersStr, "P", os.Getenv("PEERS"), "alias for --peers")
 	return peersStr
+}
+
+// addGossipFlag registers --gossip / -g / GOSSIP=1 env var on a FlagSet.
+// When enabled, discovered channels from peers' /tltv/v1/peers endpoints
+// are validated and included in this node's own peers response.
+func addGossipFlag(fs *flag.FlagSet) *bool {
+	gossipEnabled := fs.Bool("gossip", os.Getenv("GOSSIP") == "1", "re-advertise validated gossip-discovered channels")
+	fs.BoolVar(gossipEnabled, "g", os.Getenv("GOSSIP") == "1", "alias for --gossip")
+	return gossipEnabled
+}
+
+// addConfigFlags registers --config and --dump-config flags on a FlagSet.
+// Env vars: CONFIG.
+func addConfigFlags(fs *flag.FlagSet) (configPath *string, dumpConfig *bool) {
+	configPath = fs.String("config", os.Getenv("CONFIG"), "config file (JSON)")
+	dumpConfig = fs.Bool("dump-config", false, "print resolved config as JSON and exit")
+	return
 }
 
 // ---------- Parsing ----------
@@ -208,4 +225,106 @@ func buildPeersResponse(ownChannels []peerEntry, externalPeers []peerEntry) []ma
 		result = []map[string]interface{}{}
 	}
 	return result
+}
+
+// ---------- Gossip ----------
+
+// gossipNodesFromPeers extracts unique host:port nodes from --peers targets.
+// These nodes are polled for their /tltv/v1/peers to discover additional channels.
+func gossipNodesFromPeers(targets []peerTarget) []string {
+	seen := make(map[string]bool)
+	var nodes []string
+	for _, t := range targets {
+		for _, h := range t.Hints {
+			if !seen[h] {
+				seen[h] = true
+				nodes = append(nodes, h)
+			}
+		}
+	}
+	return nodes
+}
+
+// gossipPollLoop fetches /tltv/v1/peers from the given nodes, validates
+// discovered channels, and stores them in the gossip registry.
+// Used by all three daemons when --gossip is enabled.
+// Runs an initial poll immediately, then at the given interval.
+func gossipPollLoop(ctx context.Context, client *Client, nodes []string,
+	gossipReg *peerRegistry, interval time.Duration) {
+
+	gossipPollOnce(client, nodes, gossipReg)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			gossipPollOnce(client, nodes, gossipReg)
+		}
+	}
+}
+
+// gossipPollOnce performs a single gossip cycle: fetch peers from each node,
+// validate each discovered channel (node info → metadata verify → access check),
+// and add to the gossip registry.
+func gossipPollOnce(client *Client, nodes []string, gossipReg *peerRegistry) {
+	for _, node := range nodes {
+		node = normalizeHost(node)
+		exchange, err := client.FetchPeers(node)
+		if err != nil {
+			logDebugf("gossip %s: %v", node, err)
+			continue
+		}
+
+		for _, p := range exchange.Peers {
+			if len(p.Hints) == 0 {
+				continue
+			}
+			hint := p.Hints[0]
+
+			// Step 1: verify channel is listed at the hint
+			info, err := client.FetchNodeInfo(hint)
+			if err != nil {
+				continue
+			}
+			found := false
+			for _, ch := range info.Channels {
+				if ch.ID == p.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				for _, ch := range info.Relaying {
+					if ch.ID == p.ID {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				continue
+			}
+
+			// Step 2: fetch and verify signed metadata
+			metaRes, err := relayFetchAndVerifyMetadata(client, p.ID, []string{hint})
+			if err != nil {
+				continue
+			}
+			if metaRes.IsMigration {
+				continue
+			}
+
+			// Step 3: check not private/retired/on-demand
+			if err := relayCheckAccess(metaRes.Doc); err != nil {
+				continue
+			}
+
+			name := getString(metaRes.Doc, "name")
+			gossipReg.Update(p.ID, name, p.Hints)
+		}
+	}
 }

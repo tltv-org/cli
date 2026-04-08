@@ -247,7 +247,7 @@ func TestServerPeersEndpoint_Empty(t *testing.T) {
 	channelID := makeChannelID(pub)
 	_ = priv
 	seg := newHLSSegmenter(5, 2)
-	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, nil)
+	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
@@ -275,7 +275,7 @@ func TestServerPeersEndpoint_WithPeerReg(t *testing.T) {
 	peerReg := newPeerRegistry()
 	peerReg.Update("TVfriend", "Friend Channel", []string{"friend.tv:443"})
 
-	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, peerReg)
+	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, peerReg, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
@@ -306,7 +306,7 @@ func TestBridgePeersEndpoint_WithPeerReg(t *testing.T) {
 	peerReg := newPeerRegistry()
 	peerReg.Update("TVfriend", "Friend Channel", []string{"friend.tv:443"})
 
-	srv := newBridgeServer(r, nil, peerReg)
+	srv := newBridgeServer(r, nil, peerReg, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
@@ -325,7 +325,7 @@ func TestBridgePeersEndpoint_NoHostname(t *testing.T) {
 	r := newBridgeRegistry(dir, "") // no hostname
 	r.UpdateChannels([]bridgeChannel{{ID: "ch1", Name: "Test", Stream: "http://example.com/stream.m3u8"}})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()

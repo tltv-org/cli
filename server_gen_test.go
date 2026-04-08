@@ -364,7 +364,7 @@ func TestServerSignDocs_EphemeralGuide(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 	id := makeChannelID(pub)
 
-	metadata, guide := serverSignDocs(id, "TEST", "", priv)
+	metadata, guide := serverSignDocs(id, "TEST", "", priv, nil)
 	if metadata == nil {
 		t.Fatal("metadata is nil")
 	}
@@ -425,7 +425,7 @@ func TestServerGuideXMLTV(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 	id := makeChannelID(pub)
 
-	_, guide := serverSignDocs(id, "TEST", "", priv)
+	_, guide := serverSignDocs(id, "TEST", "", priv, nil)
 	if guide == nil {
 		t.Fatal("guide is nil")
 	}
@@ -672,14 +672,14 @@ func TestServerCache_ManifestCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	seg.pushSegment([]byte("ts-data-0"), 2.0)
 
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
 
 	// First request: MISS
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil)
@@ -712,14 +712,14 @@ func TestServerCache_SegmentCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	seg.pushSegment([]byte("ts-data-0"), 2.0)
 
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
 
 	path := "/tltv/v1/channels/" + channelID + "/seg0.ts"
 
@@ -748,12 +748,12 @@ func TestServerCache_MetadataCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
 
 	path := "/tltv/v1/channels/" + channelID
 
@@ -777,12 +777,12 @@ func TestServerCache_GuideCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
 
 	// guide.json
 	w := httptest.NewRecorder()
@@ -816,13 +816,13 @@ func TestServerCache_NilCacheNoHeaders(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	seg.pushSegment([]byte("ts-data"), 2.0)
 
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil)
 
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil))

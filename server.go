@@ -96,6 +96,7 @@ func cmdServerTest(args []string) {
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
 	peersStr := addPeersFlag(fs)
+	gossipEnabled := addGossipFlag(fs)
 
 	segDuration := fs.Int("segment-duration", envInt("SEGMENT_DURATION", 2), "HLS segment duration in seconds")
 	segCount := fs.Int("segment-count", envInt("SEGMENT_COUNT", 5), "HLS playlist window size (number of segments)")
@@ -108,6 +109,9 @@ func cmdServerTest(args []string) {
 
 	// --- TLS ---
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
+
+	// --- Config ---
+	configPath, dumpConfigFlag := addConfigFlags(fs)
 
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
@@ -136,7 +140,11 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --segment-duration N   HLS segment duration in seconds (default: 2)\n")
 		fmt.Fprintf(os.Stderr, "      --segment-count N      segments in playlist window (default: 5)\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
-		fmt.Fprintf(os.Stderr, "  -P, --peers LIST           tltv:// URIs to advertise in peer exchange\n\n")
+		fmt.Fprintf(os.Stderr, "  -P, --peers LIST           tltv:// URIs to advertise in peer exchange\n")
+		fmt.Fprintf(os.Stderr, "  -g, --gossip               re-advertise validated gossip-discovered channels\n\n")
+		fmt.Fprintf(os.Stderr, "Config:\n")
+		fmt.Fprintf(os.Stderr, "      --config PATH          config file (JSON)\n")
+		fmt.Fprintf(os.Stderr, "      --dump-config          print resolved config as JSON and exit\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                  enable TLS (autocert via Let's Encrypt if no cert/key)\n")
 		fmt.Fprintf(os.Stderr, "      --tls-cert FILE        TLS certificate file (PEM)\n")
@@ -155,8 +163,8 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-file PATH        log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "All flags also accept environment variables (uppercase, underscores):\n")
 		fmt.Fprintf(os.Stderr, "  KEY, NAME, UPTIME, TIMEZONE, FONT_SCALE, WIDTH, HEIGHT, FPS, QP,\n")
-		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT, PEERS,\n")
-		fmt.Fprintf(os.Stderr, "  TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
+		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT, PEERS, GOSSIP=1,\n")
+		fmt.Fprintf(os.Stderr, "  CONFIG, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
 		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
@@ -171,6 +179,111 @@ func cmdServerTest(args []string) {
 	// Override default listen port for TLS.
 	if *tlsEnabled || *tlsCert != "" {
 		tlsOverrideListenPort(fs, listenAddr)
+	}
+
+	// Load config file (if specified). Config values fill in unset flags.
+	var serverCfg map[string]interface{}
+	var serverGuideEntries []bridgeGuideEntry // from config inline guide
+	if *configPath != "" {
+		var err error
+		serverCfg, err = loadDaemonConfig(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		applyConfigToFlags(fs, serverCfg)
+		// Handle polymorphic guide from config
+		if guideVal, ok := serverCfg["guide"]; ok {
+			entries, _, err := parseGuideConfig(guideVal)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: config guide: %v\n", err)
+				os.Exit(1)
+			}
+			serverGuideEntries = entries
+		}
+	}
+
+	// --dump-config: print resolved config and exit.
+	// Only includes fields that differ from compiled defaults.
+	if *dumpConfigFlag {
+		cfg := map[string]interface{}{}
+		if *keyFile != "" {
+			cfg["key"] = *keyFile
+		}
+		if *nameArg != "" {
+			cfg["name"] = *nameArg
+		}
+		if *showUptime {
+			cfg["uptime"] = true
+		}
+		if *fontScale != 0 {
+			cfg["font_scale"] = *fontScale
+		}
+		if *timezoneArg != "" {
+			cfg["timezone"] = *timezoneArg
+		}
+		if *widthArg != 640 {
+			cfg["width"] = *widthArg
+		}
+		if *heightArg != 360 {
+			cfg["height"] = *heightArg
+		}
+		if *fpsArg != 30 {
+			cfg["fps"] = *fpsArg
+		}
+		if *qpArg != 26 {
+			cfg["qp"] = *qpArg
+		}
+		if *hostnameArg != "" {
+			cfg["hostname"] = *hostnameArg
+		}
+		if *segDuration != 2 {
+			cfg["segment_duration"] = *segDuration
+		}
+		if *segCount != 5 {
+			cfg["segment_count"] = *segCount
+		}
+		if *cacheEnabled {
+			cfg["cache"] = true
+		}
+		if *viewerEnabled {
+			cfg["viewer"] = true
+		}
+		if *gossipEnabled {
+			cfg["gossip"] = true
+		}
+		if *peersStr != "" {
+			cfg["peers"] = *peersStr
+		}
+		if *tlsEnabled {
+			cfg["tls"] = true
+		}
+		if *tlsCert != "" {
+			cfg["tls_cert"] = *tlsCert
+		}
+		if *tlsKey != "" {
+			cfg["tls_key"] = *tlsKey
+		}
+		if *acmeEmail != "" {
+			cfg["acme_email"] = *acmeEmail
+		}
+		if *tlsStaging {
+			cfg["tls_staging"] = true
+		}
+		if *logLvl != "" {
+			cfg["log_level"] = *logLvl
+		}
+		if *logFmt != "" {
+			cfg["log_format"] = *logFmt
+		}
+		if *logPath != "" {
+			cfg["log_file"] = *logPath
+		}
+		if len(serverGuideEntries) > 0 {
+			cfg["guide"] = serverGuideEntries
+		}
+		dumpDaemonConfig(cfg, os.Stdout)
+		return
 	}
 
 	// Set up logging
@@ -312,7 +425,7 @@ func cmdServerTest(args []string) {
 
 	// Sign channel documents
 	hostname := *hostnameArg
-	metadata, guide := serverSignDocs(channelID, channelName, hostname, privKey)
+	metadata, guide := serverSignDocs(channelID, channelName, hostname, privKey, serverGuideEntries)
 
 	// Set up cache (if enabled)
 	var cache *hlsCache
@@ -335,6 +448,16 @@ func cmdServerTest(args []string) {
 		logInfof("peers: verifying %d external channels", len(peerTargets))
 	}
 
+	// Set up gossip registry (--gossip: discover channels from --peers nodes)
+	var gossipReg *peerRegistry
+	if *gossipEnabled && len(peerTargets) > 0 {
+		gossipReg = newPeerRegistry()
+		gossipNodes := gossipNodesFromPeers(peerTargets)
+		client := newClient(flagInsecure)
+		go gossipPollLoop(ctx, client, gossipNodes, gossipReg, 10*time.Minute)
+		logInfof("gossip: discovering channels from %d nodes", len(gossipNodes))
+	}
+
 	// HTTP server
 	mux := http.NewServeMux()
 	if *viewerEnabled {
@@ -349,7 +472,7 @@ func cmdServerTest(args []string) {
 			return info
 		})
 	}
-	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache, peerReg)
+	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache, peerReg, gossipReg)
 
 	// Set up TLS (if enabled).
 	tlsCfg, tlsCleanup, tlsErr := tlsSetup(*hostnameArg, *tlsEnabled, *tlsCert, *tlsKey, *acmeEmail, *tlsStaging)
@@ -433,6 +556,12 @@ func cmdServerTest(args []string) {
 	resignTicker := time.NewTicker(5 * time.Minute)
 	defer resignTicker.Stop()
 
+	// Config watcher (if config file provided)
+	var cfgWatcher *configWatcher
+	if *configPath != "" {
+		cfgWatcher = newConfigWatcher(*configPath)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -444,7 +573,30 @@ func cmdServerTest(args []string) {
 		case <-ticker.C:
 			state.generateSegment()
 		case <-resignTicker.C:
-			metadata, guide = serverSignDocs(channelID, channelName, hostname, privKey)
+			// Check config reload before re-signing
+			if cfgWatcher != nil && cfgWatcher.Changed() {
+				newCfg, err := loadDaemonConfig(cfgWatcher.path)
+				if err != nil {
+					logErrorf("config reload failed: %v (keeping current)", err)
+				} else {
+					if name, ok := configGetString(newCfg, "name"); ok && name != channelName {
+						channelName = name
+						state.channelName = strings.ToUpper(name)
+						logInfof("config: name changed to %q", name)
+					}
+					if guideVal, ok := newCfg["guide"]; ok {
+						entries, _, gerr := parseGuideConfig(guideVal)
+						if gerr == nil && len(entries) > 0 {
+							serverGuideEntries = entries
+							logInfof("config: guide updated (%d entries)", len(entries))
+						} else if gerr != nil {
+							logErrorf("config: guide: %v", gerr)
+						}
+					}
+					logInfof("config reloaded")
+				}
+			}
+			metadata, guide = serverSignDocs(channelID, channelName, hostname, privKey, serverGuideEntries)
 			serverUpdateDocs(channelID, channelName, metadata, guide)
 		}
 	}
@@ -569,7 +721,8 @@ func (s *serverState) generateSegment() {
 }
 
 // serverSignDocs signs metadata and guide documents for the server channel.
-func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.PrivateKey) ([]byte, []byte) {
+// Pass customGuide to use specific entries; nil falls back to ephemeral midnight-to-midnight.
+func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.PrivateKey, customGuide []bridgeGuideEntry) ([]byte, []byte) {
 	now := time.Now().UTC()
 
 	// --- Metadata ---
@@ -596,9 +749,12 @@ func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.Pri
 	metadata, _ := json.Marshal(signed)
 
 	// --- Guide ---
-	// Ephemeral guide: midnight-to-midnight UTC, regenerated every 5 minutes.
-	// Same pattern as bridge — standard for all TLTV commands.
-	guideEntries := bridgeDefaultGuideEntries(channelName)
+	// Use custom guide entries from config, or fall back to ephemeral
+	// midnight-to-midnight UTC guide (regenerated every 5 minutes).
+	guideEntries := customGuide
+	if len(guideEntries) == 0 {
+		guideEntries = bridgeDefaultGuideEntries(channelName)
+	}
 
 	var entries []interface{}
 	for _, e := range guideEntries {

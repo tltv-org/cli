@@ -132,9 +132,9 @@ tltv completion --install zsh
 
 | Command | Description |
 |---|---|
-| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Built-in response cache with singleflight deduplication (`--cache`). Built-in web player (`--viewer`). Advertise other channels via `--peers`. Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
-| `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Built-in response cache with singleflight deduplication (`--cache`). Built-in web player (`--viewer`). Advertise other channels via `--peers`. Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
-| `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Built-in HLS cache with singleflight deduplication (`--cache`). Built-in web player (`--viewer`). Refuses private, on-demand, and retired channels per spec. Curated peer exchange via `--peers`; opt-in gossip propagation via `--gossip`. Supports `--channels` (specific URIs), `--node` (relay all from a node), and `--config` (JSON config file). |
+| `server test` | Start a TLTV test signal generator. Generates a full SMPTE EG 1-1990 color bar pattern (3-row with PLUGE) with channel name, wall clock, and 1 kHz audio tone, entirely in pure Go -- no ffmpeg or external tools. Full TLTV protocol endpoints with signed metadata and guide. Configurable resolution, frame rate, QP, and HLS settings. Built-in response cache (`--cache`). Built-in web player (`--viewer`). Advertise other channels via `--peers`; opt-in gossip via `--gossip`. JSON config file with hot-reload (`--config`). Safe to run indefinitely -- PTS wraps correctly after 80+ hours. |
+| `bridge` | Start a bridge origin server. Takes external streaming sources (HLS URLs, M3U playlists, JSON channel lists, directories of .m3u8 files) and publishes them as TLTV channels with Ed25519 identities and signed metadata. Built-in response cache (`--cache`). Built-in web player (`--viewer`). Advertise other channels via `--peers`; opt-in gossip via `--gossip`. JSON config file with hot-reload (`--config`). Supports private channels with token authentication, XMLTV guide output, and automatic re-polling. All flags also work as environment variables for Docker. |
+| `relay` | Start a relay node. Re-serves existing TLTV channels from upstream nodes with full signature verification. Serves upstream-signed documents verbatim (preserves unknown fields). Built-in HLS cache (`--cache`). Built-in web player (`--viewer`). Refuses private, on-demand, and retired channels per spec. Curated peer exchange via `--peers`; opt-in gossip propagation via `--gossip`. JSON config file with hot-reload (`--config`). Supports `--channels` (specific URIs), `--node` (relay all from a node). |
 | `receiver <target>` | Headless HLS stream consumer. Connects to a TLTV channel, fetches segments, verifies metadata, and reports statistics. Modes: `--monitor` (health check, exit 0/1), `--record` (save to file), `--pipe` (raw TS to stdout), `--duration` (timed run). Tracks latency percentiles, cache hit rates, and bandwidth. |
 | `viewer <target>` | Open a local web viewer for a channel. Fetches and verifies metadata, serves an HLS.js player with live debug stats. Proxies the stream through localhost with server-side token injection. |
 | `loadtest <target>` | Multi-receiver load simulator. Spawns N concurrent receivers (`--receivers`/`-n`) with optional ramp-up (`--ramp`). Reports aggregate stats: segment/manifest latency percentiles, cache hit rates, bandwidth, error rates. |
@@ -335,7 +335,7 @@ tltv bridge --stream http://source.tv/live.m3u8 --tls --hostname mychannel.tv
 
 Source formats are auto-detected: M3U playlists (with tvg-id/tvg-name attributes), JSON channel arrays, local directories with sidecar `.json` files, or single HLS streams. Guide data can be XMLTV or JSON.
 
-All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`, `TLS=1`, `TLS_CERT`, `TLS_KEY`, `TLS_STAGING=1`, `TLS_DIR`, `ACME_EMAIL`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
+All flags also work as environment variables for Docker: `STREAM`, `GUIDE`, `NAME`, `ON_DEMAND=1`, `POLL`, `LISTEN`, `KEYS_DIR`, `HOSTNAME`, `PEERS`, `GOSSIP=1`, `CONFIG`, `TLS=1`, `TLS_CERT`, `TLS_KEY`, `TLS_STAGING=1`, `TLS_DIR`, `ACME_EMAIL`, `CACHE=1`, `CACHE_MAX_ENTRIES`, `CACHE_STATS`, `VIEWER=1`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`.
 
 Docker Compose example:
 ```yaml
@@ -415,13 +415,55 @@ tltv relay --channels "tltv://TV...@origin.tv" --gossip
 
 Each daemon periodically fetches and verifies metadata for `--peers` targets. Channels that migrate, go private, or become retired are automatically dropped.
 
-The relay's `--gossip` (`-g`, `GOSSIP=1`) flag controls whether validated gossip-discovered peers appear in the peers response. Default off -- the operator must opt-in to vouch for channels they didn't explicitly choose.
+All three daemons support `--gossip` (`-g`, `GOSSIP=1`). When enabled, the daemon fetches `/tltv/v1/peers` from the nodes behind its `--peers` targets, validates discovered channels (node info, signed metadata, access checks), and includes them in its own peers response. One-hop discovery only. Default off -- the operator must opt-in to vouch for channels they didn't explicitly choose.
 
-Config file format:
+### Config Files
+
+All three daemons support `--config` for JSON config files and `--dump-config` to generate one from flags. Config fields map 1:1 to CLI flags (underscores replace dashes). CLI flags override config values; config values override env vars.
+
+```bash
+# Generate a config from flags
+tltv bridge --stream http://src.tv/live.m3u8 --name "My Channel" --cache --dump-config > bridge.json
+
+# Run from config
+tltv bridge --config bridge.json
+
+# Override config with a flag
+tltv bridge --config bridge.json --name "Override"
+```
+
+Config files support hot-reload via mtime detection. Reloadable fields are applied without restart:
+
+| Daemon  | Reloadable fields                        |
+|---------|------------------------------------------|
+| Server  | `name`, `guide`                          |
+| Bridge  | `stream`, `name`, `guide`                |
+| Relay   | `channels`, `node`                       |
+
+The `guide` field in config is polymorphic -- inline entries or a file reference:
+
+```json
+{
+  "name": "My Channel",
+  "stream": "http://source.tv/live.m3u8",
+  "guide": {
+    "entries": [
+      {"start": "2026-04-08T08:00:00Z", "end": "2026-04-08T20:00:00Z", "title": "Day Block"},
+      {"start": "2026-04-08T20:00:00Z", "end": "2026-04-09T08:00:00Z", "title": "Night Block"}
+    ]
+  }
+}
+```
+
+Or reference a file: `"guide": "guide.json"`. Omit for the default ephemeral midnight-to-midnight guide.
+
+Relay config example:
 ```json
 {
   "channels": ["tltv://TVabc...@origin.example.com:443"],
-  "nodes": ["origin.example.com:443"]
+  "node": ["origin.example.com:443"],
+  "cache": true,
+  "hostname": "relay.example.com"
 }
 ```
 
@@ -525,6 +567,7 @@ base58.go           Base58 encode/decode (Bitcoin alphabet)
 identity.go         Channel ID: make, parse, validate
 signing.go          JCS canonical JSON (RFC 8785), Ed25519 sign/verify
 uri.go              tltv:// URI parse and format
+config.go           Config loading, dump, hot-reload watcher, polymorphic guide parsing
 client.go           HTTP client, SSRF-safe client, hint validation
 network.go          Network commands (node, fetch, guide, peers, stream, crawl)
 vanity.go           Multi-threaded vanity channel ID miner
@@ -540,7 +583,7 @@ server_pattern.go   SMPTE EG 1-1990 bars (3-row + PLUGE), 8x8 bitmap font, frame
 server_serve.go     HTTP handlers (TLTV protocol endpoints)
 bridge*.go          Bridge origin server (source parsing, identity, HLS rewriting, HTTP)
 relay*.go           Relay node (upstream fetch+verify, HLS cache, singleflight, gossip, HTTP)
-peers.go            Shared peer exchange (flag, parser, registry, poll loop, response builder)
+peers.go            Shared peer exchange, gossip (flags, parser, registry, poll loops, response builder)
 receiver.go         HLS receiver (manifest parser, segment tracking, stats, retry)
 loadtest.go         Multi-receiver load simulator (ramp-up, aggregate stats, percentiles)
 viewer.go           Local web viewer (HLS.js player, stream proxy, metadata display)
@@ -548,6 +591,7 @@ hls.min.js          Vendored HLS.js latest stable (~530 KB), embedded via go:emb
 main_test.go        85 tests against all protocol test vectors + edge cases
 bridge_test.go      68 bridge tests (source parsing, manifest rewriting, endpoints)
 relay_test.go       47 relay tests (fetch+verify, access checks, migration, endpoints, cache)
+config_test.go      25 config tests (loading, dump, watcher, flag precedence, polymorphic guide)
 peers_test.go       26 peers tests (parsing, registry, endpoints, gossip gating, flag aliases)
 receiver_test.go    22 receiver tests (HLS parser, segment resolution, stats, live stream, LiveEdge)
 server_gen_test.go  20 tests (raw H.264, multi-resolution, I_4x4, font, audio, PMT, XMLTV)
@@ -555,7 +599,7 @@ Makefile            Build, test, install, cross-compile (CGO_ENABLED=0)
 Dockerfile          Multi-stage: golang:1.22-alpine -> scratch (~10 MB)
 ```
 
-Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 310 tests.
+Zero external dependencies. Everything uses the Go standard library (`crypto/ed25519`, `encoding/json`, `net/http`, `math/big`). 335 tests.
 
 ## Links
 

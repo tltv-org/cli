@@ -573,7 +573,7 @@ func TestBridgeMakeRelative_AlreadyRelative(t *testing.T) {
 
 func TestBridgeNodeInfo(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -607,7 +607,7 @@ func TestBridgeNodeInfo(t *testing.T) {
 
 func TestBridgeChannelMetadata(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+id, nil)
@@ -661,7 +661,7 @@ func TestBridgeChannelMetadata(t *testing.T) {
 
 func TestBridgeChannelMetadata_HasGuide(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+id, nil)
@@ -679,7 +679,7 @@ func TestBridgeChannelMetadata_HasGuide(t *testing.T) {
 
 func TestBridgeDefaultGuide(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+id+"/guide.json", nil)
@@ -710,7 +710,7 @@ func TestBridgeDefaultGuide(t *testing.T) {
 
 func TestBridgeGuideXML(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+id+"/guide.xml", nil)
@@ -737,7 +737,7 @@ func TestBridgeGuideXML(t *testing.T) {
 
 func TestBridgeChannelNotFound(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/TVfakeChannelIdThatDoesNotExistInRegistryXXXXX", nil)
 	w := httptest.NewRecorder()
@@ -750,7 +750,7 @@ func TestBridgeChannelNotFound(t *testing.T) {
 
 func TestBridgePeers_Empty(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
@@ -774,7 +774,7 @@ func TestBridgePeers_WithConfigured(t *testing.T) {
 	r := newBridgeRegistry(dir, "bridge.example.com:8000")
 	r.UpdateChannels([]bridgeChannel{{ID: "ch1", Name: "Test", Stream: "http://example.com/stream.m3u8"}})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
@@ -797,7 +797,7 @@ func TestBridgePeers_WithConfigured(t *testing.T) {
 
 func TestBridgeHealth(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -820,7 +820,7 @@ func TestBridgeHealth(t *testing.T) {
 
 func TestBridgeCORSHeaders(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -833,7 +833,7 @@ func TestBridgeCORSHeaders(t *testing.T) {
 
 func TestBridgeMethodNotAllowed(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -852,7 +852,7 @@ func TestBridgeOnDemandMetadata(t *testing.T) {
 		OnDemand: true,
 	}})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+id, nil)
@@ -872,7 +872,7 @@ func TestBridgeOriginsFromHostname(t *testing.T) {
 	r := newBridgeRegistry(dir, "bridge.example.com:8000")
 	r.UpdateChannels([]bridgeChannel{{ID: "ch1", Name: "Test", Stream: "http://example.com/stream.m3u8"}})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+id, nil)
@@ -898,7 +898,7 @@ func TestBridgePrivateChannel_HiddenFromNodeInfo(t *testing.T) {
 		{ID: "priv", Name: "Private", Stream: "http://example.com/priv.m3u8", Access: "token", Token: "secret123"},
 	})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -924,7 +924,7 @@ func TestBridgePrivateChannel_RequiresToken(t *testing.T) {
 		{ID: "priv", Name: "Private", Stream: "http://example.com/priv.m3u8", Access: "token", Token: "secret123"},
 	})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	var privID string
 	for _, ch := range r.ListChannels() {
 		privID = ch.ChannelID
@@ -976,7 +976,7 @@ func TestBridgePrivateChannel_TokenOnSubPaths(t *testing.T) {
 		{ID: "priv", Name: "Private", Stream: filepath.Join(streamDir, "stream.m3u8"), Access: "token", Token: "secret"},
 	})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	var privID string
 	for _, ch := range r.ListChannels() {
 		privID = ch.ChannelID
@@ -1014,7 +1014,7 @@ func TestBridgePeers_PrivateExcluded(t *testing.T) {
 		{ID: "priv", Name: "Private", Stream: "http://example.com/priv.m3u8", Access: "token", Token: "secret"},
 	})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
@@ -1044,7 +1044,7 @@ func TestBridgeLocalFileStream(t *testing.T) {
 		{ID: "local", Name: "Local Channel", Stream: filepath.Join(streamDir, "stream.m3u8")},
 	})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	// Fetch manifest
@@ -1080,7 +1080,7 @@ func TestBridgeConcurrentAccessDuringUpdate(t *testing.T) {
 	r.UpdateChannels([]bridgeChannel{
 		{ID: "ch1", Name: "Test", Stream: "http://example.com/stream.m3u8"},
 	})
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	var wg sync.WaitGroup
 
@@ -1193,7 +1193,7 @@ func TestBridgeStreamContentType(t *testing.T) {
 
 func TestBridgeOPTIONS(t *testing.T) {
 	r := testBridgeRegistry(t)
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 
 	req := httptest.NewRequest("OPTIONS", "/.well-known/tltv", nil)
 	w := httptest.NewRecorder()
@@ -1285,7 +1285,7 @@ func TestBridgeUpstreamStream(t *testing.T) {
 		{ID: "ch1", Name: "Upstream", Stream: upstream.URL + "/live/stream.m3u8"},
 	})
 
-	srv := newBridgeServer(r, nil, nil)
+	srv := newBridgeServer(r, nil, nil, nil)
 	id := testBridgeChannelID(t, r)
 
 	// Fetch manifest through bridge
@@ -1560,7 +1560,7 @@ func TestBridgeCache_UpstreamCacheStatus(t *testing.T) {
 	})
 
 	cache := newHLSCache(100)
-	srv := newBridgeServer(reg, cache, nil)
+	srv := newBridgeServer(reg, cache, nil, nil)
 	id := testBridgeChannelID(t, reg)
 
 	// First manifest: MISS
@@ -1616,7 +1616,7 @@ func TestBridgeCache_LocalStreamBypassesCache(t *testing.T) {
 	})
 
 	cache := newHLSCache(100)
-	srv := newBridgeServer(reg, cache, nil)
+	srv := newBridgeServer(reg, cache, nil, nil)
 	id := testBridgeChannelID(t, reg)
 
 	w := httptest.NewRecorder()
@@ -1643,7 +1643,7 @@ func TestBridgeCache_NilCacheNoHeaders(t *testing.T) {
 		{ID: "ch1", Name: "NilCache", Stream: upstream.URL + "/stream.m3u8"},
 	})
 
-	srv := newBridgeServer(reg, nil, nil)
+	srv := newBridgeServer(reg, nil, nil, nil)
 	id := testBridgeChannelID(t, reg)
 
 	w := httptest.NewRecorder()

@@ -35,8 +35,10 @@ func cmdRelay(args []string) {
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
 	peersStr := addPeersFlag(fs)
-	gossipEnabled := fs.Bool("gossip", os.Getenv("GOSSIP") == "1", "re-advertise validated gossip-discovered channels")
-	fs.BoolVar(gossipEnabled, "g", os.Getenv("GOSSIP") == "1", "alias for --gossip")
+	gossipEnabled := addGossipFlag(fs)
+
+	// --- Config ---
+	dumpConfigRelay := fs.Bool("dump-config", false, "print resolved config as JSON and exit")
 
 	// Cache flags
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -88,14 +90,16 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "signature verification. Proxies streams, participates in gossip.\n\n")
 		fmt.Fprintf(os.Stderr, "Input:\n")
 		fmt.Fprintf(os.Stderr, "      --channels LIST      tltv:// URIs or id@host:port (comma-separated)\n")
-		fmt.Fprintf(os.Stderr, "      --node HOST:PORT     relay all public channels from a node (comma-separated)\n")
-		fmt.Fprintf(os.Stderr, "      --config PATH        relay config file (JSON)\n\n")
+		fmt.Fprintf(os.Stderr, "      --node HOST:PORT     relay all public channels from a node (comma-separated)\n\n")
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for peer exchange\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
 		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n\n")
+		fmt.Fprintf(os.Stderr, "Config:\n")
+		fmt.Fprintf(os.Stderr, "      --config PATH        relay config file (JSON)\n")
+		fmt.Fprintf(os.Stderr, "      --dump-config        print resolved config as JSON and exit\n\n")
 		fmt.Fprintf(os.Stderr, "Cache:\n")
 		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory HLS stream cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
@@ -119,8 +123,9 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: CHANNELS, NODE, CONFIG, LISTEN, HOSTNAME,\n")
-		fmt.Fprintf(os.Stderr, "PEERS, GOSSIP=1, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR,\n")
-		fmt.Fprintf(os.Stderr, "ACME_EMAIL, CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
+		fmt.Fprintf(os.Stderr, "PEERS, GOSSIP=1,\n")
+		fmt.Fprintf(os.Stderr, "TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
+		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER=1,\n")
 		fmt.Fprintf(os.Stderr, "META_POLL, GUIDE_POLL, PEER_POLL, MAX_PEERS, STALE_DAYS,\n")
 		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n\n")
@@ -184,14 +189,92 @@ func cmdRelay(args []string) {
 		}
 	}
 
-	// Load config file
+	// Load config file (shared loader + relay-specific field extraction)
 	if *configPath != "" {
-		cfg, err := relayLoadConfig(*configPath)
+		cfg, err := loadDaemonConfig(*configPath)
 		if err != nil {
 			fatal("config: %v", err)
 		}
-		channels = append(channels, cfg.Channels...)
-		nodes = append(nodes, cfg.Nodes...)
+		// Extract relay-specific array fields
+		if ch, ok := configGetStringSlice(cfg, "channels"); ok {
+			channels = append(channels, ch...)
+		}
+		// Support both "node" (flag name) and "nodes" (legacy)
+		if n, ok := configGetStringSlice(cfg, "node"); ok {
+			nodes = append(nodes, n...)
+		} else if n, ok := configGetStringSlice(cfg, "nodes"); ok {
+			nodes = append(nodes, n...)
+		}
+		// Apply scalar config values to flags
+		applyConfigToFlags(fs, cfg)
+	}
+
+	// --dump-config: print resolved config and exit.
+	// Only includes fields that differ from compiled defaults.
+	if *dumpConfigRelay {
+		cfg := map[string]interface{}{}
+		if len(channels) > 0 {
+			cfg["channels"] = channels
+		}
+		if len(nodes) > 0 {
+			cfg["node"] = nodes
+		}
+		if *hostnameArg != "" {
+			cfg["hostname"] = *hostnameArg
+		}
+		if *cacheEnabled {
+			cfg["cache"] = true
+		}
+		if *viewerEnabled {
+			cfg["viewer"] = true
+		}
+		if *gossipEnabled {
+			cfg["gossip"] = true
+		}
+		if *peersStr != "" {
+			cfg["peers"] = *peersStr
+		}
+		if *tlsEnabled {
+			cfg["tls"] = true
+		}
+		if *tlsCert != "" {
+			cfg["tls_cert"] = *tlsCert
+		}
+		if *tlsKey != "" {
+			cfg["tls_key"] = *tlsKey
+		}
+		if *acmeEmail != "" {
+			cfg["acme_email"] = *acmeEmail
+		}
+		if *tlsStaging {
+			cfg["tls_staging"] = true
+		}
+		if *metaPollStr != "60s" {
+			cfg["meta_poll"] = *metaPollStr
+		}
+		if *guidePollStr != "15m" {
+			cfg["guide_poll"] = *guidePollStr
+		}
+		if *peerPollStr != "30m" {
+			cfg["peer_poll"] = *peerPollStr
+		}
+		if *maxPeers != 100 {
+			cfg["max_peers"] = *maxPeers
+		}
+		if *staleDays != 7 {
+			cfg["stale_days"] = *staleDays
+		}
+		if *logLvl != "" {
+			cfg["log_level"] = *logLvl
+		}
+		if *logFmt != "" {
+			cfg["log_format"] = *logFmt
+		}
+		if *logPath != "" {
+			cfg["log_file"] = *logPath
+		}
+		dumpDaemonConfig(cfg, os.Stdout)
+		return
 	}
 
 	if len(channels) == 0 && len(nodes) == 0 {
@@ -375,7 +458,7 @@ func cmdRelay(args []string) {
 	}
 
 	if metaPoll > 0 {
-		go relayMetadataPollLoop(ctx, metaPoll, client, registry, relayTargets)
+		go relayMetadataPollLoop(ctx, metaPoll, client, registry)
 	}
 	if guidePoll > 0 {
 		go relayGuidePollLoop(ctx, guidePoll, client, registry)
@@ -385,6 +468,32 @@ func cmdRelay(args []string) {
 	}
 	if len(extPeerTargets) > 0 && peerReg != nil {
 		go peerPollLoop(ctx, client, extPeerTargets, peerReg, 5*time.Minute)
+	}
+
+	// Config watcher — periodically check for config changes.
+	// Reloadable: channels, node (re-discover and sync with registry).
+	if *configPath != "" {
+		cfgWatcher := newConfigWatcher(*configPath)
+		go func() {
+			reloadTicker := time.NewTicker(30 * time.Second)
+			defer reloadTicker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-reloadTicker.C:
+					if !cfgWatcher.Changed() {
+						continue
+					}
+					newCfg, err := loadDaemonConfig(cfgWatcher.path)
+					if err != nil {
+						logErrorf("config reload failed: %v (keeping current)", err)
+						continue
+					}
+					relayReloadConfig(newCfg, client, registry)
+				}
+			}
+		}()
 	}
 
 	// Wait for shutdown signal
@@ -403,46 +512,115 @@ func cmdRelay(args []string) {
 // ---------- Poll Loops ----------
 
 // relayMetadataPollLoop periodically re-fetches and verifies metadata.
-func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *Client, registry *relayRegistry, targets []relayTarget) {
+// Iterates registry.ListChannels() each cycle so dynamically-added channels
+// (from config hot-reload) are automatically included.
+func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *Client, registry *relayRegistry) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	stopped := make(map[string]bool) // channels that migrated or were removed
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, t := range targets {
-				if stopped[t.ChannelID] {
+			for _, ch := range registry.ListChannels() {
+				if ch.Name == "(migrated)" {
 					continue
 				}
 
-				res, err := relayFetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
+				res, err := relayFetchAndVerifyMetadata(client, ch.ChannelID, ch.Hints)
 				if err != nil {
-					logErrorf("meta poll %s: %v", t.ChannelID, err)
+					logErrorf("meta poll %s: %v", ch.ChannelID, err)
 					continue
 				}
 
 				if res.IsMigration {
-					logInfof("channel %s has migrated to %s, stopping relay", t.ChannelID, res.MigratedTo)
-					registry.StoreMigration(t.ChannelID, res.Raw)
-					stopped[t.ChannelID] = true
+					logInfof("channel %s has migrated to %s, stopping relay", ch.ChannelID, res.MigratedTo)
+					registry.StoreMigration(ch.ChannelID, res.Raw)
 					continue
 				}
 
 				// Re-check access (channel may have gone private/on-demand/retired)
 				if err := relayCheckAccess(res.Doc); err != nil {
-					logInfof("channel %s now %s, stopping relay", t.ChannelID, err)
-					registry.RemoveChannel(t.ChannelID)
-					stopped[t.ChannelID] = true
+					logInfof("channel %s now %s, stopping relay", ch.ChannelID, err)
+					registry.RemoveChannel(ch.ChannelID)
 					continue
 				}
 
-				registry.UpdateChannel(t.ChannelID, res.Raw, res.Doc, t.Hints)
+				registry.UpdateChannel(ch.ChannelID, res.Raw, res.Doc, ch.Hints)
 			}
 		}
+	}
+}
+
+// relayReloadConfig applies a reloaded config to a running relay.
+// Reloadable: channels, node — re-discovers targets and syncs the registry.
+func relayReloadConfig(cfg map[string]interface{}, client *Client, registry *relayRegistry) {
+	var channels, nodes []string
+	if ch, ok := configGetStringSlice(cfg, "channels"); ok {
+		channels = ch
+	}
+	if n, ok := configGetStringSlice(cfg, "node"); ok {
+		nodes = n
+	} else if n, ok := configGetStringSlice(cfg, "nodes"); ok {
+		nodes = n
+	}
+
+	if len(channels) == 0 && len(nodes) == 0 {
+		return
+	}
+
+	targets, err := relayDiscoverTargets(client, channels, nodes)
+	if err != nil {
+		logErrorf("config reload: target discovery: %v", err)
+		return
+	}
+
+	// Build set of new channel IDs
+	newIDs := make(map[string]bool)
+	for _, t := range targets {
+		newIDs[t.ChannelID] = true
+	}
+
+	// Add new channels
+	added := 0
+	for _, t := range targets {
+		if registry.GetChannel(t.ChannelID) != nil {
+			continue // already relaying
+		}
+		res, err := relayFetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
+		if err != nil {
+			logErrorf("config reload: skip %s: %v", t.ChannelID, err)
+			continue
+		}
+		if res.IsMigration {
+			continue
+		}
+		if err := relayCheckAccess(res.Doc); err != nil {
+			logErrorf("config reload: skip %s: %v", t.ChannelID, err)
+			continue
+		}
+		registry.UpdateChannel(t.ChannelID, res.Raw, res.Doc, t.Hints)
+		name := getString(res.Doc, "name")
+		logInfof("config reload: added %s %s", t.ChannelID, name)
+		added++
+	}
+
+	// Remove channels no longer in config
+	removed := 0
+	for _, ch := range registry.ListChannels() {
+		if ch.Name == "(migrated)" {
+			continue
+		}
+		if !newIDs[ch.ChannelID] {
+			registry.RemoveChannel(ch.ChannelID)
+			logInfof("config reload: removed %s", ch.ChannelID)
+			removed++
+		}
+	}
+
+	if added > 0 || removed > 0 {
+		logInfof("config reloaded: %d added, %d removed, %d total", added, removed, registry.ChannelCount())
 	}
 }
 
