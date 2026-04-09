@@ -206,9 +206,9 @@ func statusPageRoutes(mux *http.ServeMux, nodeInfoFn func() *NodeInfo) {
 		sb.WriteString(statusPageHead)
 
 		if info != nil {
-			sb.WriteString(`<div class="dr"><div class="di"><span>protocol </span><span class="uri">`)
+			sb.WriteString(`<div class="ge" style="color:#999">`)
 			sb.WriteString(proto)
-			sb.WriteString(`</span></div></div>`)
+			sb.WriteString(`</div>`)
 
 			if len(info.Channels) > 0 {
 				sb.WriteString(fmt.Sprintf(`<div class="ge" style="color:#666;margin-top:10px">Origin Channels (%d)</div>`, len(info.Channels)))
@@ -244,26 +244,9 @@ func statusPageRoutes(mux *http.ServeMux, nodeInfoFn func() *NodeInfo) {
 	})
 }
 
-const statusPageHead = `<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>tltv</title><link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;color:#fff;font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;font-size:14px;line-height:1.6}
-.c{max-width:72rem;width:100%;margin:0 auto}
-.hd{display:flex;align-items:center;gap:1.5rem;padding:1rem 2rem;border-bottom:1px solid #333;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}
-.hd svg{height:24px;width:auto;flex-shrink:0}
-.inner{max-width:calc(1100px + 2rem);width:100%;margin:0 auto;padding:1.25rem 1rem 2rem}
-.sl{font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:4px}
-.dr{display:flex;flex-wrap:wrap;gap:16px;padding:2px 0}
-.di span:first-child{color:#666}
-.uri{font-size:.8rem;color:#999;word-break:break-all}
-.ge{font-size:.8rem;color:#999;padding:2px 0}
-.gt{color:#666}
-</style>
-</head><body><div class="c">
-<div class="hd">` + viewerNavSVG + `</div>
+var statusPageHead = pageHead("tltv", "") + `
+<body><div class="c">
+` + pageNav("status") + `
 <div class="inner"><div class="sl" style="margin-top:8px">node</div><div class="db">`
 
 const statusPageTail = `</div></div></div></body></html>`
@@ -525,57 +508,37 @@ func (s *viewerServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-// ---------- Embedded HTML ----------
+// ---------- Shared Web Template ----------
 
-const viewerHTML = `<!DOCTYPE html>
+// pageHead returns the shared HTML <head> with base CSS. title is the <title> content,
+// extraCSS is appended after the base styles.
+func pageHead(title, extraCSS string) string {
+	return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tltv debug viewer</title>
+<title>` + title + `</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{
-  background:#000;color:#fff;
-  font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
-  font-size:14px;line-height:1.6;
+` + baseCSS + extraCSS + `
+</style>
+</head>`
 }
+
+// pageNav returns the shared nav bar. label appears right-aligned (e.g. "debug viewer", "status").
+func pageNav(label string) string {
+	return `<div class="hd">` + viewerNavSVG + `<span class="hdm">tltv</span><span class="hdl">` + label + `</span></div>`
+}
+
+const baseCSS = `*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;color:#fff;font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;font-size:14px;line-height:1.6}
 .c{max-width:72rem;width:100%;margin:0 auto}
-.hd{
-  display:flex;align-items:center;gap:1.5rem;
-  padding:1rem 2rem;border-bottom:1px solid #333;
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
-}
+.hd{display:flex;align-items:center;gap:1.5rem;padding:1rem 2rem;border-bottom:1px solid #333;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}
 .hd svg{height:24px;width:auto;flex-shrink:0}
+.hdm{font-size:.95rem;font-weight:600;color:#fff;letter-spacing:.02em}
 .hdl{font-size:.9rem;color:#999;margin-left:auto}
 .inner{max-width:calc(1100px + 2rem);width:100%;margin:0 auto;padding:1.25rem 1rem 0}
-.vw{position:relative;width:100%;padding-bottom:56.25%;background:#000}
-.vw video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;background:#000}
-.ov{
-  position:absolute;top:0;left:0;width:100%;height:100%;
-  display:flex;align-items:center;justify-content:center;
-  background:rgba(0,0,0,.88);z-index:1;
-}
-.ov.h{display:none}
-.sp{
-  width:14px;height:14px;
-  border:1.5px solid rgba(255,255,255,.2);border-top-color:rgba(255,255,255,.5);
-  border-radius:50%;animation:spin 1s linear infinite;margin-right:8px;
-}
-@keyframes spin{to{transform:rotate(360deg)}}
-.ov span{color:rgba(255,255,255,.5);font-size:14px}
-.ctrl{display:flex;align-items:center;gap:.5rem;height:36px;padding:0}
-.cn{font-size:.85rem;font-weight:600;color:#fff;white-space:nowrap}
-.sep{font-size:.8rem;color:#666}
-.prg{font-size:.8rem;color:#999;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.spacer{flex:1}
-.cb{
-  background:none;border:1px solid #333;color:#666;
-  font-family:inherit;font-size:.7rem;padding:2px 8px;cursor:pointer;border-radius:0;
-}
-.cb:hover{color:#999;border-color:#666}
-.ubar{padding:.2rem 0 .6rem;border-bottom:1px solid #333}
 hr{border:none;border-top:1px solid #333;margin:12px 0}
 .sl{font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:4px}
 .uri{font-size:.8rem;color:#666;word-break:break-all}
@@ -587,14 +550,31 @@ hr{border:none;border-top:1px solid #333;margin:12px 0}
 .ok{color:#4ade80}.wn{color:#fbbf24}.er{color:#ef4444}
 a.uri{color:#666;text-decoration:none}
 a.uri:hover{color:#999}
-</style>
-</head>
+`
+
+const viewerExtraCSS = `.vw{position:relative;width:100%;padding-bottom:56.25%;background:#000}
+.vw video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;background:#000}
+.ov{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.88);z-index:1}
+.ov.h{display:none}
+.sp{width:14px;height:14px;border:1.5px solid rgba(255,255,255,.2);border-top-color:rgba(255,255,255,.5);border-radius:50%;animation:spin 1s linear infinite;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.ov span{color:rgba(255,255,255,.5);font-size:14px}
+.ctrl{display:flex;align-items:center;gap:.5rem;height:36px;padding:0}
+.cn{font-size:.85rem;font-weight:600;color:#fff;white-space:nowrap}
+.sep{font-size:.8rem;color:#666}
+.prg{font-size:.8rem;color:#999;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.spacer{flex:1}
+.cb{background:none;border:1px solid #333;color:#666;font-family:inherit;font-size:.7rem;padding:2px 8px;cursor:pointer;border-radius:0}
+.cb:hover{color:#999;border-color:#666}
+.ubar{padding:.2rem 0 .6rem;border-bottom:1px solid #333}
+`
+
+// ---------- Embedded HTML ----------
+
+var viewerHTML = pageHead("tltv viewer", viewerExtraCSS) + `
 <body>
 <div class="c">
-  <div class="hd">
-    <svg viewBox="0 0 1020 350" fill="#fff" aria-hidden="true"><svg x="0" y="0" width="491" height="350" viewBox="0 0 491.321548 349.773636"><g transform="translate(-0.176918,349.811893) scale(0.1,-0.1)" stroke="none"><path d="M2050 3493 c-881 -31 -1492 -102 -1671 -194 -95 -48 -171 -145 -214 -272 -98 -292 -154 -705 -162 -1192 -8 -497 27 -842 127 -1233 48 -187 74 -246 140 -316 96 -102 195 -137 505 -181 756 -105 1734 -133 2665 -75 330 21 800 78 959 117 195 47 311 159 370 358 52 179 98 442 128 735 24 242 24 784 0 1030 -40 397 -116 746 -191 874 -34 58 -117 133 -179 161 -243 111 -1187 198 -2092 193 -170 -1 -344 -3 -385 -5z m-246 -993 c33 -5 92 -25 132 -44 68 -32 101 -64 609 -571 296 -295 547 -543 559 -550 17 -11 80 -15 299 -15 392 -2 361 -37 365 410 3 365 0 389 -57 427 -33 23 -39 23 -303 23 -177 0 -277 -4 -291 -11 -12 -6 -95 -84 -185 -172 l-162 -162 -113 113 -112 112 170 170 c178 178 221 211 320 250 57 22 75 24 326 28 170 2 293 0 340 -7 193 -30 343 -175 378 -365 14 -76 15 -704 1 -777 -15 -79 -67 -177 -124 -235 -58 -57 -156 -109 -235 -124 -70 -13 -552 -13 -622 0 -30 5 -85 26 -124 45 -64 31 -111 75 -580 545 -280 282 -532 529 -558 551 l-49 39 -278 0 -278 0 -30 -25 c-52 -43 -53 -53 -50 -424 l3 -343 37 -34 c22 -20 49 -35 65 -35 100 -6 532 5 548 13 11 6 92 82 180 169 l160 159 113 -113 112 -113 -183 -182 c-262 -260 -269 -262 -677 -262 -141 0 -281 5 -311 10 -170 32 -310 164 -355 335 -10 37 -14 143 -14 423 0 351 1 376 21 434 52 156 176 269 332 303 75 16 530 20 621 5z"/></g></svg><svg x="530" y="15" width="480" height="320" viewBox="0 -984 1726 1276"><g transform="scale(1,-1)"><g transform="translate(0,0)"><path d="M260 0Q211 0 180.5 30.5Q150 61 150 112V392H26V496H150V650H276V496H412V392H276V134Q276 104 304 104H400V0Z"/></g><g transform="translate(456,0)"><path d="M70 0V700H196V0Z"/></g><g transform="translate(722,0)"><path d="M260 0Q211 0 180.5 30.5Q150 61 150 112V392H26V496H150V650H276V496H412V392H276V134Q276 104 304 104H400V0Z"/></g><g transform="translate(1178,0)"><path d="M174 0 16 496H150L265 92H283L398 496H532L374 0Z"/></g></g></svg></svg>
-    <span class="hdl">debug viewer</span>
-  </div>
+` + pageNav("debug viewer") + `
 
   <div class="inner">
   <div class="vw">
@@ -768,41 +748,56 @@ function initPlayer(src){
   var ov=document.getElementById('ov');
   var std=document.getElementById('std');
 
+  // Build stream section once with stable elements — values updated in-place
+  function buildStreamUI(){
+    std.innerHTML='';
+    kv(std,'status','connecting',false);
+    if(inf.stream_url) kv(std,'url',inf.stream_url,true);
+    kv(std,'content-type','application/vnd.apple.mpegurl',false);
+    kv(std,'segments','-',false);
+    kv(std,'target duration','-',false);
+    kv(std,'media sequence','-',false);
+    kv(std,'bitrate','-',false);
+    kv(std,'buffer','-',false);
+    kv(std,'resolution','-',false);
+    // Tag value spans for in-place updates
+    var spans=std.querySelectorAll('.di');
+    spans.forEach(function(di){
+      var lbl=di.querySelector('span');
+      var val=di.querySelectorAll('span')[1]||di.querySelector('.uri');
+      if(!lbl||!val) return;
+      var k=lbl.textContent.trim();
+      if(k==='status') val.id='sv_st';
+      else if(k==='segments') val.id='sv_sg';
+      else if(k==='target duration') val.id='sv_td';
+      else if(k==='media sequence') val.id='sv_ms';
+      else if(k==='bitrate') val.id='sv_br';
+      else if(k==='buffer') val.id='sv_bu';
+      else if(k==='resolution') val.id='sv_re';
+    });
+  }
+  buildStreamUI();
+
   if(typeof Hls!=='undefined'&&Hls.isSupported()){
     var hls=new Hls({liveSyncDurationCount:3,liveMaxLatencyDurationCount:6});
     hlsInst=hls;
     hls.loadSource(src);
     hls.attachMedia(video);
 
-    hls.on(Hls.Events.MANIFEST_PARSED,function(e,data){
+    hls.on(Hls.Events.MANIFEST_PARSED,function(){
       video.play().catch(function(){});
       ov.classList.add('h');
-      // Update stream status
-      std.innerHTML='';
-      kv(std,'status','\u2713 live',false);
-      if(inf.stream_url) kv(std,'url',inf.stream_url,true);
-      kv(std,'content-type','application/vnd.apple.mpegurl',false);
-      kv(std,'segments',String(data.levels?data.levels.length:'-'),false);
+      var e=document.getElementById('sv_st');
+      if(e) e.textContent='\u2713 live';
     });
 
     hls.on(Hls.Events.LEVEL_LOADED,function(e,data){
       var det=data.details;
       if(!det) return;
-      // Update manifest-derived fields
-      var segs=det.fragments?det.fragments.length:0;
-      var td=det.targetduration||'';
-      var ms=det.startSN||'';
-      var el=std.querySelector('[data-field="segments"]');
-      if(el) el.textContent=String(segs);
-      else kv(std,'segments',String(segs),false);
-      // Re-render stream section with latest info
-      std.innerHTML='';
-      kv(std,'status','\u2713 live',false);
-      if(inf.stream_url) kv(std,'url',inf.stream_url,true);
-      kv(std,'content-type','application/vnd.apple.mpegurl',false);
-      kv(std,'segments',String(segs),false);
-      if(td) kv(std,'target duration',td+'s',false);
-      if(ms!==undefined&&ms!=='') kv(std,'media sequence',String(ms),false);
+      var el;
+      el=document.getElementById('sv_sg');if(el) el.textContent=String(det.fragments?det.fragments.length:0);
+      el=document.getElementById('sv_td');if(el) el.textContent=det.targetduration?det.targetduration+'s':'-';
+      el=document.getElementById('sv_ms');if(el) el.textContent=(det.startSN!==undefined)?String(det.startSN):'-';
     });
 
     hls.on(Hls.Events.FRAG_LOADED,function(e,data){
@@ -810,36 +805,23 @@ function initPlayer(src){
       if(f&&f.stats){
         var bytes=f.stats.loaded||f.stats.total||0;
         if(bytes>0&&f.duration>0){
-          var br=((bytes*8/f.duration)/1e6).toFixed(1)+' Mbps';
-          var el=std.querySelector('[data-br]');
-          if(el){el.textContent=br}
-          else{var bd=document.createElement('div');bd.className='dr';
-          bd.innerHTML='<div class="di"><span>bitrate </span><span data-br>'+esc(br)+'</span></div>';
-          std.appendChild(bd)}
+          var el=document.getElementById('sv_br');
+          if(el) el.textContent=((bytes*8/f.duration)/1e6).toFixed(1)+' Mbps';
         }
       }
     });
 
     hls.on(Hls.Events.ERROR,function(e,data){
-      if(data.fatal){std.innerHTML='';kv(std,'status','\u2717 error: '+data.type,false)}
+      if(data.fatal){var el=document.getElementById('sv_st');if(el) el.textContent='\u2717 error: '+data.type}
     });
 
     setInterval(function(){
-      var bel=std.querySelector('[data-buf]');
       if(video.buffered.length>0){
         var b=(video.buffered.end(video.buffered.length-1)-video.currentTime).toFixed(1)+'s';
-        if(bel){bel.textContent=b}
-        else{var bd=document.createElement('div');bd.className='dr';
-        bd.innerHTML='<div class="di"><span>buffer </span><span data-buf>'+esc(b)+'</span></div>';
-        std.appendChild(bd)}
+        var el=document.getElementById('sv_bu');if(el) el.textContent=b;
       }
-      var rel=std.querySelector('[data-res]');
       if(video.videoWidth>0){
-        var r=video.videoWidth+'x'+video.videoHeight;
-        if(rel){rel.textContent=r}
-        else{var rd=document.createElement('div');rd.className='dr';
-        rd.innerHTML='<div class="di"><span>resolution </span><span data-res>'+esc(r)+'</span></div>';
-        std.appendChild(rd)}
+        var el=document.getElementById('sv_re');if(el) el.textContent=video.videoWidth+'x'+video.videoHeight;
       }
     },1000);
 
@@ -848,11 +830,10 @@ function initPlayer(src){
     video.addEventListener('loadedmetadata',function(){
       video.play().catch(function(){});
       ov.classList.add('h');
-      std.innerHTML='';kv(std,'status','\u2713 live',false);
-      if(inf.stream_url) kv(std,'url',inf.stream_url,true);
+      var el=document.getElementById('sv_st');if(el) el.textContent='\u2713 live';
     });
   } else {
-    std.innerHTML='';kv(std,'status','\u2717 HLS not supported',false);
+    var el=document.getElementById('sv_st');if(el) el.textContent='\u2717 HLS not supported';
   }
 }
 
