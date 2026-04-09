@@ -315,8 +315,9 @@ func TestBridgePeersEndpoint_WithPeerReg(t *testing.T) {
 	var resp map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	peers := resp["peers"].([]interface{})
-	if len(peers) != 2 {
-		t.Fatalf("expected 2 peers (own + external), got %d", len(peers))
+	// Own channels no longer appear in peers — only external peers
+	if len(peers) != 1 {
+		t.Fatalf("expected 1 peer (external only, own excluded), got %d", len(peers))
 	}
 }
 
@@ -389,9 +390,9 @@ func TestRelayPeersEndpoint_WithExternalPeers(t *testing.T) {
 	var resp map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	peers := resp["peers"].([]interface{})
-	// Should have own + external (not gossip)
-	if len(peers) != 2 {
-		t.Fatalf("expected 2 peers (own + external), got %d", len(peers))
+	// Own relayed channels excluded — only external peers
+	if len(peers) != 1 {
+		t.Fatalf("expected 1 peer (external only, own excluded), got %d", len(peers))
 	}
 }
 

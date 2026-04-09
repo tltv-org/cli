@@ -425,6 +425,17 @@ func cmdRelay(args []string) {
 				return info
 			})
 		}
+	} else {
+		statusPageRoutes(server.mux, func() *NodeInfo {
+			channels := registry.ListChannels()
+			var relaying []ChannelRef
+			for _, ch := range channels {
+				if ch.Name != "(migrated)" {
+					relaying = append(relaying, ChannelRef{ID: ch.ChannelID, Name: ch.Name})
+				}
+			}
+			return &NodeInfo{Protocol: "tltv", Versions: []int{1}, Relaying: relaying}
+		})
 	}
 
 	// Set up TLS (if enabled).

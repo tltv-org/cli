@@ -46,7 +46,40 @@ tltv viewer demo.timelooptv.org
 
 ## Commands
 
-### Identity & Keys
+### Network
+
+| Command | Description |
+|---|---|
+| `info <target>` | Show all info about a target (`--watch` for auto-refresh) |
+| `channel <target>` | Fetch and verify channel metadata |
+| `stream <target>` | Check stream status and manifest info (`--url` for bare URL) |
+| `guide <target>` | Fetch and verify channel guide (`--xmltv` for XML output) |
+| `node <host>` | Query node identity from `/.well-known/tltv` |
+| `peers <host>` | List peers from a node |
+
+### Discovery
+
+| Command | Description |
+|---|---|
+| `resolve <uri>` | End-to-end URI resolution with migration chain following |
+| `crawl <host>` | BFS-crawl the gossip network (`--depth` for max depth) |
+
+### Servers
+
+| Command | Description |
+|---|---|
+| `server test` | SMPTE color bar test signal generator ([docs](docs/server.md)) |
+| `bridge` | Bridge origin server ([docs](docs/bridge.md)) |
+| `relay` | Caching relay with signature verification ([docs](docs/relay.md)) |
+
+### Clients
+
+| Command | Description |
+|---|---|
+| `viewer <target>` | Local web viewer with HLS.js player |
+| `receiver <target>` | Headless HLS consumer (`--monitor`, `--record`, `--pipe`) |
+
+### Identity
 
 | Command | Description |
 |---|---|
@@ -61,6 +94,7 @@ tltv viewer demo.timelooptv.org
 | `sign` | Sign a JSON document with Ed25519 (`-k`, `--auto-seq`) |
 | `verify` | Verify a signed document's signature and protocol version |
 | `template` | Output a JSON template (`metadata`, `guide`, `migration`) |
+| `migrate` | Create a signed key migration document |
 
 ### URIs
 
@@ -69,37 +103,14 @@ tltv viewer demo.timelooptv.org
 | `parse <uri>` | Parse a `tltv://` URI into components |
 | `format <id>` | Build a `tltv://` URI from channel ID and hints |
 
-### Network
+### Tools
 
 | Command | Description |
 |---|---|
-| `resolve <uri>` | End-to-end URI resolution with migration chain following |
-| `node <host>` | Fetch node info from `/.well-known/tltv` |
-| `fetch <target>` | Fetch and verify channel metadata |
-| `guide <target>` | Fetch and verify channel guide (`--xmltv` for XML output) |
-| `peers <host>` | Fetch peer exchange list |
-| `stream <target>` | Check stream availability (`--url` for bare URL output) |
-| `crawl <host>` | BFS-crawl the gossip network (`--depth` for max depth) |
-
-### Daemons
-
-| Command | Description |
-|---|---|
-| `server test` | SMPTE color bar test signal generator ([docs](docs/server.md)) |
-| `bridge` | Origin server for external streams ([docs](docs/bridge.md)) |
-| `relay` | Caching relay with signature verification ([docs](docs/relay.md)) |
-| `receiver` | Headless HLS consumer (`--monitor`, `--record`, `--pipe`) |
-| `viewer` | Local web viewer with HLS.js player |
-| `loadtest` | Multi-receiver load simulator |
-
-### Operations
-
-| Command | Description |
-|---|---|
-| `migrate` | Create a signed key migration document |
+| `loadtest <target>` | Multi-receiver load simulator |
+| `version` | Version, protocol version, platform info |
 | `update` | Self-update to latest GitHub release |
 | `completion` | Shell completions (`--install` for auto-install) |
-| `version` | Version, protocol version, platform info |
 
 ## Global Flags
 
@@ -110,7 +121,7 @@ tltv viewer demo.timelooptv.org
 | `--insecure` / `-I` | HTTP transport, skip TLS verification |
 | `--local` / `-L` | Allow local/private address hints in `resolve` and `crawl` |
 
-Global flags work before or after the subcommand: `tltv --json fetch ...` and `tltv fetch --json ...` are equivalent.
+Global flags work before or after the subcommand: `tltv --json channel ...` and `tltv channel --json ...` are equivalent.
 
 ## Documentation
 

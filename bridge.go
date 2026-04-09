@@ -386,6 +386,17 @@ func cmdBridge(args []string) {
 				return info
 			})
 		}
+	} else {
+		statusPageRoutes(server.mux, func() *NodeInfo {
+			channels := registry.ListChannels()
+			var chs []ChannelRef
+			for _, ch := range channels {
+				if !ch.IsPrivate() {
+					chs = append(chs, ChannelRef{ID: ch.ChannelID, Name: ch.Name})
+				}
+			}
+			return &NodeInfo{Protocol: "tltv", Versions: []int{1}, Channels: chs}
+		})
 	}
 
 	// Set up TLS (if enabled).

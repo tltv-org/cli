@@ -784,14 +784,9 @@ func TestBridgePeers_WithConfigured(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 
 	peers, _ := resp["peers"].([]interface{})
-	if len(peers) != 1 {
-		t.Fatalf("expected 1 peer, got %d", len(peers))
-	}
-
-	peer := peers[0].(map[string]interface{})
-	hints, _ := peer["hints"].([]interface{})
-	if len(hints) != 1 || hints[0] != "bridge.example.com:8000" {
-		t.Errorf("hints = %v", hints)
+	// Own channels no longer appear in peers (visible via /.well-known/tltv instead)
+	if len(peers) != 0 {
+		t.Fatalf("expected 0 peers (own channels excluded), got %d", len(peers))
 	}
 }
 

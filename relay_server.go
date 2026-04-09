@@ -85,18 +85,18 @@ func (s *relayServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePeers serves GET /tltv/v1/peers with full gossip exchange.
-// Returns relayed channels + gossip (if --gossip) + verified external peers (--peers).
+// Own relayed channels are visible in /.well-known/tltv; peers endpoint
+// shows the network around this node — gossip (if --gossip) + external peers (--peers).
 func (s *relayServer) handlePeers(w http.ResponseWriter, r *http.Request) {
-	// Relayed channels + gossip (from relay registry)
-	own := s.registry.ListPeers()
-
-	// External verified peers from --peers
+	// External: gossip-discovered peers + verified --peers
+	// Own relayed channels are visible in /.well-known/tltv, not here.
 	var external []peerEntry
+	external = append(external, s.registry.ListGossipPeers()...)
 	if s.peerReg != nil {
-		external = s.peerReg.ListPeers()
+		external = append(external, s.peerReg.ListPeers()...)
 	}
 
-	peers := buildPeersResponse(own, external)
+	peers := buildPeersResponse(nil, external)
 	w.Header().Set("Cache-Control", "max-age=300")
 	writeJSON(w, map[string]interface{}{
 		"peers": peers,

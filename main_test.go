@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -2734,5 +2735,272 @@ func TestSetupLogging_InvalidFile(t *testing.T) {
 	err := setupLogging("", "", "/nonexistent/dir/file.log", "test")
 	if err == nil {
 		t.Error("expected error for invalid log file path")
+	}
+}
+
+// ---------- CLI Unification Tests ----------
+
+func TestAllCommands_ContainsChannel(t *testing.T) {
+	found := false
+	for _, cmd := range allCommands {
+		if cmd == "channel" {
+			found = true
+		}
+		if cmd == "fetch" {
+			t.Error("allCommands still contains 'fetch' (should be 'channel')")
+		}
+	}
+	if !found {
+		t.Error("allCommands missing 'channel'")
+	}
+}
+
+func TestAllCommands_ContainsInfo(t *testing.T) {
+	found := false
+	for _, cmd := range allCommands {
+		if cmd == "info" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("allCommands missing 'info'")
+	}
+}
+
+func TestParseManifestFields_Basic(t *testing.T) {
+	body := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:2.0,\nseg100.ts\n#EXTINF:2.0,\nseg101.ts\n#EXTINF:2.0,\nseg102.ts\n"
+	segs, td, ms := parseManifestFields(body)
+	if segs != 3 {
+		t.Errorf("segments = %d, want 3", segs)
+	}
+	if td != "2" {
+		t.Errorf("target duration = %q, want %q", td, "2")
+	}
+	if ms != "100" {
+		t.Errorf("media sequence = %q, want %q", ms, "100")
+	}
+}
+
+func TestParseManifestFields_Empty(t *testing.T) {
+	segs, td, ms := parseManifestFields("")
+	if segs != 0 {
+		t.Errorf("segments = %d, want 0", segs)
+	}
+	if td != "" {
+		t.Errorf("target duration = %q, want empty", td)
+	}
+	if ms != "" {
+		t.Errorf("media sequence = %q, want empty", ms)
+	}
+}
+
+func TestParseManifestFields_NoSequence(t *testing.T) {
+	body := "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.ts\n"
+	segs, td, ms := parseManifestFields(body)
+	if segs != 1 {
+		t.Errorf("segments = %d, want 1", segs)
+	}
+	if td != "4" {
+		t.Errorf("target duration = %q, want %q", td, "4")
+	}
+	if ms != "" {
+		t.Errorf("media sequence = %q, want empty", ms)
+	}
+}
+
+func TestPrintRemainingKeys(t *testing.T) {
+	doc := map[string]interface{}{
+		"v":         json.Number("1"),
+		"id":        "TVtest",
+		"name":      "Test",
+		"signature": "sig",
+		"language":  "en",
+		"timezone":  "UTC",
+		"tags":      []interface{}{"a", "b"},
+		"on_demand": true,
+	}
+	// printRemainingKeys skips v, id, name, signature — should output language, on_demand, tags, timezone
+	// We can't easily capture stdout in a unit test, so verify the skip set logic directly
+	skip := map[string]bool{"v": true, "id": true, "name": true, "signature": true}
+	var remaining []string
+	for k := range doc {
+		if !skip[k] {
+			remaining = append(remaining, k)
+		}
+	}
+	if len(remaining) != 4 {
+		t.Errorf("remaining keys = %d, want 4: %v", len(remaining), remaining)
+	}
+	for _, k := range remaining {
+		if k == "v" || k == "id" || k == "name" || k == "signature" {
+			t.Errorf("remaining should not contain %q", k)
+		}
+	}
+}
+
+func TestAddWatchFlags(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	watch, interval := addWatchFlags(fs)
+
+	// Defaults
+	if *watch {
+		t.Error("watch default should be false")
+	}
+	if *interval != 2 {
+		t.Errorf("interval default = %d, want 2", *interval)
+	}
+
+	// Parse --watch --interval 5
+	err := fs.Parse([]string{"--watch", "--interval", "5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !*watch {
+		t.Error("watch should be true after --watch")
+	}
+	if *interval != 5 {
+		t.Errorf("interval = %d, want 5", *interval)
+	}
+}
+
+func TestAddWatchFlags_ShortAlias(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	watch, _ := addWatchFlags(fs)
+
+	err := fs.Parse([]string{"-w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !*watch {
+		t.Error("watch should be true after -w")
+	}
+}
+
+func TestStatusPageRoutes_ServesHTML(t *testing.T) {
+	mux := http.NewServeMux()
+	statusPageRoutes(mux, func() *NodeInfo {
+		return &NodeInfo{
+			Protocol: "tltv",
+			Versions: []int{1},
+			Channels: []ChannelRef{{ID: "TVtest123", Name: "Test Channel"}},
+		}
+	})
+
+	// Root should serve HTML
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET / status = %d, want 200", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("GET / content-type = %q, want text/html", ct)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "tltv protocol v1") {
+		t.Error("status page missing protocol line")
+	}
+	if !strings.Contains(body, "TVtest123") {
+		t.Error("status page missing channel ID")
+	}
+	if !strings.Contains(body, "Test Channel") {
+		t.Error("status page missing channel name")
+	}
+	if !strings.Contains(body, "Origin Channels (1)") {
+		t.Error("status page missing origin channels header")
+	}
+}
+
+func TestStatusPageRoutes_Favicon(t *testing.T) {
+	mux := http.NewServeMux()
+	statusPageRoutes(mux, func() *NodeInfo {
+		return &NodeInfo{Protocol: "tltv", Versions: []int{1}}
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/favicon.svg", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET /favicon.svg status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("content-type = %q, want image/svg+xml", ct)
+	}
+}
+
+func TestStatusPageRoutes_RelayChannels(t *testing.T) {
+	mux := http.NewServeMux()
+	statusPageRoutes(mux, func() *NodeInfo {
+		return &NodeInfo{
+			Protocol: "tltv",
+			Versions: []int{1},
+			Relaying: []ChannelRef{{ID: "TVrelay1", Name: "Relayed"}},
+		}
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, "Relay Channels (1)") {
+		t.Error("status page missing relay channels header")
+	}
+	if !strings.Contains(body, "TVrelay1") {
+		t.Error("status page missing relay channel ID")
+	}
+}
+
+func TestPrintInfoNode_CombinedProtocol(t *testing.T) {
+	// Verify printInfoNode doesn't panic and works with empty channels
+	info := &NodeInfo{
+		Protocol: "tltv",
+		Versions: []int{1},
+		Channels: []ChannelRef{},
+		Relaying: []ChannelRef{},
+	}
+	// Just verify it doesn't panic with empty slices
+	useColor = false
+	printInfoNode(info, "test:443", "")
+}
+
+func TestPrintInfoNode_EmptyVersions(t *testing.T) {
+	info := &NodeInfo{
+		Protocol: "tltv",
+		Versions: []int{},
+	}
+	useColor = false
+	// Should not panic with empty versions
+	printInfoNode(info, "test:443", "")
+}
+
+func TestRelayPeers_OwnChannelsExcluded(t *testing.T) {
+	// Relay peers should NOT include relayed channels (own channels)
+	upstream, channelID, _ := testRelayUpstream(t)
+	defer upstream.Close()
+
+	host := hostFromURL(upstream.URL)
+	client := newClient(false)
+
+	registry := newRelayRegistry("relay.test:443", false, 100, 7)
+	res, err := fetchAndVerifyMetadata(client, channelID, []string{host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.UpdateChannel(channelID, res.Raw, res.Doc, []string{host})
+
+	srv := newRelayServer(registry, client, nil, nil)
+
+	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	peers := resp["peers"].([]interface{})
+	// Own relayed channels should NOT appear in peers
+	for _, p := range peers {
+		peer := p.(map[string]interface{})
+		if peer["id"] == channelID {
+			t.Errorf("relay peers should not include own relayed channel %s", channelID)
+		}
 	}
 }

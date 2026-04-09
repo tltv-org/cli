@@ -1,9 +1,11 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // ANSI color codes
@@ -153,5 +155,39 @@ func printTable(headers []string, rows [][]string) {
 			}
 		}
 		fmt.Println()
+	}
+}
+
+// addWatchFlags registers --watch/-w and --interval flags on a FlagSet.
+func addWatchFlags(fs *flag.FlagSet) (*bool, *int) {
+	watch := fs.Bool("watch", false, "auto-refresh output")
+	fs.BoolVar(watch, "w", false, "alias for --watch")
+	interval := fs.Int("interval", 2, "refresh interval in seconds")
+	return watch, interval
+}
+
+// watchLoop clears the screen and calls displayFn repeatedly until interrupted.
+// If watch is false, calls displayFn once and returns.
+func watchLoop(watch bool, intervalSec int, displayFn func()) {
+	if !watch {
+		displayFn()
+		return
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signalNotify(sigCh)
+
+	for {
+		// Clear screen and move cursor to top-left
+		fmt.Print("\033[2J\033[H")
+		displayFn()
+		fmt.Printf("\n%s", c(cDim, fmt.Sprintf("  refreshing every %ds — Ctrl-C to exit", intervalSec)))
+
+		select {
+		case <-sigCh:
+			fmt.Println()
+			return
+		case <-time.After(time.Duration(intervalSec) * time.Second):
+		}
 	}
 }

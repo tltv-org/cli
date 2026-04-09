@@ -124,6 +124,34 @@ func (r *relayRegistry) ListPeers() []peerEntry {
 	return result
 }
 
+// ListGossipPeers returns only gossip-discovered peers, excluding relayed channels.
+// Used by the peers endpoint since own relayed channels are visible via /.well-known/tltv.
+func (r *relayRegistry) ListGossipPeers() []peerEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if !r.gossipEnabled {
+		return nil
+	}
+
+	cutoff := time.Now().Add(-time.Duration(r.staleDays) * 24 * time.Hour)
+	var result []peerEntry
+	for _, p := range r.peers {
+		if _, relaying := r.channels[p.ChannelID]; relaying {
+			continue
+		}
+		if p.LastSeen.Before(cutoff) {
+			continue
+		}
+		result = append(result, *p)
+	}
+
+	if len(result) > r.maxPeers {
+		result = result[:r.maxPeers]
+	}
+	return result
+}
+
 // ---------- Write Methods (Lock) ----------
 
 // UpdateChannel adds or updates a relayed channel with verified metadata.

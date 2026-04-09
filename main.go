@@ -59,44 +59,47 @@ var (
 
 func usage() {
 	w := os.Stderr
-	fmt.Fprintf(w, "tltv - TLTV Federation Protocol CLI (%s, protocol v1)\n\n", version)
+	fmt.Fprintf(w, "tltv — protocol cli tool (%s, protocol v1)\n\n", version)
 	fmt.Fprintf(w, "Usage: tltv [flags] <command> [options]\n\n")
 	fmt.Fprintf(w, "Global Flags:\n")
 	fmt.Fprintf(w, "  -j, --json        Machine-readable JSON output\n")
 	fmt.Fprintf(w, "  -C, --no-color    Disable colored output\n")
-	fmt.Fprintf(w, "  -I, --insecure    Use HTTP transport (and skip TLS verification)\n")
+	fmt.Fprintf(w, "  -I, --insecure    Use HTTP transport (skip TLS verification)\n")
 	fmt.Fprintf(w, "  -L, --local       Allow local/private address hints\n\n")
-	fmt.Fprintf(w, "Identity & Keys:\n")
+	fmt.Fprintf(w, "Network:\n")
+	fmt.Fprintf(w, "  info <target>          Show all info about a target\n")
+	fmt.Fprintf(w, "  channel <target>       Fetch and verify channel metadata\n")
+	fmt.Fprintf(w, "  stream <target>        Check stream status and manifest info\n")
+	fmt.Fprintf(w, "  guide <target>         Fetch and verify channel guide\n")
+	fmt.Fprintf(w, "  node <host>            Query node identity\n")
+	fmt.Fprintf(w, "  peers <host>           List peers from a node\n\n")
+	fmt.Fprintf(w, "Discovery:\n")
+	fmt.Fprintf(w, "  resolve <uri>          Resolve a tltv:// URI (follow migration chains)\n")
+	fmt.Fprintf(w, "  crawl <host>           Crawl the peer gossip network\n\n")
+	fmt.Fprintf(w, "Servers:\n")
+	fmt.Fprintf(w, "  server test            SMPTE test signal generator\n")
+	fmt.Fprintf(w, "  bridge                 Bridge origin server\n")
+	fmt.Fprintf(w, "  relay                  Relay node\n\n")
+	fmt.Fprintf(w, "Clients:\n")
+	fmt.Fprintf(w, "  viewer <target>        Open a local web viewer\n")
+	fmt.Fprintf(w, "  receiver <target>      Consume an HLS stream\n\n")
+	fmt.Fprintf(w, "Identity:\n")
 	fmt.Fprintf(w, "  keygen                 Generate a new channel keypair\n")
 	fmt.Fprintf(w, "  vanity <pattern>       Mine vanity channel IDs\n")
 	fmt.Fprintf(w, "  inspect <channel-id>   Inspect a channel ID\n\n")
 	fmt.Fprintf(w, "Documents:\n")
 	fmt.Fprintf(w, "  sign                   Sign a JSON document\n")
 	fmt.Fprintf(w, "  verify [file]          Verify a signed document\n")
-	fmt.Fprintf(w, "  template <type>        Output a document template\n\n")
+	fmt.Fprintf(w, "  template <type>        Output a document template\n")
+	fmt.Fprintf(w, "  migrate                Create a signed migration document\n\n")
 	fmt.Fprintf(w, "URIs:\n")
-	fmt.Fprintf(w, "  parse <uri>            Parse a tltv:// URI\n")
-	fmt.Fprintf(w, "  format <channel-id>    Build a tltv:// URI\n\n")
-	fmt.Fprintf(w, "Network:\n")
-	fmt.Fprintf(w, "  resolve <uri>          Resolve a tltv:// URI end-to-end\n")
-	fmt.Fprintf(w, "  node <host>            Probe a TLTV node\n")
-	fmt.Fprintf(w, "  fetch <uri|id@host>    Fetch channel metadata\n")
-	fmt.Fprintf(w, "  guide <uri|id@host>    Fetch channel guide\n")
-	fmt.Fprintf(w, "  peers <host>           List peers from a node\n")
-	fmt.Fprintf(w, "  stream <uri|id@host>   Check stream availability\n")
-	fmt.Fprintf(w, "  crawl <host>           Crawl the gossip network\n\n")
-	fmt.Fprintf(w, "Server:\n")
-	fmt.Fprintf(w, "  server test            Start a test signal generator (pure Go video)\n")
-	fmt.Fprintf(w, "  bridge                 Start a bridge origin server\n")
-	fmt.Fprintf(w, "  relay                  Start a relay node\n")
-	fmt.Fprintf(w, "  receiver <target>      Connect to a channel and consume the stream\n")
-	fmt.Fprintf(w, "  viewer <target>        Open a local web viewer for a channel\n")
-	fmt.Fprintf(w, "  loadtest <target>      Load test with multiple concurrent receivers\n\n")
-	fmt.Fprintf(w, "Operations:\n")
-	fmt.Fprintf(w, "  migrate                Create a migration document\n")
+	fmt.Fprintf(w, "  parse <uri>            Parse a tltv:// URI into components\n")
+	fmt.Fprintf(w, "  format <channel-id>    Build a tltv:// URI from components\n\n")
+	fmt.Fprintf(w, "Tools:\n")
+	fmt.Fprintf(w, "  loadtest <target>      Load test with concurrent receivers\n")
+	fmt.Fprintf(w, "  version                Show version\n")
 	fmt.Fprintf(w, "  update                 Update to the latest release\n")
-	fmt.Fprintf(w, "  completion <shell>     Generate shell completions (bash, zsh, fish)\n")
-	fmt.Fprintf(w, "  version                Show version\n\n")
+	fmt.Fprintf(w, "  completion <shell>     Generate shell completions\n\n")
 	fmt.Fprintf(w, "Use \"tltv <command> -h\" for help with a specific command.\n")
 }
 
@@ -170,12 +173,14 @@ dispatch:
 		cmdParse(cmdArgs)
 	case "format":
 		cmdFormat(cmdArgs)
+	case "info":
+		cmdInfo(cmdArgs)
 	case "resolve":
 		cmdResolve(cmdArgs)
 	case "node":
 		cmdNode(cmdArgs)
-	case "fetch":
-		cmdFetch(cmdArgs)
+	case "channel":
+		cmdChannel(cmdArgs)
 	case "guide":
 		cmdGuide(cmdArgs)
 	case "peers":
@@ -884,12 +889,14 @@ func cmdVersion() {
 // ---------- completion ----------
 
 var allCommands = []string{
+	"info", "channel", "stream", "guide", "node", "peers",
+	"resolve", "crawl",
+	"server", "bridge", "relay",
+	"viewer", "receiver",
 	"keygen", "vanity", "inspect",
-	"sign", "verify", "template",
+	"sign", "verify", "template", "migrate",
 	"parse", "format",
-	"resolve", "node", "fetch", "guide", "peers", "stream", "crawl",
-	"server", "bridge", "relay", "receiver", "viewer", "loadtest",
-	"migrate", "update", "completion", "version",
+	"loadtest", "version", "update", "completion",
 }
 
 func cmdCompletion(args []string) {
@@ -1044,17 +1051,20 @@ func completionFish() string {
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -s L -l local -d 'Allow local addresses'\n")
 
 	descriptions := map[string]string{
+		"info": "Show all channel info", "channel": "Fetch channel metadata",
+		"stream": "Check stream status", "guide": "Fetch channel guide",
+		"node": "Query node identity", "peers": "List peers from a node",
+		"resolve": "Resolve URI end-to-end", "crawl": "Crawl the gossip network",
+		"server": "SMPTE test signal generator", "bridge": "Bridge origin server", "relay": "Relay node",
+		"viewer": "Open a local web viewer", "receiver": "Consume an HLS stream",
 		"keygen": "Generate channel keypair", "vanity": "Mine vanity IDs",
 		"inspect": "Inspect channel ID", "sign": "Sign document",
 		"verify": "Verify document", "template": "Document template",
+		"migrate": "Create migration document",
 		"parse": "Parse tltv:// URI", "format": "Build tltv:// URI",
-		"resolve": "Resolve URI end-to-end", "node": "Probe a node",
-		"fetch": "Fetch metadata", "guide": "Fetch guide",
-		"peers": "List peers", "stream": "Check stream",
-		"crawl": "Crawl network",
-		"server": "Content server", "bridge": "Bridge origin server", "relay": "Relay node",
-		"migrate": "Create migration",
-		"completion": "Shell completions", "version": "Show version",
+		"loadtest": "Load test with receivers",
+		"version": "Show version", "update": "Update to latest release",
+		"completion": "Shell completions",
 	}
 	for _, cmd := range allCommands {
 		desc := descriptions[cmd]

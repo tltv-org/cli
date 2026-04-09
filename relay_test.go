@@ -814,7 +814,9 @@ func TestRelayMergePeers_Staleness(t *testing.T) {
 // ---------- Relay Server Peers ----------
 
 func TestRelayServerPeers(t *testing.T) {
-	r := newRelayRegistry("relay.example.com:443", false, 100, 7)
+	// Enable gossip so gossip-discovered peers appear in the response.
+	// Own relayed channels are excluded (visible via /.well-known/tltv).
+	r := newRelayRegistry("relay.example.com:443", true, 100, 7)
 	r.UpdateChannel("TVtest1", []byte(`{"name":"Test"}`), map[string]interface{}{"name": "Test"}, []string{"origin.com:443"})
 	r.MergePeers([]peerEntry{
 		{ChannelID: "TVpeer1", Name: "Peer Channel", Hints: []string{"peer.com:443"}, LastSeen: time.Now()},
@@ -833,8 +835,9 @@ func TestRelayServerPeers(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 
 	peers := resp["peers"].([]interface{})
-	if len(peers) < 1 {
-		t.Error("should have at least 1 peer")
+	// Own relayed channel (TVtest1) excluded; gossip peer (TVpeer1) included
+	if len(peers) != 1 {
+		t.Errorf("expected 1 gossip peer, got %d", len(peers))
 	}
 
 	// Check Cache-Control header

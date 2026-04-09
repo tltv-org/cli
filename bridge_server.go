@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"path"
 	"strings"
-	"time"
 )
 
 // ---------- Server ----------
@@ -85,26 +84,9 @@ func (s *bridgeServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePeers serves GET /tltv/v1/peers
-// Returns originated public channels + verified external peers from --peers.
+// Own originated channels are visible in /.well-known/tltv; peers endpoint
+// shows the network around this node — external peers (--peers) + gossip.
 func (s *bridgeServer) handlePeers(w http.ResponseWriter, r *http.Request) {
-	// Own originated channels (public only, with hostname as hint)
-	var own []peerEntry
-	hostname := s.registry.hostname
-	if hostname != "" {
-		now := time.Now()
-		for _, ch := range s.registry.ListChannels() {
-			if ch.IsPrivate() {
-				continue
-			}
-			own = append(own, peerEntry{
-				ChannelID: ch.ChannelID,
-				Name:      ch.Name,
-				Hints:     []string{hostname},
-				LastSeen:  now,
-			})
-		}
-	}
-
 	// External verified peers + gossip-discovered peers
 	var external []peerEntry
 	if s.peerReg != nil {
@@ -114,7 +96,7 @@ func (s *bridgeServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 		external = append(external, s.gossipReg.ListPeers()...)
 	}
 
-	peers := buildPeersResponse(own, external)
+	peers := buildPeersResponse(nil, external)
 	w.Header().Set("Cache-Control", "max-age=300")
 	writeJSON(w, map[string]interface{}{
 		"peers": peers,

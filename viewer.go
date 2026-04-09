@@ -191,6 +191,86 @@ func viewerEmbedRoutes(mux *http.ServeMux, infoFn func() map[string]interface{})
 	})
 }
 
+// statusPageRoutes registers the static status page at GET /{$} when --viewer
+// is NOT enabled. Shows nav bar + node section (protocol, channel list).
+// No video, no JS. Same Phosphor Dark design.
+func statusPageRoutes(mux *http.ServeMux, nodeInfoFn func() *NodeInfo) {
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		info := nodeInfoFn()
+		var proto string
+		if info != nil && len(info.Versions) > 0 {
+			proto = fmt.Sprintf("%s protocol v%d", info.Protocol, info.Versions[0])
+		}
+
+		var sb strings.Builder
+		sb.WriteString(statusPageHead)
+
+		if info != nil {
+			sb.WriteString(`<div class="dr"><div class="di"><span>protocol </span><span class="uri">`)
+			sb.WriteString(proto)
+			sb.WriteString(`</span></div></div>`)
+
+			if len(info.Channels) > 0 {
+				sb.WriteString(fmt.Sprintf(`<div class="ge" style="color:#666;margin-top:10px">Origin Channels (%d)</div>`, len(info.Channels)))
+				for _, ch := range info.Channels {
+					sb.WriteString(`<div class="ge"><span class="uri">`)
+					sb.WriteString(ch.ID)
+					sb.WriteString(`</span>  <span class="gt">`)
+					sb.WriteString(ch.Name)
+					sb.WriteString(`</span></div>`)
+				}
+			}
+			if len(info.Relaying) > 0 {
+				sb.WriteString(fmt.Sprintf(`<div class="ge" style="color:#666;margin-top:10px">Relay Channels (%d)</div>`, len(info.Relaying)))
+				for _, ch := range info.Relaying {
+					sb.WriteString(`<div class="ge"><span class="uri">`)
+					sb.WriteString(ch.ID)
+					sb.WriteString(`</span>  <span class="gt">`)
+					sb.WriteString(ch.Name)
+					sb.WriteString(`</span></div>`)
+				}
+			}
+		}
+
+		sb.WriteString(statusPageTail)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(sb.String()))
+	})
+
+	mux.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "max-age=86400")
+		w.Write([]byte(viewerFavicon))
+	})
+}
+
+const statusPageHead = `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tltv</title><link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;color:#fff;font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;font-size:14px;line-height:1.6}
+.c{max-width:72rem;width:100%;margin:0 auto}
+.hd{display:flex;align-items:center;gap:1.5rem;padding:1rem 2rem;border-bottom:1px solid #333;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}
+.hd svg{height:24px;width:auto;flex-shrink:0}
+.inner{max-width:calc(1100px + 2rem);width:100%;margin:0 auto;padding:1.25rem 1rem 2rem}
+.sl{font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:4px}
+.dr{display:flex;flex-wrap:wrap;gap:16px;padding:2px 0}
+.di span:first-child{color:#666}
+.uri{font-size:.8rem;color:#999;word-break:break-all}
+.ge{font-size:.8rem;color:#999;padding:2px 0}
+.gt{color:#666}
+</style>
+</head><body><div class="c">
+<div class="hd">` + viewerNavSVG + `</div>
+<div class="inner"><div class="sl" style="margin-top:8px">node</div><div class="db">`
+
+const statusPageTail = `</div></div></div></body></html>`
+
+// viewerNavSVG is the TLTV logo SVG used in the nav bar (shared between viewer and status page).
+const viewerNavSVG = `<svg viewBox="0 0 491 350" fill="#fff" height="24" aria-hidden="true"><g transform="translate(-0.177,349.812) scale(0.1,-0.1)" stroke="none"><path d="M2050 3493 c-881 -31 -1492 -102 -1671 -194 -95 -48 -171 -145 -214 -272 -98 -292 -154 -705 -162 -1192 -8 -497 27 -842 127 -1233 48 -187 74 -246 140 -316 96 -102 195 -137 505 -181 756 -105 1734 -133 2665 -75 330 21 800 78 959 117 195 47 311 159 370 358 52 179 98 442 128 735 24 242 24 784 0 1030 -40 397 -116 746 -191 874 -34 58 -117 133 -179 161 -243 111 -1187 198 -2092 193 -170 -1 -344 -3 -385 -5z m-246 -993 c33 -5 92 -25 132 -44 68 -32 101 -64 609 -571 296 -295 547 -543 559 -550 17 -11 80 -15 299 -15 392 -2 361 -37 365 410 3 365 0 389 -57 427 -33 23 -39 23 -303 23 -177 0 -277 -4 -291 -11 -12 -6 -95 -84 -185 -172 l-162 -162 -113 113 -112 112 170 170 c178 178 221 211 320 250 57 22 75 24 326 28 170 2 293 0 340 -7 193 -30 343 -175 378 -365 14 -76 15 -704 1 -777 -15 -79 -67 -177 -124 -235 -58 -57 -156 -109 -235 -124 -70 -13 -552 -13 -622 0 -30 5 -85 26 -124 45 -64 31 -111 75 -580 545 -280 282 -532 529 -558 551 l-49 39 -278 0 -278 0 -30 -25 c-52 -43 -53 -53 -50 -424 l3 -343 37 -34 c22 -20 49 -35 65 -35 100 -6 532 5 548 13 11 6 92 82 180 169 l160 159 113 -113 112 -113 -183 -182 c-262 -260 -269 -262 -677 -262 -141 0 -281 5 -311 10 -170 32 -310 164 -355 335 -10 37 -14 143 -14 423 0 351 1 376 21 434 52 156 176 269 332 303 75 16 530 20 621 5z"/></g></svg>`
+
 // viewerBuildInfo builds the /api/info JSON base from signed document bytes.
 // Callers add context-specific fields (stream_src, tltv_uri, etc.) to the result.
 func viewerBuildInfo(channelID, channelName string, metadataJSON, guideJSON []byte) map[string]interface{} {
@@ -532,32 +612,17 @@ a.uri:hover{color:#999}
     <span id="uri" class="uri"></span>
   </div>
 
-  <div class="sl" style="margin-top:12px">guide</div>
-  <div id="gd"></div>
+  <div class="sl" style="margin-top:12px">channel</div>
+  <div class="db" id="chd"></div>
   <hr>
 
   <div class="sl">stream</div>
-  <div class="db">
-    <div class="dr">
-      <div class="di"><span>status </span><span id="ds">connecting</span></div>
-      <div class="di"><span>segment </span><span id="dsg">-</span></div>
-      <div class="di"><span>bitrate </span><span id="dbw">-</span></div>
-    </div>
-    <div class="dr">
-      <div class="di"><span>buffer </span><span id="dbu">-</span></div>
-      <div class="di"><span>resolution </span><span id="dre">-</span></div>
-    </div>
-  </div>
+  <div class="db" id="std"></div>
   <hr>
 
-  <div class="sl">channel</div>
-  <div class="db">
-    <div class="dr">
-      <div class="di"><span>verified </span><span id="dvr" class="ok"></span></div>
-      <div class="di" id="dvia" style="display:none"><span>via </span><span id="dviat"></span></div>
-    </div>
-    <div id="chd"></div>
-  </div>
+  <div class="sl">guide</div>
+  <div class="db" id="gdd"></div>
+  <div id="gd"></div>
   <hr>
 
   <div class="sl">node</div>
@@ -572,105 +637,119 @@ a.uri:hover{color:#999}
 
 <script src="/hls.min.js"></script>
 <script>
-var inf={};
+var inf={},hlsInst=null;
 
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function kv(p,k,v,isUrl){
+  var vh=isUrl?'<a class="uri" href="'+esc(v)+'" target="_blank">'+esc(v)+'</a>':'<span class="uri">'+esc(v)+'</span>';
+  var d=document.createElement('div');d.className='dr';
+  d.innerHTML='<div class="di"><span>'+esc(k)+' </span>'+vh+'</div>';
+  p.appendChild(d);
+}
 
 fetch('/api/info').then(function(r){return r.json()}).then(function(d){
   inf=d;
+  var base=d.base_url||window.location.origin;
+  var m=d.metadata||{};
   document.getElementById('cn').textContent=d.channel_name;
   document.getElementById('uri').textContent=d.tltv_uri;
-  document.title=d.channel_name+' \u2014 tltv debug viewer';
+  document.title=d.channel_name+' \u2014 tltv viewer';
 
-  document.getElementById('dvr').textContent=d.verified?'\u2713':'?';
-
-  // Render all metadata fields dynamically
-  var m=d.metadata||{};
-  var base=d.base_url||window.location.origin;
-  var skip={signature:1,v:1};
+  // === 1. Channel section: curated fields then remaining ===
   var chd=document.getElementById('chd');
-  var keys=Object.keys(m).sort();
-  keys.forEach(function(k){
+  kv(chd,'verified',d.verified?'\u2713 Signature valid':'? Unknown',false);
+  if(m.name) kv(chd,'name',m.name,false);
+  if(d.tltv_uri) kv(chd,'uri',d.tltv_uri,false);
+  kv(chd,'status',m.status||'active',false);
+  kv(chd,'access',m.access||'public',false);
+  if(m.stream) kv(chd,'stream',base+m.stream,true);
+  if(m.guide){
+    kv(chd,'guide',base+m.guide,true);
+    kv(chd,'xmltv',base+m.guide.replace('guide.json','guide.xml'),true);
+  }
+  if(m.updated) kv(chd,'updated',m.updated,false);
+  if(m.seq!==undefined) kv(chd,'seq',String(m.seq),false);
+  // Dump remaining keys
+  var skip={v:1,signature:1,id:1,name:1,status:1,access:1,stream:1,guide:1,updated:1,seq:1};
+  Object.keys(m).sort().forEach(function(k){
     if(skip[k]) return;
     var val=m[k];
     if(Array.isArray(val)) val=val.join(', ');
     else if(val!==null&&typeof val==='object') val=JSON.stringify(val);
     else val=String(val);
-    // Expand path-only values to full URLs
-    if((k==='guide'||k==='stream'||k==='icon')&&val.charAt(0)==='/') val=base+val;
-    var div=document.createElement('div');
-    div.className='dr';
-    var isUrl=val.indexOf('http')===0;
-    var valHtml=isUrl?'<a class="uri" href="'+esc(val)+'" target="_blank">'+esc(val)+'</a>':'<span class="uri">'+esc(val)+'</span>';
-    div.innerHTML='<div class="di"><span>'+esc(k)+' </span>'+valHtml+'</div>';
-    chd.appendChild(div);
+    if((k==='icon')&&val.charAt(0)==='/') val=base+val;
+    kv(chd,k,val,val.indexOf('http')===0);
   });
-  // Add xmltv url after metadata fields
-  var xmltv=d.xmltv_url||'';
-  if(xmltv.charAt(0)==='/') xmltv=base+xmltv;
-  var xdiv=document.createElement('div');
-  xdiv.className='dr';
-  xdiv.innerHTML='<div class="di"><span>xmltv </span><a class="uri" target="_blank" href="'+esc(xmltv)+'">'+esc(xmltv||'-')+'</a></div>';
-  chd.appendChild(xdiv);
 
-  // Find current program from guide
-  if(d.guide&&d.guide.entries){
-    var nowISO=new Date().toISOString();
-    for(var i=0;i<d.guide.entries.length;i++){
-      var ge=d.guide.entries[i];
-      if(ge.start&&ge.end&&ge.start<=nowISO&&ge.end>nowISO){
-        document.getElementById('prg').textContent=ge.title||'';
-        document.getElementById('ps').style.display='';
-        break;
-      }
-    }
-  }
+  // === 2. Stream section: curated fields ===
+  var std=document.getElementById('std');
+  kv(std,'status','connecting',false);
+  if(d.stream_url) kv(std,'url',d.stream_url,true);
 
-  // Guide
+  // === 3. Guide section ===
+  var gdd=document.getElementById('gdd');
   var gd=document.getElementById('gd');
-  if(d.guide&&d.guide.entries&&d.guide.entries.length){
-    d.guide.entries.forEach(function(e){
-      var div=document.createElement('div');
-      div.className='ge';
-      var s=e.start?e.start.substring(11,16):'';
-      var n=e.end?e.end.substring(11,16):'';
-      div.innerHTML='<span class="gt">'+esc(s)+'\u2013'+esc(n)+'</span>  '+esc(e.title||'');
-      gd.appendChild(div);
-    });
+  if(d.guide){
+    kv(gdd,'verified',d.verified?'\u2713 Signature valid':'? Unknown',false);
+    if(m.guide) kv(gdd,'url',base+m.guide,true);
+    if(m.guide) kv(gdd,'xmltv',base+m.guide.replace('guide.json','guide.xml'),true);
+    if(d.guide.from) kv(gdd,'from',d.guide.from,false);
+    if(d.guide.until) kv(gdd,'until',d.guide.until,false);
+    var entries=d.guide.entries||[];
+    kv(gdd,'entries',String(entries.length),false);
+    if(entries.length){
+      var nowISO=new Date().toISOString();
+      entries.forEach(function(e){
+        var s=e.start?e.start.substring(5,16).replace('T',' '):'';
+        var n=e.end?e.end.substring(11,16):'';
+        var np=e.start&&e.end&&e.start<=nowISO&&e.end>nowISO;
+        if(np){
+          document.getElementById('prg').textContent=e.title||'';
+          document.getElementById('ps').style.display='';
+        }
+        var mk=np?'<span class="ok">> </span>':'  ';
+        var div=document.createElement('div');div.className='ge';
+        var cat=e.category?' <span class="gt">['+esc(e.category)+']</span>':'';
+        div.innerHTML=mk+'<span class="gt">'+esc(s)+' \u2013 '+esc(n)+'</span>  '+esc(e.title||'')+cat;
+        gd.appendChild(div);
+      });
+    }
   } else {
     gd.innerHTML='<div class="ge" style="color:#666">no guide data</div>';
   }
 
   initPlayer(d.stream_src);
 
-  // Fetch node info and peers from protocol endpoints
-  var nb=base;
-  fetch(nb+'/.well-known/tltv').then(function(r){return r.json()}).then(function(n){
+  // === 4. Node section ===
+  fetch(base+'/.well-known/tltv').then(function(r){return r.json()}).then(function(n){
     var nd=document.getElementById('nd');
     nd.innerHTML='';
-    // Determine via
-    var via='';
-    if(n.relaying){for(var i=0;i<n.relaying.length;i++){if(n.relaying[i].id===d.channel_id){via='relay';break}}}
-    if(!via&&n.channels){for(var i=0;i<n.channels.length;i++){if(n.channels[i].id===d.channel_id){via='origin';break}}}
-    if(via){document.getElementById('dvia').style.display='';document.getElementById('dviat').textContent=via}
-    // Render node fields
-    var nf=[['protocol',n.protocol],['versions',(n.versions||[]).join(', ')]];
+    var ver=(n.versions&&n.versions.length)?n.versions[0]:'?';
+    kv(nd,'protocol',n.protocol+' protocol v'+ver,false);
     if(n.channels&&n.channels.length){
-      var cl=n.channels.map(function(c){return c.name||c.id}).join(', ');
-      nf.push(['channels',cl]);
+      var hdr=document.createElement('div');hdr.className='ge';hdr.style.color='#666';hdr.style.marginTop='6px';
+      hdr.textContent='Origin Channels ('+n.channels.length+')';nd.appendChild(hdr);
+      n.channels.forEach(function(ch){
+        var mk=(ch.id===d.channel_id)?'<span class="ok">> </span>':'  ';
+        var div=document.createElement('div');div.className='ge';
+        div.innerHTML=mk+'<span class="uri">'+esc(ch.id)+'</span>  <span class="gt">'+esc(ch.name)+'</span>';
+        nd.appendChild(div);
+      });
     }
     if(n.relaying&&n.relaying.length){
-      var rl=n.relaying.map(function(c){return c.name||c.id}).join(', ');
-      nf.push(['relaying',rl]);
+      var hdr=document.createElement('div');hdr.className='ge';hdr.style.color='#666';hdr.style.marginTop='6px';
+      hdr.textContent='Relay Channels ('+n.relaying.length+')';nd.appendChild(hdr);
+      n.relaying.forEach(function(ch){
+        var mk=(ch.id===d.channel_id)?'<span class="ok">> </span>':'  ';
+        var div=document.createElement('div');div.className='ge';
+        div.innerHTML=mk+'<span class="uri">'+esc(ch.id)+'</span>  <span class="gt">'+esc(ch.name)+'</span>';
+        nd.appendChild(div);
+      });
     }
-    nf.forEach(function(f){
-      var div=document.createElement('div');div.className='dr';
-      div.innerHTML='<div class="di"><span>'+esc(f[0])+' </span><span class="uri">'+esc(f[1])+'</span></div>';
-      nd.appendChild(div);
-    });
   }).catch(function(){document.getElementById('nd').innerHTML='<div class="ge" style="color:#666">unavailable</div>'});
 
-  fetch(nb+'/tltv/v1/peers').then(function(r){return r.json()}).then(function(p){
+  // === 5. Peers section ===
+  fetch(base+'/tltv/v1/peers').then(function(r){return r.json()}).then(function(p){
     var pd=document.getElementById('pd');
     pd.innerHTML='';
     var peers=p.peers||[];
@@ -678,7 +757,7 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
     peers.forEach(function(pr){
       var div=document.createElement('div');div.className='ge';
       var hints=(pr.hints||[]).join(', ');
-      div.innerHTML='<span class="uri">'+esc(pr.name||pr.id)+'</span> <span class="gt">'+esc(hints)+'</span>';
+      div.innerHTML='<span class="uri">'+esc(pr.id)+'</span>  <span class="gt">'+esc(pr.name)+'</span>  <span class="gt">'+esc(hints)+'</span>';
       pd.appendChild(div);
     });
   }).catch(function(){document.getElementById('pd').innerHTML='<div class="ge" style="color:#666">unavailable</div>'});
@@ -687,42 +766,80 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
 function initPlayer(src){
   var video=document.getElementById('v');
   var ov=document.getElementById('ov');
+  var std=document.getElementById('std');
 
   if(typeof Hls!=='undefined'&&Hls.isSupported()){
     var hls=new Hls({liveSyncDurationCount:3,liveMaxLatencyDurationCount:6});
+    hlsInst=hls;
     hls.loadSource(src);
     hls.attachMedia(video);
 
-    hls.on(Hls.Events.MANIFEST_PARSED,function(){
+    hls.on(Hls.Events.MANIFEST_PARSED,function(e,data){
       video.play().catch(function(){});
       ov.classList.add('h');
-      ss('playing','ok');
+      // Update stream status
+      std.innerHTML='';
+      kv(std,'status','\u2713 live',false);
+      if(inf.stream_url) kv(std,'url',inf.stream_url,true);
+      kv(std,'content-type','application/vnd.apple.mpegurl',false);
+      kv(std,'segments',String(data.levels?data.levels.length:'-'),false);
+    });
+
+    hls.on(Hls.Events.LEVEL_LOADED,function(e,data){
+      var det=data.details;
+      if(!det) return;
+      // Update manifest-derived fields
+      var segs=det.fragments?det.fragments.length:0;
+      var td=det.targetduration||'';
+      var ms=det.startSN||'';
+      var el=std.querySelector('[data-field="segments"]');
+      if(el) el.textContent=String(segs);
+      else kv(std,'segments',String(segs),false);
+      // Re-render stream section with latest info
+      std.innerHTML='';
+      kv(std,'status','\u2713 live',false);
+      if(inf.stream_url) kv(std,'url',inf.stream_url,true);
+      kv(std,'content-type','application/vnd.apple.mpegurl',false);
+      kv(std,'segments',String(segs),false);
+      if(td) kv(std,'target duration',td+'s',false);
+      if(ms!==undefined&&ms!=='') kv(std,'media sequence',String(ms),false);
     });
 
     hls.on(Hls.Events.FRAG_LOADED,function(e,data){
       var f=data.frag;
-      if(f&&typeof f.sn==='number'){
-        document.getElementById('dsg').textContent=f.sn;
-      }
       if(f&&f.stats){
         var bytes=f.stats.loaded||f.stats.total||0;
         if(bytes>0&&f.duration>0){
-          document.getElementById('dbw').textContent=((bytes*8/f.duration)/1e6).toFixed(1)+' Mbps';
+          var br=((bytes*8/f.duration)/1e6).toFixed(1)+' Mbps';
+          var el=std.querySelector('[data-br]');
+          if(el){el.textContent=br}
+          else{var bd=document.createElement('div');bd.className='dr';
+          bd.innerHTML='<div class="di"><span>bitrate </span><span data-br>'+esc(br)+'</span></div>';
+          std.appendChild(bd)}
         }
       }
     });
 
     hls.on(Hls.Events.ERROR,function(e,data){
-      if(data.fatal) ss('error: '+data.type,'er');
+      if(data.fatal){std.innerHTML='';kv(std,'status','\u2717 error: '+data.type,false)}
     });
 
     setInterval(function(){
+      var bel=std.querySelector('[data-buf]');
       if(video.buffered.length>0){
-        var b=video.buffered.end(video.buffered.length-1)-video.currentTime;
-        document.getElementById('dbu').textContent=b.toFixed(1)+'s';
+        var b=(video.buffered.end(video.buffered.length-1)-video.currentTime).toFixed(1)+'s';
+        if(bel){bel.textContent=b}
+        else{var bd=document.createElement('div');bd.className='dr';
+        bd.innerHTML='<div class="di"><span>buffer </span><span data-buf>'+esc(b)+'</span></div>';
+        std.appendChild(bd)}
       }
+      var rel=std.querySelector('[data-res]');
       if(video.videoWidth>0){
-        document.getElementById('dre').textContent=video.videoWidth+'x'+video.videoHeight;
+        var r=video.videoWidth+'x'+video.videoHeight;
+        if(rel){rel.textContent=r}
+        else{var rd=document.createElement('div');rd.className='dr';
+        rd.innerHTML='<div class="di"><span>resolution </span><span data-res>'+esc(r)+'</span></div>';
+        std.appendChild(rd)}
       }
     },1000);
 
@@ -731,17 +848,12 @@ function initPlayer(src){
     video.addEventListener('loadedmetadata',function(){
       video.play().catch(function(){});
       ov.classList.add('h');
-      ss('playing','ok');
+      std.innerHTML='';kv(std,'status','\u2713 live',false);
+      if(inf.stream_url) kv(std,'url',inf.stream_url,true);
     });
   } else {
-    ss('HLS not supported','er');
+    std.innerHTML='';kv(std,'status','\u2717 HLS not supported',false);
   }
-}
-
-function ss(t,l){
-  var e=document.getElementById('ds');
-  e.textContent=t;
-  e.className=l==='ok'?'ok':l==='er'?'er':'wn';
 }
 
 function tmu(){

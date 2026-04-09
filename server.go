@@ -477,6 +477,14 @@ func cmdServerTest(args []string) {
 			}
 			return info
 		})
+	} else {
+		statusPageRoutes(mux, func() *NodeInfo {
+			return &NodeInfo{
+				Protocol: "tltv",
+				Versions: []int{1},
+				Channels: []ChannelRef{{ID: channelID, Name: channelName}},
+			}
+		})
 	}
 	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache, peerReg, gossipReg)
 
