@@ -46,7 +46,7 @@ func cmdBridge(args []string) {
 	keysDir := fs.String("keys-dir", defaultKeysDir, "key storage directory")
 	fs.StringVar(keysDir, "k", defaultKeysDir, "alias for --keys-dir")
 
-	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for origins field")
+	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for origins field (omit for private origin)")
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
 	peersStr := addPeersFlag(fs)
@@ -82,7 +82,7 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
-		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins field\n\n")
+		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins (omit for private origin)\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
 		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n\n")

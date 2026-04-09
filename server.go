@@ -92,7 +92,7 @@ func cmdServerTest(args []string) {
 	listenAddr := fs.String("listen", defaultListen, "listen address")
 	fs.StringVar(listenAddr, "l", defaultListen, "alias for --listen")
 
-	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for origins field")
+	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for origins field (omit for private origin)")
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
 
 	peersStr := addPeersFlag(fs)
@@ -136,7 +136,7 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --qp N                 compression quality 0-51, lower = better (default: 26)\n\n")
 		fmt.Fprintf(os.Stderr, "Stream:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR          listen address (default: :8000, :443 with --tls)\n")
-		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST        public host:port for origins field\n")
+		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST        public host:port for origins (omit for private origin)\n")
 		fmt.Fprintf(os.Stderr, "      --segment-duration N   HLS segment duration in seconds (default: 2)\n")
 		fmt.Fprintf(os.Stderr, "      --segment-count N      segments in playlist window (default: 5)\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")

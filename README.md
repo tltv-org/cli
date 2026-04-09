@@ -72,6 +72,10 @@ tltv viewer demo.timelooptv.org
 | `bridge` | Bridge origin server ([docs](docs/bridge.md)) |
 | `relay` | Caching relay with signature verification ([docs](docs/relay.md)) |
 
+> **Private origins:** Run a server or bridge without `--hostname` to create a
+> private origin. Without a hostname, signed metadata contains no `origins` field,
+> so relays cannot discover the server's address.
+
 ### Clients
 
 | Command | Description |

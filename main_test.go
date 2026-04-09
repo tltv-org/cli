@@ -2910,9 +2910,9 @@ func TestStatusPageRoutes_ServesHTML(t *testing.T) {
 	if !strings.Contains(body, "Origin Channels (1)") {
 		t.Error("status page missing origin channels header")
 	}
-	// Shared template: nav bar with tltv mark + status label
-	if !strings.Contains(body, `class="hdm">tltv</span>`) {
-		t.Error("status page missing tltv mark in nav bar")
+	// Shared template: nav bar with wordmark SVG + status label
+	if !strings.Contains(body, `viewBox="0 0 1020 350"`) {
+		t.Error("status page missing wordmark SVG in nav bar")
 	}
 	if !strings.Contains(body, `class="hdl">status</span>`) {
 		t.Error("status page missing 'status' label in nav bar")
