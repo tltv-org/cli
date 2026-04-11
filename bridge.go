@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -18,18 +19,32 @@ func cmdBridge(args []string) {
 
 	// Source flags
 	streamArg := fs.String("stream", os.Getenv("STREAM"), "channel source: HLS URL, M3U playlist, JSON file, or directory")
+	fs.StringVar(streamArg, "s", os.Getenv("STREAM"), "alias for --stream")
 	guideArg := fs.String("guide", os.Getenv("GUIDE"), "guide source: XMLTV or JSON (optional)")
+	fs.StringVar(guideArg, "G", os.Getenv("GUIDE"), "alias for --guide")
 
 	// Channel defaults
 	nameArg := fs.String("name", os.Getenv("NAME"), "channel name (single-stream mode only)")
 	fs.StringVar(nameArg, "n", os.Getenv("NAME"), "alias for --name")
+	descriptionArg := fs.String("description", os.Getenv("DESCRIPTION"), "channel description")
+	fs.StringVar(descriptionArg, "D", os.Getenv("DESCRIPTION"), "alias for --description")
+	tagsArg := fs.String("tags", os.Getenv("TAGS"), "comma-separated tags (max 5)")
+	fs.StringVar(tagsArg, "T", os.Getenv("TAGS"), "alias for --tags")
+	languageArg := fs.String("language", os.Getenv("LANGUAGE"), "ISO 639-1 language code (e.g. en, ja)")
+	fs.StringVar(languageArg, "a", os.Getenv("LANGUAGE"), "alias for --language")
+	timezoneArg := fs.String("timezone", os.Getenv("TIMEZONE"), "IANA timezone name for metadata")
+	fs.StringVar(timezoneArg, "z", os.Getenv("TIMEZONE"), "alias for --timezone")
+	iconArg := fs.String("icon", os.Getenv("ICON"), "path to icon file (PNG, JPEG, or SVG)")
+	fs.StringVar(iconArg, "c", os.Getenv("ICON"), "alias for --icon")
 	onDemand := fs.Bool("on-demand", os.Getenv("ON_DEMAND") == "1", "mark all channels as on-demand")
+	fs.BoolVar(onDemand, "O", os.Getenv("ON_DEMAND") == "1", "alias for --on-demand")
 
 	defaultPoll := "60s"
 	if v := os.Getenv("POLL"); v != "" {
 		defaultPoll = v
 	}
 	pollStr := fs.String("poll", defaultPoll, "re-poll interval")
+	fs.StringVar(pollStr, "p", defaultPoll, "alias for --poll")
 
 	// Server flags
 	defaultListen := ":8000"
@@ -51,6 +66,7 @@ func cmdBridge(args []string) {
 
 	peersStr := addPeersFlag(fs)
 	gossipEnabled := addGossipFlag(fs)
+	proxyStr := addProxyFlag(fs)
 
 	// --- Config ---
 	configPathBridge, dumpConfigBridge := addConfigFlags(fs)
@@ -73,12 +89,17 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "Bridges external streaming sources (HLS, M3U, directories) as\n")
 		fmt.Fprintf(os.Stderr, "first-class TLTV channels with Ed25519 identities and signed metadata.\n\n")
 		fmt.Fprintf(os.Stderr, "Source:\n")
-		fmt.Fprintf(os.Stderr, "      --stream URL/PATH    channel source: HLS URL, M3U playlist, JSON file, or directory\n")
-		fmt.Fprintf(os.Stderr, "      --guide URL/PATH     guide source: XMLTV or JSON (optional)\n\n")
+		fmt.Fprintf(os.Stderr, "  -s, --stream URL/PATH    channel source: HLS URL, M3U playlist, JSON file, or directory\n")
+		fmt.Fprintf(os.Stderr, "  -G, --guide URL/PATH     guide source: XMLTV or JSON (optional)\n\n")
 		fmt.Fprintf(os.Stderr, "Channel defaults:\n")
-		fmt.Fprintf(os.Stderr, "      --name STRING        channel name (single-stream mode only)\n")
-		fmt.Fprintf(os.Stderr, "      --on-demand          mark all channels as on-demand\n")
-		fmt.Fprintf(os.Stderr, "      --poll DURATION      re-poll interval (default: 60s)\n\n")
+		fmt.Fprintf(os.Stderr, "  -n, --name STRING        channel name (single-stream mode only)\n")
+		fmt.Fprintf(os.Stderr, "  -D, --description TEXT   channel description\n")
+		fmt.Fprintf(os.Stderr, "  -T, --tags LIST          comma-separated tags (max 5)\n")
+		fmt.Fprintf(os.Stderr, "  -a, --language CODE      ISO 639-1 language code (e.g. en, ja)\n")
+		fmt.Fprintf(os.Stderr, "  -z, --timezone TZ        IANA timezone name for metadata\n")
+		fmt.Fprintf(os.Stderr, "  -c, --icon PATH          icon file (PNG, JPEG, or SVG)\n")
+		fmt.Fprintf(os.Stderr, "  -O, --on-demand          mark all channels as on-demand\n")
+		fmt.Fprintf(os.Stderr, "  -p, --poll DURATION      re-poll interval (default: 60s)\n\n")
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
@@ -252,8 +273,38 @@ func cmdBridge(args []string) {
 		fatal("could not create keys directory %s: %v", *keysDir, err)
 	}
 
+	// Parse tags
+	var defaultTags []string
+	if *tagsArg != "" {
+		for _, t := range strings.Split(*tagsArg, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				defaultTags = append(defaultTags, t)
+			}
+		}
+		if len(defaultTags) > 5 {
+			fatal("--tags accepts at most 5 tags")
+		}
+	}
+
+	// Parse proxy URL
+	proxyURL, err := parseProxyURL(*proxyStr)
+	if err != nil {
+		fatal("%v", err)
+	}
+	// Apply proxy to bridge source/stream clients
+	if proxyURL != nil {
+		bridgeSourceClient = newHTTPClientWithProxy(proxyURL)
+		bridgeStreamClient = newHTTPClientWithProxy(proxyURL)
+	}
+
+	// Load icon
+	iconData, iconCT := loadIcon(*iconArg)
+	iconFileName := "icon." + iconExtension(iconCT)
+
 	// Create registry
 	registry := newBridgeRegistry(*keysDir, *hostnameArg)
+	registry.iconFileName = iconFileName
 
 	// Initial source poll
 	logInfof("discovering channels from %s", *streamArg)
@@ -264,6 +315,8 @@ func cmdBridge(args []string) {
 	if len(channels) == 0 {
 		fatal("no channels discovered from %s", *streamArg)
 	}
+	// Apply CLI defaults to channels (source fields override CLI)
+	bridgeApplyDefaults(channels, *descriptionArg, defaultTags, *languageArg, *timezoneArg)
 
 	if err := registry.UpdateChannels(channels); err != nil {
 		fatal("channel registration failed: %v", err)
@@ -314,7 +367,7 @@ func cmdBridge(args []string) {
 	var peerReg *peerRegistry
 	if len(peerTargets) > 0 {
 		peerReg = newPeerRegistry()
-		client := newClient(flagInsecure)
+		client := newClientWithProxy(flagInsecure, proxyURL)
 		go peerPollLoop(ctx, client, peerTargets, peerReg, 5*time.Minute)
 		logInfof("peers: verifying %d external channels", len(peerTargets))
 	}
@@ -324,7 +377,7 @@ func cmdBridge(args []string) {
 	if *gossipEnabled && len(peerTargets) > 0 {
 		gossipReg = newPeerRegistry()
 		gossipNodes := gossipNodesFromPeers(peerTargets)
-		client := newClient(flagInsecure)
+		client := newClientWithProxy(flagInsecure, proxyURL)
 		go gossipPollLoop(ctx, client, gossipNodes, gossipReg.Update, 10*time.Minute)
 		logInfof("gossip: discovering channels from %d nodes", len(gossipNodes))
 	}
@@ -340,6 +393,8 @@ func cmdBridge(args []string) {
 
 	// Start HTTP server
 	server := newBridgeServer(registry, cache, peerReg, gossipReg)
+	server.iconData = iconData
+	server.iconCT = iconCT
 
 	// Embed viewer
 	var viewerChannelName string
@@ -372,7 +427,7 @@ func cmdBridge(args []string) {
 
 		if viewerChID != "" {
 			chID := viewerChID
-			viewerEmbedRoutes(server.mux, func() map[string]interface{} {
+			viewerEmbedRoutes(server.mux, func(_ string) map[string]interface{} {
 				current := registry.GetChannel(chID)
 				if current == nil {
 					return map[string]interface{}{}
@@ -384,7 +439,7 @@ func cmdBridge(args []string) {
 					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
 				}
 				return info
-			})
+			}, nil)
 		}
 	} else {
 		statusPageRoutes(server.mux, func() *NodeInfo {
@@ -471,7 +526,8 @@ func cmdBridge(args []string) {
 	}
 
 	if pollDur > 0 {
-		go bridgePollLoop(ctx, pollDur, &bridgeLiveConfig, *onDemand, registry)
+		go bridgePollLoop(ctx, pollDur, &bridgeLiveConfig, *onDemand, registry,
+			*descriptionArg, defaultTags, *languageArg, *timezoneArg)
 	}
 
 	// Wait for shutdown signal
@@ -487,10 +543,30 @@ func cmdBridge(args []string) {
 	httpSrv.Shutdown(shutdownCtx)
 }
 
+// bridgeApplyDefaults applies CLI flag defaults to channels where the source
+// didn't provide a value. Source fields override CLI defaults.
+func bridgeApplyDefaults(channels []bridgeChannel, description string, tags []string, language, timezone string) {
+	for i := range channels {
+		if channels[i].Description == "" && description != "" {
+			channels[i].Description = description
+		}
+		if len(channels[i].Tags) == 0 && len(tags) > 0 {
+			channels[i].Tags = tags
+		}
+		if channels[i].Language == "" && language != "" {
+			channels[i].Language = language
+		}
+		if channels[i].Timezone == "" && timezone != "" {
+			channels[i].Timezone = timezone
+		}
+	}
+}
+
 // bridgePollLoop re-polls the source at the given interval.
 // Reads current config from the atomic pointer each cycle.
 func bridgePollLoop(ctx context.Context, interval time.Duration,
-	liveConfig *atomic.Pointer[bridgeReloadableConfig], onDemand bool, registry *bridgeRegistry) {
+	liveConfig *atomic.Pointer[bridgeReloadableConfig], onDemand bool, registry *bridgeRegistry,
+	defaultDesc string, defaultTags []string, defaultLang, defaultTZ string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -500,18 +576,21 @@ func bridgePollLoop(ctx context.Context, interval time.Duration,
 			return
 		case <-ticker.C:
 			cfg := liveConfig.Load()
-			bridgeDoPoll(cfg.stream, cfg.guide, cfg.name, onDemand, registry)
+			bridgeDoPoll(cfg.stream, cfg.guide, cfg.name, onDemand, registry,
+				defaultDesc, defaultTags, defaultLang, defaultTZ)
 		}
 	}
 }
 
 // bridgeDoPoll performs a single poll cycle. Errors are logged, not fatal.
-func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *bridgeRegistry) {
+func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *bridgeRegistry,
+	defaultDesc string, defaultTags []string, defaultLang, defaultTZ string) {
 	channels, sidecarGuide, err := bridgePollSource(streamArg, nameArg, onDemand)
 	if err != nil {
 		logErrorf("poll error: %v", err)
 		return
 	}
+	bridgeApplyDefaults(channels, defaultDesc, defaultTags, defaultLang, defaultTZ)
 
 	if err := registry.UpdateChannels(channels); err != nil {
 		logErrorf("update error: %v", err)

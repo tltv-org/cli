@@ -126,6 +126,153 @@ func resolveSegmentURL(manifestURL, segURI string) (string, error) {
 	return parsed.ResolveReference(ref).String(), nil
 }
 
+// ---------- Master Playlist ----------
+
+// hlsVariant represents a variant stream in an HLS master (multivariant) playlist.
+type hlsVariant struct {
+	URI        string
+	Bandwidth  int
+	Resolution string // "1920x1080" format
+	Width      int
+	Height     int
+	Codecs     string
+}
+
+// parseMasterPlaylist detects and parses an HLS master (multivariant) playlist.
+// Returns nil if the body is a media playlist (no #EXT-X-STREAM-INF tags).
+func parseMasterPlaylist(body []byte) []hlsVariant {
+	text := string(body)
+	if !strings.Contains(text, "#EXT-X-STREAM-INF") {
+		return nil
+	}
+
+	lines := strings.Split(text, "\n")
+	var variants []hlsVariant
+	var pending *hlsVariant
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
+			attrs := line[len("#EXT-X-STREAM-INF:"):]
+			v := hlsVariant{}
+			if bw := hlsAttr(attrs, "BANDWIDTH"); bw != "" {
+				v.Bandwidth, _ = strconv.Atoi(bw)
+			}
+			if res := hlsAttr(attrs, "RESOLUTION"); res != "" {
+				v.Resolution = res
+				if parts := strings.SplitN(res, "x", 2); len(parts) == 2 {
+					v.Width, _ = strconv.Atoi(parts[0])
+					v.Height, _ = strconv.Atoi(parts[1])
+				}
+			}
+			if codecs := hlsAttr(attrs, "CODECS"); codecs != "" {
+				v.Codecs = codecs
+			}
+			pending = &v
+			continue
+		}
+
+		// URI line following #EXT-X-STREAM-INF
+		if pending != nil && line != "" && !strings.HasPrefix(line, "#") {
+			pending.URI = line
+			variants = append(variants, *pending)
+			pending = nil
+		}
+	}
+
+	return variants
+}
+
+// hlsAttr extracts an attribute value from an HLS tag's attribute list.
+// Handles both quoted (CODECS="avc1.42c01e") and unquoted (BANDWIDTH=500000) values.
+func hlsAttr(attrs, name string) string {
+	search := name + "="
+	// Scan for the attribute, ensuring we match the full name and not a
+	// suffix (e.g. "BANDWIDTH" must not match inside "BANDWIDTHRATE").
+	pos := 0
+	for {
+		idx := strings.Index(attrs[pos:], search)
+		if idx < 0 {
+			return ""
+		}
+		idx += pos // absolute position in attrs
+		if idx == 0 || attrs[idx-1] == ',' || attrs[idx-1] == ':' || attrs[idx-1] == ' ' {
+			// Valid attribute boundary — extract value
+			val := attrs[idx+len(search):]
+			if len(val) > 0 && val[0] == '"' {
+				end := strings.IndexByte(val[1:], '"')
+				if end < 0 {
+					return "" // malformed: opening quote without closing quote
+				}
+				return val[1 : end+1]
+			}
+			end := strings.IndexByte(val, ',')
+			if end < 0 {
+				return strings.TrimSpace(val)
+			}
+			return strings.TrimSpace(val[:end])
+		}
+		pos = idx + len(search) // skip this false match, keep searching
+	}
+}
+
+// selectVariant selects a variant based on quality preference.
+// quality can be: "best" (highest bandwidth), "worst" (lowest bandwidth),
+// or a resolution like "720p", "1080p", "360p" (closest match by height).
+func selectVariant(variants []hlsVariant, quality string) hlsVariant {
+	if len(variants) == 0 {
+		return hlsVariant{}
+	}
+
+	switch quality {
+	case "", "best":
+		best := variants[0]
+		for _, v := range variants[1:] {
+			if v.Bandwidth > best.Bandwidth {
+				best = v
+			}
+		}
+		return best
+	case "worst":
+		worst := variants[0]
+		for _, v := range variants[1:] {
+			if v.Bandwidth < worst.Bandwidth {
+				worst = v
+			}
+		}
+		return worst
+	default:
+		// Parse resolution like "720p" → target height 720
+		target := 0
+		if strings.HasSuffix(quality, "p") {
+			target, _ = strconv.Atoi(quality[:len(quality)-1])
+		}
+		if target == 0 {
+			return selectVariant(variants, "best")
+		}
+		closest := variants[0]
+		closestDiff := intAbs(closest.Height - target)
+		for _, v := range variants[1:] {
+			diff := intAbs(v.Height - target)
+			if diff < closestDiff || (diff == closestDiff && v.Bandwidth > closest.Bandwidth) {
+				closest = v
+				closestDiff = diff
+			}
+		}
+		return closest
+	}
+}
+
+// intAbs returns the absolute value of x.
+func intAbs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // ---------- Receiver Core ----------
 
 // ReceiverSegmentResult is reported for each segment fetch.
@@ -244,6 +391,10 @@ type Receiver struct {
 	// RecordWriter receives raw segment data (optional).
 	RecordWriter io.Writer
 
+	// Quality selects which variant to use from master playlists.
+	// "best" (default), "worst", or a resolution like "720p", "1080p".
+	Quality string
+
 	// LiveEdge is the number of segments from the live edge to start from on
 	// the first manifest poll. 0 means start from all segments (default for
 	// stats/record). 3 is the HLS-recommended value for live playback (--pipe).
@@ -278,6 +429,31 @@ func (recv *Receiver) Run(ctx context.Context) error {
 	if recv.VerifyMetadata && channelID != "" {
 		if err := recv.verifyChannelMetadata(client, channelID); err != nil {
 			return fmt.Errorf("metadata verification: %w", err)
+		}
+	}
+
+	// Master playlist resolution: if the first fetch returns a master playlist,
+	// select a variant and switch to that variant's media playlist URL.
+	{
+		body, err := recv.fetchWithRetry(ctx, client, manifestURL)
+		if err != nil {
+			return fmt.Errorf("initial manifest fetch: %w", err)
+		}
+		if variants := parseMasterPlaylist(body); variants != nil {
+			selected := selectVariant(variants, recv.Quality)
+			if selected.URI == "" {
+				return fmt.Errorf("no suitable variant found in master playlist")
+			}
+			resolved, err := resolveSegmentURL(manifestURL, selected.URI)
+			if err != nil {
+				return fmt.Errorf("resolve variant URL %q: %w", selected.URI, err)
+			}
+			if selected.Resolution != "" {
+				logInfof("selected variant: %s (%d bps)", selected.Resolution, selected.Bandwidth)
+			} else {
+				logInfof("selected variant: %d bps", selected.Bandwidth)
+			}
+			manifestURL = resolved
 		}
 	}
 
@@ -480,6 +656,7 @@ func (recv *Receiver) resolveStreamURL(client *Client) (manifestURL, channelID s
 }
 
 // verifyChannelMetadata fetches and verifies the channel's signed metadata.
+// Also checks for unknown access modes per spec §5.2.
 func (recv *Receiver) verifyChannelMetadata(client *Client, channelID string) error {
 	_, host, token, err := recv.resolveTarget(client)
 	if err != nil {
@@ -493,6 +670,11 @@ func (recv *Receiver) verifyChannelMetadata(client *Client, channelID string) er
 
 	if err := verifyDocument(doc, channelID); err != nil {
 		return fmt.Errorf("verify metadata: %w", err)
+	}
+
+	// Check for unknown access modes (spec §5.2)
+	if err := checkAccessMode(doc); err != nil {
+		return err
 	}
 
 	return nil
@@ -593,12 +775,14 @@ func cmdReceiver(args []string) {
 
 	// Mode flags
 	monitor := fs.Bool("monitor", os.Getenv("MONITOR") == "1", "health check mode: exit 0 if stream is live, 1 if not")
+	fs.BoolVar(monitor, "m", os.Getenv("MONITOR") == "1", "alias for --monitor")
 
 	defaultTimeout := "10s"
 	if v := os.Getenv("TIMEOUT"); v != "" {
 		defaultTimeout = v
 	}
 	timeout := fs.String("timeout", defaultTimeout, "timeout for --monitor mode")
+	fs.StringVar(timeout, "T", defaultTimeout, "alias for --timeout")
 
 	defaultDuration := "0"
 	if v := os.Getenv("DURATION"); v != "" {
@@ -608,9 +792,15 @@ func cmdReceiver(args []string) {
 	fs.StringVar(duration, "d", defaultDuration, "alias for --duration")
 
 	recordPath := fs.String("record", os.Getenv("RECORD"), "write raw TS segments to file")
+	fs.StringVar(recordPath, "r", os.Getenv("RECORD"), "alias for --record")
 	pipe := fs.Bool("pipe", os.Getenv("PIPE") == "1", "write raw segment data to stdout")
+	fs.BoolVar(pipe, "p", os.Getenv("PIPE") == "1", "alias for --pipe")
 
 	directURL := fs.String("url", os.Getenv("URL"), "direct HLS manifest URL (skip tltv:// resolution)")
+	fs.StringVar(directURL, "u", os.Getenv("URL"), "alias for --url")
+	quality := fs.String("quality", os.Getenv("QUALITY"), "variant quality: best (default), worst, or resolution (e.g. 720p)")
+	fs.StringVar(quality, "q", os.Getenv("QUALITY"), "alias for --quality")
+	proxyStr := addProxyFlag(fs)
 
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
@@ -621,12 +811,14 @@ func cmdReceiver(args []string) {
 		fmt.Fprintf(os.Stderr, "Headless HLS client that connects to a TLTV channel, fetches the stream,\n")
 		fmt.Fprintf(os.Stderr, "verifies protocol compliance, and reports live statistics.\n\n")
 		fmt.Fprintf(os.Stderr, "Modes:\n")
-		fmt.Fprintf(os.Stderr, "      --monitor            health check: exit 0 if live, 1 if not\n")
-		fmt.Fprintf(os.Stderr, "      --timeout DURATION   monitor timeout (default: 10s)\n")
+		fmt.Fprintf(os.Stderr, "  -m, --monitor            health check: exit 0 if live, 1 if not\n")
+		fmt.Fprintf(os.Stderr, "  -T, --timeout DURATION   monitor timeout (default: 10s)\n")
 		fmt.Fprintf(os.Stderr, "  -d, --duration DURATION  run for N then exit with stats (0 = Ctrl-C)\n")
-		fmt.Fprintf(os.Stderr, "      --record PATH        write raw TS segments to file\n")
-		fmt.Fprintf(os.Stderr, "      --pipe               write raw segment data to stdout\n")
-		fmt.Fprintf(os.Stderr, "      --url URL            direct HLS manifest URL (skip resolution)\n\n")
+		fmt.Fprintf(os.Stderr, "  -r, --record PATH        write raw TS segments to file\n")
+		fmt.Fprintf(os.Stderr, "  -p, --pipe               write raw segment data to stdout\n")
+		fmt.Fprintf(os.Stderr, "  -u, --url URL            direct HLS manifest URL (skip resolution)\n")
+		fmt.Fprintf(os.Stderr, "  -q, --quality QUALITY    variant: best (default), worst, or resolution (720p)\n")
+		fmt.Fprintf(os.Stderr, "  -x, --proxy URL          proxy URL (socks5://, http://, https://)\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL    log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
@@ -638,7 +830,7 @@ func cmdReceiver(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv receiver --pipe TVabc...@localhost:8000 | mpv -\n")
 		fmt.Fprintf(os.Stderr, "  tltv receiver --duration 5m --json TVabc...@demo.timelooptv.org:443\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: MONITOR=1, TIMEOUT, DURATION, RECORD, PIPE=1,\n")
-		fmt.Fprintf(os.Stderr, "URL, LOG_LEVEL, LOG_FORMAT, LOG_FILE. Flags override env vars.\n")
+		fmt.Fprintf(os.Stderr, "URL, QUALITY, LOG_LEVEL, LOG_FORMAT, LOG_FILE. Flags override env vars.\n")
 	}
 	fs.Parse(args)
 
@@ -693,15 +885,22 @@ func cmdReceiver(args []string) {
 		recordWriter = os.Stdout
 	}
 
+	// Parse proxy URL
+	proxyURL, err := parseProxyURL(*proxyStr)
+	if err != nil {
+		fatal("%v", err)
+	}
+
 	// Create receiver
 	stats := &ReceiverStats{StartTime: time.Now()}
 	recv := &Receiver{
 		Target:         target,
 		DirectURL:      *directURL,
-		Client:         newClient(flagInsecure),
+		Client:         newClientWithProxy(flagInsecure, proxyURL),
 		Stats:          stats,
 		VerifyMetadata: !(*directURL != ""),
 		RecordWriter:   recordWriter,
+		Quality:        *quality,
 	}
 
 	// For --pipe, start from near the live edge (last 3 segments per HLS spec)

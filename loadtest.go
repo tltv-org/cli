@@ -37,14 +37,20 @@ func cmdLoadtest(args []string) {
 		defaultRamp = v
 	}
 	rampStr := fs.String("ramp", defaultRamp, "time to ramp from 0 to N receivers (0 = all at once)")
+	fs.StringVar(rampStr, "r", defaultRamp, "alias for --ramp")
 
 	directURL := fs.String("url", os.Getenv("URL"), "direct HLS manifest URL (skip tltv:// resolution)")
+	fs.StringVar(directURL, "u", os.Getenv("URL"), "alias for --url")
+	quality := fs.String("quality", os.Getenv("QUALITY"), "variant quality: best (default), worst, or resolution (e.g. 720p)")
+	fs.StringVar(quality, "q", os.Getenv("QUALITY"), "alias for --quality")
+	proxyStr := addProxyFlag(fs)
 
 	defaultConnTimeout := "10s"
 	if v := os.Getenv("CONNECT_TIMEOUT"); v != "" {
 		defaultConnTimeout = v
 	}
 	connectTimeout := fs.String("connect-timeout", defaultConnTimeout, "initial connection validation timeout")
+	fs.StringVar(connectTimeout, "T", defaultConnTimeout, "alias for --connect-timeout")
 
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
@@ -58,9 +64,11 @@ func cmdLoadtest(args []string) {
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -n, --receivers N        concurrent receivers (default: 10)\n")
 		fmt.Fprintf(os.Stderr, "  -d, --duration DURATION  test duration (default: 1m)\n")
-		fmt.Fprintf(os.Stderr, "      --ramp DURATION      ramp-up time, 0 = all at once (default: 0s)\n")
-		fmt.Fprintf(os.Stderr, "      --url URL            direct HLS manifest URL (skip resolution)\n")
-		fmt.Fprintf(os.Stderr, "      --connect-timeout D  initial validation timeout (default: 10s)\n\n")
+		fmt.Fprintf(os.Stderr, "  -r, --ramp DURATION      ramp-up time, 0 = all at once (default: 0s)\n")
+		fmt.Fprintf(os.Stderr, "  -u, --url URL            direct HLS manifest URL (skip resolution)\n")
+		fmt.Fprintf(os.Stderr, "  -q, --quality QUALITY    variant quality: best, worst, or 720p\n")
+		fmt.Fprintf(os.Stderr, "  -x, --proxy URL          proxy URL (socks5://, http://, https://)\n")
+		fmt.Fprintf(os.Stderr, "  -T, --connect-timeout D  initial validation timeout (default: 10s)\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL    log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
@@ -70,8 +78,8 @@ func cmdLoadtest(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv loadtest -n 500 --ramp 60s -d 10m TVabc...@localhost:8000\n")
 		fmt.Fprintf(os.Stderr, "  tltv loadtest -n 100 -d 5m --url https://demo.timelooptv.org/stream.m3u8\n")
 		fmt.Fprintf(os.Stderr, "  tltv loadtest -n 50 -d 2m --json TVabc...@localhost:8000\n\n")
-		fmt.Fprintf(os.Stderr, "Environment variables: RECEIVERS, DURATION, RAMP, URL, CONNECT_TIMEOUT,\n")
-		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE. Flags override env vars.\n")
+		fmt.Fprintf(os.Stderr, "Environment variables: RECEIVERS, DURATION, RAMP, URL, QUALITY,\n")
+		fmt.Fprintf(os.Stderr, "CONNECT_TIMEOUT, LOG_LEVEL, LOG_FORMAT, LOG_FILE. Flags override env vars.\n")
 	}
 	fs.Parse(args)
 
@@ -106,9 +114,15 @@ func cmdLoadtest(args []string) {
 		fatal("--receivers must be > 0")
 	}
 
+	// Parse proxy URL
+	proxyURL, err := parseProxyURL(*proxyStr)
+	if err != nil {
+		fatal("%v", err)
+	}
+
 	// Initial validation: verify we can connect before spawning N receivers
 	logInfof("validating target...")
-	client := newClient(flagInsecure)
+	client := newClientWithProxy(flagInsecure, proxyURL)
 
 	valRecv := &Receiver{
 		Target:         target,
@@ -191,8 +205,9 @@ spawnLoop:
 			recv := &Receiver{
 				Target:         target,
 				DirectURL:      *directURL,
-				Client:         newClient(flagInsecure),
+				Client:         newClientWithProxy(flagInsecure, proxyURL),
 				Stats:          stats,
+				Quality:        *quality,
 				VerifyMetadata: false, // skip per-receiver verification for load testing
 			}
 

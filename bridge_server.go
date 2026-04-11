@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -17,6 +18,8 @@ type bridgeServer struct {
 	peerReg   *peerRegistry    // optional external peers (nil = no --peers)
 	gossipReg *peerRegistry    // optional gossip-discovered peers (nil = no --gossip)
 	mux       *http.ServeMux
+	iconData  []byte           // default icon data (nil = no default icon)
+	iconCT    string           // icon content type
 }
 
 // newBridgeServer creates a bridge HTTP server with all protocol endpoints registered.
@@ -153,6 +156,15 @@ func (s *bridgeServer) handleChannelPath(w http.ResponseWriter, r *http.Request)
 		s.serveGuideJSON(w, r, ch)
 	case "guide.xml":
 		s.serveGuideXML(w, r, ch)
+	case "icon.svg", "icon.png", "icon.jpg":
+		if len(s.iconData) > 0 {
+			w.Header().Set("Content-Type", s.iconCT)
+			w.Header().Set("Cache-Control", "max-age=86400")
+			w.Write(s.iconData)
+		} else {
+			http.NotFound(w, r)
+		}
+		return
 	default:
 		// stream.m3u8 and all sub-paths (segments, sub-manifests)
 		// Cache upstream HTTP streams (not local file streams)
@@ -285,18 +297,29 @@ func jsonError(w http.ResponseWriter, code string, status int) {
 	writeJSON(w, map[string]string{"error": code}, status)
 }
 
+// checkRequestToken validates an access token from a request query parameter
+// using constant-time comparison. Returns true if access is allowed.
+// Writes 403 and returns false if denied.
+// If expectedToken is empty, always returns true (public channel).
+func checkRequestToken(w http.ResponseWriter, r *http.Request, expectedToken string) bool {
+	if expectedToken == "" {
+		return true
+	}
+	token := r.URL.Query().Get("token")
+	if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
+		jsonError(w, "access_denied", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // checkToken validates the access token for private channels.
 // Returns true if access is allowed. Writes 403 and returns false if denied.
 func checkToken(w http.ResponseWriter, r *http.Request, ch *bridgeRegisteredChannel) bool {
 	if !ch.IsPrivate() {
 		return true
 	}
-	token := r.URL.Query().Get("token")
-	if token != ch.Token {
-		jsonError(w, "access_denied", http.StatusForbidden)
-		return false
-	}
-	return true
+	return checkRequestToken(w, r, ch.Token)
 }
 
 // setPrivateHeaders sets Referrer-Policy and overrides Cache-Control for private channels.
@@ -335,6 +358,9 @@ func guideToXMLTV(channelID, channelName string, entries []guideEntry) string {
 		}
 		if e.Category != "" {
 			sb.WriteString("    <category>" + xmlEscape(e.Category) + "</category>\n")
+		}
+		if e.RelayFrom != "" {
+			sb.WriteString("    <previously-shown channel=\"" + xmlEscape(e.RelayFrom) + "\" />\n")
 		}
 		sb.WriteString("  </programme>\n")
 	}

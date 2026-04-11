@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -18,6 +19,60 @@ import (
 var hlsJSData []byte
 
 const viewerFavicon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 491.322 349.774"><style>g{fill:#000}@media(prefers-color-scheme:dark){g{fill:#fff}}</style><g transform="translate(-0.177,349.812) scale(0.1,-0.1)" stroke="none"><path d="M2050 3493 c-881 -31 -1492 -102 -1671 -194 -95 -48 -171 -145 -214 -272 -98 -292 -154 -705 -162 -1192 -8 -497 27 -842 127 -1233 48 -187 74 -246 140 -316 96 -102 195 -137 505 -181 756 -105 1734 -133 2665 -75 330 21 800 78 959 117 195 47 311 159 370 358 52 179 98 442 128 735 24 242 24 784 0 1030 -40 397 -116 746 -191 874 -34 58 -117 133 -179 161 -243 111 -1187 198 -2092 193 -170 -1 -344 -3 -385 -5z m-246 -993 c33 -5 92 -25 132 -44 68 -32 101 -64 609 -571 296 -295 547 -543 559 -550 17 -11 80 -15 299 -15 392 -2 361 -37 365 410 3 365 0 389 -57 427 -33 23 -39 23 -303 23 -177 0 -277 -4 -291 -11 -12 -6 -95 -84 -185 -172 l-162 -162 -113 113 -112 112 170 170 c178 178 221 211 320 250 57 22 75 24 326 28 170 2 293 0 340 -7 193 -30 343 -175 378 -365 14 -76 15 -704 1 -777 -15 -79 -67 -177 -124 -235 -58 -57 -156 -109 -235 -124 -70 -13 -552 -13 -622 0 -30 5 -85 26 -124 45 -64 31 -111 75 -580 545 -280 282 -532 529 -558 551 l-49 39 -278 0 -278 0 -30 -25 c-52 -43 -53 -53 -50 -424 l3 -343 37 -34 c22 -20 49 -35 65 -35 100 -6 532 5 548 13 11 6 92 82 180 169 l160 159 113 -113 112 -113 -183 -182 c-262 -260 -269 -262 -677 -262 -141 0 -281 5 -311 10 -170 32 -310 164 -355 335 -10 37 -14 143 -14 423 0 351 1 376 21 434 52 156 176 269 332 303 75 16 530 20 621 5z"/></g></svg>`
+
+// defaultIconSVG is the TLTV logo with a fixed white fill for use as a standalone icon.
+const defaultIconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 491.322 349.774"><g transform="translate(-0.177,349.812) scale(0.1,-0.1)" fill="#fff" stroke="none"><path d="M2050 3493 c-881 -31 -1492 -102 -1671 -194 -95 -48 -171 -145 -214 -272 -98 -292 -154 -705 -162 -1192 -8 -497 27 -842 127 -1233 48 -187 74 -246 140 -316 96 -102 195 -137 505 -181 756 -105 1734 -133 2665 -75 330 21 800 78 959 117 195 47 311 159 370 358 52 179 98 442 128 735 24 242 24 784 0 1030 -40 397 -116 746 -191 874 -34 58 -117 133 -179 161 -243 111 -1187 198 -2092 193 -170 -1 -344 -3 -385 -5z m-246 -993 c33 -5 92 -25 132 -44 68 -32 101 -64 609 -571 296 -295 547 -543 559 -550 17 -11 80 -15 299 -15 392 -2 361 -37 365 410 3 365 0 389 -57 427 -33 23 -39 23 -303 23 -177 0 -277 -4 -291 -11 -12 -6 -95 -84 -185 -172 l-162 -162 -113 113 -112 112 170 170 c178 178 221 211 320 250 57 22 75 24 326 28 170 2 293 0 340 -7 193 -30 343 -175 378 -365 14 -76 15 -704 1 -777 -15 -79 -67 -177 -124 -235 -58 -57 -156 -109 -235 -124 -70 -13 -552 -13 -622 0 -30 5 -85 26 -124 45 -64 31 -111 75 -580 545 -280 282 -532 529 -558 551 l-49 39 -278 0 -278 0 -30 -25 c-52 -43 -53 -53 -50 -424 l3 -343 37 -34 c22 -20 49 -35 65 -35 100 -6 532 5 548 13 11 6 92 82 180 169 l160 159 113 -113 112 -113 -183 -182 c-262 -260 -269 -262 -677 -262 -141 0 -281 5 -311 10 -170 32 -310 164 -355 335 -10 37 -14 143 -14 423 0 351 1 376 21 434 52 156 176 269 332 303 75 16 530 20 621 5z"/></g></svg>`
+
+// loadIcon returns icon data and content type. If iconPath is empty, returns
+// the default TLTV logo SVG. If iconPath is a file, reads and validates it.
+func loadIcon(iconPath string) ([]byte, string) {
+	if iconPath == "" {
+		return []byte(defaultIconSVG), "image/svg+xml"
+	}
+	data, err := os.ReadFile(iconPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot read icon file: %v\n", err)
+		os.Exit(1)
+	}
+	if len(data) > 1<<20 { // 1 MB
+		fmt.Fprintf(os.Stderr, "error: icon file exceeds 1 MB\n")
+		os.Exit(1)
+	}
+	ct := iconContentType(iconPath)
+	if ct == "" {
+		fmt.Fprintf(os.Stderr, "error: icon must be PNG, JPEG, or SVG\n")
+		os.Exit(1)
+	}
+	return data, ct
+}
+
+// iconContentType returns the content type for an icon file based on extension.
+func iconContentType(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".svg":
+		return "image/svg+xml"
+	default:
+		return ""
+	}
+}
+
+// iconExtension returns the file extension for an icon content type.
+func iconExtension(contentType string) string {
+	switch contentType {
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpg"
+	case "image/svg+xml":
+		return "svg"
+	default:
+		return "svg"
+	}
+}
 
 // viewerServer serves the local viewer page and proxies HLS to the upstream target.
 type viewerServer struct {
@@ -164,7 +219,7 @@ func applyViewerConfig(vc *viewerConfig, cfg map[string]interface{}) {
 //
 // Protocol endpoints (/.well-known/tltv, /tltv/v1/...) registered separately
 // by the daemon take routing priority over the "/" subtree pattern.
-func viewerEmbedRoutes(mux *http.ServeMux, infoFn func() map[string]interface{}) {
+func viewerEmbedRoutes(mux *http.ServeMux, infoFn func(channelID string) map[string]interface{}, channelsFn func() []ChannelRef) {
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(viewerHTML))
@@ -183,7 +238,18 @@ func viewerEmbedRoutes(mux *http.ServeMux, infoFn func() map[string]interface{})
 	})
 
 	mux.HandleFunc("GET /api/info", func(w http.ResponseWriter, r *http.Request) {
-		info := infoFn()
+		chID := r.URL.Query().Get("channel")
+		info := infoFn(chID)
+		if channelsFn != nil {
+			chList := channelsFn()
+			if len(chList) > 1 {
+				var arr []interface{}
+				for _, ch := range chList {
+					arr = append(arr, map[string]interface{}{"id": ch.ID, "name": ch.Name})
+				}
+				info["channels"] = arr
+			}
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
@@ -347,6 +413,11 @@ func cmdViewer(args []string) {
 	}
 	logInfof("metadata verified: %s", getString(doc, "name"))
 
+	// Check for unknown access modes (spec §5.2)
+	if err := checkAccessMode(doc); err != nil {
+		fatal("%v", err)
+	}
+
 	// Fetch guide (non-fatal)
 	var guide map[string]interface{}
 	guide, err = client.FetchGuide(host, channelID, tok)
@@ -404,7 +475,7 @@ func cmdViewer(args []string) {
 	mux := http.NewServeMux()
 
 	// Shared viewer routes (HTML, assets, /api/info)
-	viewerEmbedRoutes(mux, func() map[string]interface{} {
+	viewerEmbedRoutes(mux, func(_ string) map[string]interface{} {
 		info := map[string]interface{}{
 			"channel_id":   srv.channelID,
 			"channel_name": srv.channelName,
@@ -421,7 +492,7 @@ func cmdViewer(args []string) {
 			info["guide"] = srv.guide
 		}
 		return info
-	})
+	}, nil)
 
 	// Standalone-only: stream proxy to remote upstream
 	mux.HandleFunc("/stream/", srv.handleStream)
@@ -582,9 +653,11 @@ var viewerHTML = pageHead("tltv viewer", viewerExtraCSS) + `
     <div id="ov" class="ov"><div class="sp"></div><span>connecting...</span></div>
   </div>
   <div class="ctrl">
+    <img id="ch-icon" style="display:none;height:20px;width:20px;vertical-align:middle;margin-right:6px;border-radius:3px" alt="">
     <span id="cn" class="cn"></span>
     <span id="ps" class="sep" style="display:none">/</span>
     <span id="prg" class="prg"></span>
+    <span id="rb" class="cb" style="display:none;cursor:default;font-size:.65rem;padding:1px 6px;margin-left:6px">relay</span>
     <span class="spacer"></span>
     <button id="mb" class="cb" onclick="tmu()">unmute</button>
   </div>
@@ -611,6 +684,7 @@ var viewerHTML = pageHead("tltv viewer", viewerExtraCSS) + `
 
   <div class="sl">peers</div>
   <div class="db" id="pd"><div class="ge" style="color:#666">loading...</div></div>
+  <div style="height:4rem"></div>
   </div>
 </div>
 </div>
@@ -627,13 +701,33 @@ function kv(p,k,v,isUrl){
   p.appendChild(d);
 }
 
-fetch('/api/info').then(function(r){return r.json()}).then(function(d){
+var infoUrl='/api/info'+window.location.search;
+fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
   inf=d;
   var base=d.base_url||window.location.origin;
   var m=d.metadata||{};
   document.getElementById('cn').textContent=d.channel_name;
   document.getElementById('uri').textContent=d.tltv_uri;
   document.title=d.channel_name+' \u2014 tltv viewer';
+
+  // === Origin check from signed metadata (§11) ===
+  var origins=m.origins||[];
+  var _isOrg=false,_connHost='';
+  try{var _u=new URL(base);_connHost=_u.port===''||_u.port==='443'?_u.hostname:_u.host;
+    origins.forEach(function(o){if(o.replace(/:443$/,'')===_connHost||o===_connHost+':443'||o===_connHost)_isOrg=true})}catch(e){}
+  var _hasOrigins=origins.length>0;
+  // Relay badge in controls bar (from signed origins, not discovery)
+  if(_hasOrigins&&!_isOrg){
+    var rb=document.getElementById('rb');
+    if(rb){rb.style.display='';
+      // Check if discovery claims origin — if so, it's spoofed
+      fetch(base+'/.well-known/tltv').then(function(r){return r.json()}).then(function(n){
+        var claimed=false;
+        (n.channels||[]).forEach(function(ch){if(ch.id===d.channel_id)claimed=true});
+        if(claimed){rb.style.borderColor='#a16207';rb.style.color='#fbbf24'}
+      }).catch(function(){})
+    }
+  }
 
   // === 1. Channel section: curated fields then remaining ===
   var chd=document.getElementById('chd');
@@ -642,22 +736,32 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
   if(d.tltv_uri) kv(chd,'uri',d.tltv_uri,false);
   kv(chd,'status',m.status||'active',false);
   kv(chd,'access',m.access||'public',false);
+  if(m.description) kv(chd,'description',m.description,false);
+  if(m.language) kv(chd,'language',m.language,false);
+  if(m.timezone) kv(chd,'timezone',m.timezone,false);
+  if(m.tags&&m.tags.length) kv(chd,'tags',m.tags.join(', '),false);
   if(m.stream) kv(chd,'stream',base+m.stream,true);
   if(m.guide){
     kv(chd,'guide',base+m.guide,true);
     kv(chd,'xmltv',base+m.guide.replace('guide.json','guide.xml'),true);
   }
+  if(m.icon){
+    var iconUrl=m.icon.charAt(0)==='/'?base+m.icon:m.icon;
+    kv(chd,'icon',iconUrl,true);
+    var ic=document.getElementById('ch-icon');
+    if(ic){ic.src=iconUrl;ic.style.display='inline-block';}
+  }
   if(m.updated) kv(chd,'updated',m.updated,false);
   if(m.seq!==undefined) kv(chd,'seq',String(m.seq),false);
   // Dump remaining keys
-  var skip={v:1,signature:1,id:1,name:1,status:1,access:1,stream:1,guide:1,updated:1,seq:1};
+  var skip={v:1,signature:1,id:1,name:1,status:1,access:1,stream:1,guide:1,updated:1,seq:1,
+    description:1,language:1,timezone:1,tags:1,icon:1};
   Object.keys(m).sort().forEach(function(k){
     if(skip[k]) return;
     var val=m[k];
     if(Array.isArray(val)) val=val.join(', ');
     else if(val!==null&&typeof val==='object') val=JSON.stringify(val);
     else val=String(val);
-    if((k==='icon')&&val.charAt(0)==='/') val=base+val;
     kv(chd,k,val,val.indexOf('http')===0);
   });
 
@@ -690,7 +794,8 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
         var mk=np?'<span class="ok">> </span>':'  ';
         var div=document.createElement('div');div.className='ge';
         var cat=e.category?' <span class="gt">['+esc(e.category)+']</span>':'';
-        div.innerHTML=mk+'<span class="gt">'+esc(s)+' \u2013 '+esc(n)+'</span>  '+esc(e.title||'')+cat;
+        var rf=e.relay_from?' <span class="gt">[relay: '+esc(e.relay_from)+']</span>':'';
+        div.innerHTML=mk+'<span class="gt">'+esc(s)+' \u2013 '+esc(n)+'</span>  '+esc(e.title||'')+cat+rf;
         gd.appendChild(div);
       });
     }
@@ -698,21 +803,44 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
     gd.innerHTML='<div class="ge" style="color:#666">no guide data</div>';
   }
 
+  // === Channel selector (multi-channel) ===
+  if(d.channels&&d.channels.length>1){
+    var sel=document.createElement('select');
+    sel.className='cb';
+    sel.style.cssText='margin-left:8px;appearance:none;-webkit-appearance:none;padding:2px 8px';
+    d.channels.forEach(function(ch){
+      var opt=document.createElement('option');
+      opt.value=ch.id;opt.textContent=ch.name;
+      if(ch.id===d.channel_id) opt.selected=true;
+      sel.appendChild(opt);
+    });
+    sel.onchange=function(){window.location.search='?channel='+sel.value};
+    document.getElementById('cn').parentNode.appendChild(sel);
+  }
+
   initPlayer(d.stream_src);
 
-  // === 4. Node section ===
+  // === 4. Node section (uses signed origins to verify origin claims) ===
   fetch(base+'/.well-known/tltv').then(function(r){return r.json()}).then(function(n){
     var nd=document.getElementById('nd');
     nd.innerHTML='';
     var ver=(n.versions&&n.versions.length)?n.versions[0]:'?';
     kv(nd,'protocol',n.protocol+' protocol v'+ver,false);
+    function chAnn(id,disc){
+      if(id!==d.channel_id||!_hasOrigins)return'';
+      if(_isOrg)return' <span class="ok">(origin)</span>';
+      var hint=origins.length?' \u2014 real origin is '+esc(origins[0]):'';
+      if(disc==='channel')return' <span class="wn">(spoofed origin'+hint+')</span>';
+      return' <span class="gt">(relay'+hint+')</span>';
+    }
+    var chLabel=_hasOrigins&&!_isOrg?'Channels':'Origin Channels';
     if(n.channels&&n.channels.length){
       var hdr=document.createElement('div');hdr.className='ge';hdr.style.color='#666';hdr.style.marginTop='6px';
-      hdr.textContent='Origin Channels ('+n.channels.length+')';nd.appendChild(hdr);
+      hdr.textContent=chLabel+' ('+n.channels.length+')';nd.appendChild(hdr);
       n.channels.forEach(function(ch){
         var mk=(ch.id===d.channel_id)?'<span class="ok">> </span>':'  ';
         var div=document.createElement('div');div.className='ge';
-        div.innerHTML=mk+'<span class="uri">'+esc(ch.id)+'</span>  <span class="gt">'+esc(ch.name)+'</span>';
+        div.innerHTML=mk+'<span class="uri">'+esc(ch.id)+'</span>  <span class="gt">'+esc(ch.name)+'</span>'+chAnn(ch.id,'channel');
         nd.appendChild(div);
       });
     }
@@ -722,7 +850,7 @@ fetch('/api/info').then(function(r){return r.json()}).then(function(d){
       n.relaying.forEach(function(ch){
         var mk=(ch.id===d.channel_id)?'<span class="ok">> </span>':'  ';
         var div=document.createElement('div');div.className='ge';
-        div.innerHTML=mk+'<span class="uri">'+esc(ch.id)+'</span>  <span class="gt">'+esc(ch.name)+'</span>';
+        div.innerHTML=mk+'<span class="uri">'+esc(ch.id)+'</span>  <span class="gt">'+esc(ch.name)+'</span>'+chAnn(ch.id,'relay');
         nd.appendChild(div);
       });
     }
@@ -789,6 +917,26 @@ function initPlayer(src){
       ov.classList.add('h');
       var e=document.getElementById('sv_st');
       if(e) e.textContent='\u2713 live';
+      // Quality selector (only for master playlists with multiple levels)
+      if(hls.levels&&hls.levels.length>1){
+        var qs=document.createElement('select');
+        qs.className='cb';
+        qs.style.cssText='margin-left:8px;appearance:none;-webkit-appearance:none;padding:2px 8px';
+        var auto=document.createElement('option');
+        auto.value='-1';auto.textContent='auto';auto.selected=true;
+        qs.appendChild(auto);
+        hls.levels.forEach(function(lv,i){
+          var opt=document.createElement('option');
+          opt.value=String(i);
+          var label=lv.height?lv.height+'p':'level '+i;
+          if(lv.bitrate) label+=' ('+Math.round(lv.bitrate/1000)+'k)';
+          opt.textContent=label;
+          qs.appendChild(opt);
+        });
+        qs.onchange=function(){hls.currentLevel=parseInt(qs.value)};
+        var ctrl=document.getElementById('cn').parentNode;
+        ctrl.appendChild(qs);
+      }
     });
 
     hls.on(Hls.Events.LEVEL_LOADED,function(e,data){

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -1007,6 +1008,580 @@ func TestExtractToken(t *testing.T) {
 				t.Errorf("extractToken(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// ---------- validateToken ----------
+
+func TestValidateToken_Valid(t *testing.T) {
+	cases := []string{
+		"abc123",
+		"A-Z.a_z~0",
+		strings.Repeat("x", 256),
+	}
+	for _, tc := range cases {
+		if err := validateToken(tc); err != nil {
+			t.Errorf("validateToken(%q) = %v, want nil", tc, err)
+		}
+	}
+}
+
+func TestValidateToken_TooLong(t *testing.T) {
+	token := strings.Repeat("x", 257)
+	if err := validateToken(token); err == nil {
+		t.Error("257-char token should be rejected")
+	}
+}
+
+func TestValidateToken_BadChars(t *testing.T) {
+	cases := []string{
+		"has spaces",
+		"has&amp",
+		"has=equals",
+		"has/slash",
+		"has?query",
+		"has%percent",
+	}
+	for _, tc := range cases {
+		if err := validateToken(tc); err == nil {
+			t.Errorf("validateToken(%q) should reject bad chars", tc)
+		}
+	}
+}
+
+// ---------- checkV1Support ----------
+
+func TestCheckV1Support_Supported(t *testing.T) {
+	cases := [][]int{
+		{1},
+		{1, 2},
+		{2, 1},
+	}
+	for _, versions := range cases {
+		info := &NodeInfo{Versions: versions}
+		if err := checkV1Support(info); err != nil {
+			t.Errorf("versions %v should support v1: %v", versions, err)
+		}
+	}
+}
+
+func TestCheckV1Support_NotSupported(t *testing.T) {
+	cases := [][]int{
+		{2},
+		{2, 3},
+		{},
+	}
+	for _, versions := range cases {
+		info := &NodeInfo{Versions: versions}
+		if err := checkV1Support(info); err == nil {
+			t.Errorf("versions %v should NOT support v1", versions)
+		}
+	}
+}
+
+// ---------- checkAccessMode ----------
+
+func TestCheckAccessMode_Known(t *testing.T) {
+	cases := []map[string]interface{}{
+		{"access": "public"},
+		{"access": "token"},
+		{}, // absent = public
+	}
+	for _, doc := range cases {
+		if err := checkAccessMode(doc); err != nil {
+			t.Errorf("access %v should be known: %v", doc["access"], err)
+		}
+	}
+}
+
+func TestCheckAccessMode_Unknown(t *testing.T) {
+	cases := []string{"delegation", "subscription", "invite"}
+	for _, access := range cases {
+		doc := map[string]interface{}{"access": access}
+		if err := checkAccessMode(doc); err == nil {
+			t.Errorf("access %q should be unknown", access)
+		}
+	}
+}
+
+// ---------- Origin verification (§11) ----------
+
+func TestExtractOrigins_ValidArray(t *testing.T) {
+	doc := map[string]interface{}{
+		"origins": []interface{}{"origin.example.com:443", "backup.example.com:8443"},
+	}
+	origins := extractOrigins(doc)
+	if len(origins) != 2 {
+		t.Fatalf("expected 2 origins, got %d", len(origins))
+	}
+	if origins[0] != "origin.example.com:443" || origins[1] != "backup.example.com:8443" {
+		t.Errorf("origins = %v", origins)
+	}
+}
+
+func TestExtractOrigins_Missing(t *testing.T) {
+	doc := map[string]interface{}{"name": "test"}
+	origins := extractOrigins(doc)
+	if origins != nil {
+		t.Errorf("expected nil for missing origins, got %v", origins)
+	}
+}
+
+func TestExtractOrigins_WrongType(t *testing.T) {
+	doc := map[string]interface{}{"origins": "not-an-array"}
+	origins := extractOrigins(doc)
+	if origins != nil {
+		t.Errorf("expected nil for string origins, got %v", origins)
+	}
+}
+
+func TestExtractOrigins_EmptyArray(t *testing.T) {
+	doc := map[string]interface{}{"origins": []interface{}{}}
+	origins := extractOrigins(doc)
+	if origins != nil {
+		t.Errorf("expected nil for empty array, got %v", origins)
+	}
+}
+
+func TestExtractOrigins_MixedTypes(t *testing.T) {
+	// Non-string elements should be skipped
+	doc := map[string]interface{}{
+		"origins": []interface{}{"valid.example.com", 42, true, "also-valid.example.com"},
+	}
+	origins := extractOrigins(doc)
+	if len(origins) != 2 {
+		t.Fatalf("expected 2 string origins, got %d: %v", len(origins), origins)
+	}
+}
+
+func TestHostnameMatchesOrigin_Exact(t *testing.T) {
+	origins := []string{"origin.example.com:443"}
+	if !hostnameMatchesOrigin("origin.example.com:443", origins) {
+		t.Error("exact match should return true")
+	}
+}
+
+func TestHostnameMatchesOrigin_PortNormalization(t *testing.T) {
+	// :443 is the default HTTPS port and should be stripped for comparison
+	cases := []struct {
+		hostname string
+		origins  []string
+		want     bool
+	}{
+		{"example.com:443", []string{"example.com"}, true},
+		{"example.com", []string{"example.com:443"}, true},
+		{"example.com:443", []string{"example.com:443"}, true},
+		{"example.com", []string{"example.com"}, true},
+		{"example.com:8000", []string{"example.com:443"}, false},
+		{"example.com:8000", []string{"example.com"}, false},
+		{"example.com:8000", []string{"example.com:8000"}, true},
+	}
+	for _, tc := range cases {
+		got := hostnameMatchesOrigin(tc.hostname, tc.origins)
+		if got != tc.want {
+			t.Errorf("hostnameMatchesOrigin(%q, %v) = %v, want %v", tc.hostname, tc.origins, got, tc.want)
+		}
+	}
+}
+
+func TestHostnameMatchesOrigin_CaseInsensitive(t *testing.T) {
+	origins := []string{"Origin.Example.COM:443"}
+	if !hostnameMatchesOrigin("origin.example.com", origins) {
+		t.Error("case-insensitive match should return true")
+	}
+}
+
+func TestHostnameMatchesOrigin_NoMatch(t *testing.T) {
+	origins := []string{"other.example.com:443"}
+	if hostnameMatchesOrigin("relay.example.com:443", origins) {
+		t.Error("non-matching host should return false")
+	}
+}
+
+func TestHostnameMatchesOrigin_EmptyOrigins(t *testing.T) {
+	if hostnameMatchesOrigin("example.com:443", nil) {
+		t.Error("nil origins should return false")
+	}
+	if hostnameMatchesOrigin("example.com:443", []string{}) {
+		t.Error("empty origins should return false")
+	}
+}
+
+func TestHostnameMatchesOrigin_MultipleOrigins(t *testing.T) {
+	origins := []string{"primary.example.com:443", "secondary.example.com:8443"}
+	if !hostnameMatchesOrigin("secondary.example.com:8443", origins) {
+		t.Error("should match second origin")
+	}
+}
+
+func TestNormalizeOriginHost(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"example.com:443", "example.com"},
+		{"example.com:8000", "example.com:8000"},
+		{"example.com", "example.com"},
+		{"Example.COM:443", "example.com"},
+		{"Example.COM:8000", "example.com:8000"},
+		{"Example.COM", "example.com"},
+		{"[::1]:443", "::1"},
+		{"[::1]:8000", "::1:8000"},
+	}
+	for _, tc := range cases {
+		got := normalizeOriginHost(tc.input)
+		if got != tc.want {
+			t.Errorf("normalizeOriginHost(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestCheckOrigin_NilDoc(t *testing.T) {
+	oc := checkOrigin(nil, "example.com")
+	if oc != nil {
+		t.Error("nil doc should return nil")
+	}
+}
+
+func TestCheckOrigin_NoOriginsField(t *testing.T) {
+	doc := map[string]interface{}{"name": "test"}
+	oc := checkOrigin(doc, "example.com")
+	if oc == nil {
+		t.Fatal("expected non-nil originCheck")
+	}
+	if oc.HasOrigins {
+		t.Error("HasOrigins should be false when field is absent")
+	}
+}
+
+func TestCheckOrigin_IsOrigin(t *testing.T) {
+	doc := map[string]interface{}{
+		"origins": []interface{}{"origin.example.com:443"},
+	}
+	oc := checkOrigin(doc, "origin.example.com:443")
+	if oc == nil {
+		t.Fatal("expected non-nil originCheck")
+	}
+	if !oc.HasOrigins {
+		t.Error("HasOrigins should be true")
+	}
+	if !oc.IsOrigin {
+		t.Error("IsOrigin should be true for matching hostname")
+	}
+}
+
+func TestCheckOrigin_IsRelay(t *testing.T) {
+	doc := map[string]interface{}{
+		"origins": []interface{}{"origin.example.com:443"},
+	}
+	oc := checkOrigin(doc, "relay.example.com:443")
+	if oc == nil {
+		t.Fatal("expected non-nil originCheck")
+	}
+	if !oc.HasOrigins {
+		t.Error("HasOrigins should be true")
+	}
+	if oc.IsOrigin {
+		t.Error("IsOrigin should be false for non-matching hostname")
+	}
+	if len(oc.Origins) != 1 || oc.Origins[0] != "origin.example.com:443" {
+		t.Errorf("Origins = %v, want [origin.example.com:443]", oc.Origins)
+	}
+}
+
+func TestCheckOrigin_PortNormalization(t *testing.T) {
+	// hostname without port should match origin with :443
+	doc := map[string]interface{}{
+		"origins": []interface{}{"origin.example.com:443"},
+	}
+	oc := checkOrigin(doc, "origin.example.com")
+	if oc == nil || !oc.IsOrigin {
+		t.Error("hostname without port should match origin with :443")
+	}
+}
+
+func TestCheckOrigin_EmptyOriginsArray(t *testing.T) {
+	doc := map[string]interface{}{
+		"origins": []interface{}{},
+	}
+	oc := checkOrigin(doc, "example.com")
+	if oc == nil {
+		t.Fatal("expected non-nil originCheck")
+	}
+	if !oc.HasOrigins {
+		t.Error("HasOrigins should be true (field exists, just empty)")
+	}
+	if oc.IsOrigin {
+		t.Error("IsOrigin should be false with empty origins array")
+	}
+}
+
+// ---------- Proxy support ----------
+
+func TestNewClient_HasProxy(t *testing.T) {
+	c := newClient(false)
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("transport is not *http.Transport")
+	}
+	if tr.Proxy == nil {
+		t.Error("newClient() transport should have Proxy set (http.ProxyFromEnvironment)")
+	}
+}
+
+func TestNewSSRFSafeClient_NoProxy(t *testing.T) {
+	c := newSSRFSafeClient(false)
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("transport is not *http.Transport")
+	}
+	if tr.Proxy != nil {
+		t.Error("newSSRFSafeClient() transport must NOT have Proxy set (security invariant)")
+	}
+}
+
+// ---------- Unknown status display ----------
+
+func TestUnknownStatus_Display(t *testing.T) {
+	// Unknown status values should be preserved (not mapped to "active")
+	doc := map[string]interface{}{"status": "archived"}
+	status := getStringDefault(doc, "status", "active")
+	if status != "archived" {
+		t.Errorf("status = %q, want %q", status, "archived")
+	}
+}
+
+func TestUnknownStatus_DefaultActive(t *testing.T) {
+	// Missing status defaults to "active"
+	doc := map[string]interface{}{}
+	status := getStringDefault(doc, "status", "active")
+	if status != "active" {
+		t.Errorf("status = %q, want %q", status, "active")
+	}
+}
+
+// ---------- Icon ----------
+
+func TestLoadIcon_Default(t *testing.T) {
+	data, ct := loadIcon("")
+	if ct != "image/svg+xml" {
+		t.Errorf("default icon content type = %q, want image/svg+xml", ct)
+	}
+	if len(data) == 0 {
+		t.Error("default icon data is empty")
+	}
+	if !strings.Contains(string(data), "<svg") {
+		t.Error("default icon should be SVG")
+	}
+}
+
+func TestIconContentType(t *testing.T) {
+	cases := map[string]string{
+		"logo.png":  "image/png",
+		"logo.jpg":  "image/jpeg",
+		"logo.jpeg": "image/jpeg",
+		"logo.svg":  "image/svg+xml",
+		"logo.gif":  "",
+		"logo.bmp":  "",
+	}
+	for path, want := range cases {
+		got := iconContentType(path)
+		if got != want {
+			t.Errorf("iconContentType(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestIconExtension(t *testing.T) {
+	cases := map[string]string{
+		"image/png":     "png",
+		"image/jpeg":    "jpg",
+		"image/svg+xml": "svg",
+		"text/plain":    "svg", // fallback
+	}
+	for ct, want := range cases {
+		got := iconExtension(ct)
+		if got != want {
+			t.Errorf("iconExtension(%q) = %q, want %q", ct, got, want)
+		}
+	}
+}
+
+// ---------- Proxy URL parsing ----------
+
+func TestParseProxyURL_Valid(t *testing.T) {
+	cases := []string{"socks5://localhost:9050", "http://proxy.corp:8080", "https://proxy.corp:443"}
+	for _, s := range cases {
+		u, err := parseProxyURL(s)
+		if err != nil {
+			t.Errorf("parseProxyURL(%q) error: %v", s, err)
+		}
+		if u == nil {
+			t.Errorf("parseProxyURL(%q) = nil, want non-nil", s)
+		}
+	}
+}
+
+func TestParseProxyURL_Empty(t *testing.T) {
+	u, err := parseProxyURL("")
+	if err != nil || u != nil {
+		t.Errorf("parseProxyURL(\"\") = %v, %v; want nil, nil", u, err)
+	}
+}
+
+func TestParseProxyURL_BadScheme(t *testing.T) {
+	_, err := parseProxyURL("ftp://proxy:21")
+	if err == nil {
+		t.Error("parseProxyURL(ftp://) should fail")
+	}
+}
+
+// ---------- Guide relay_from ----------
+
+func TestGuideRelayFrom_XMLTV(t *testing.T) {
+	entries := []guideEntry{
+		{Start: "2026-04-10T12:00:00Z", End: "2026-04-10T13:00:00Z", Title: "Relayed Show", RelayFrom: "TVAlice123"},
+	}
+	xml := guideToXMLTV("TVBob456", "Bob's Channel", entries)
+	if !strings.Contains(xml, `previously-shown channel="TVAlice123"`) {
+		t.Error("XMLTV should contain previously-shown with relay_from channel")
+	}
+}
+
+func TestGuideRelayFrom_SignedDoc(t *testing.T) {
+	// relay_from should appear in signed guide entries
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	guide := []guideEntry{
+		{Start: "2026-04-10T12:00:00Z", End: "2026-04-10T13:00:00Z", Title: "Relayed", RelayFrom: "TVAlice123"},
+	}
+	_, guideDoc := serverSignDocs(channelID, "TEST", "", priv, guide, "public", false, nil)
+
+	var doc map[string]interface{}
+	json.Unmarshal(guideDoc, &doc)
+	entries, _ := doc["entries"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("entries length = %d, want 1", len(entries))
+	}
+	entry, _ := entries[0].(map[string]interface{})
+	if rf, _ := entry["relay_from"].(string); rf != "TVAlice123" {
+		t.Errorf("relay_from = %q, want %q", rf, "TVAlice123")
+	}
+}
+
+func TestGuideRelayFrom_Absent_SignedDoc(t *testing.T) {
+	// No relay_from when empty
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	guide := []guideEntry{
+		{Start: "2026-04-10T12:00:00Z", End: "2026-04-10T13:00:00Z", Title: "Local"},
+	}
+	_, guideDoc := serverSignDocs(channelID, "TEST", "", priv, guide, "public", false, nil)
+
+	var doc map[string]interface{}
+	json.Unmarshal(guideDoc, &doc)
+	entries, _ := doc["entries"].([]interface{})
+	entry, _ := entries[0].(map[string]interface{})
+	if _, ok := entry["relay_from"]; ok {
+		t.Error("relay_from should be absent when empty")
+	}
+}
+
+func TestGuideRelayFrom_ExtractGuideEntries(t *testing.T) {
+	doc := map[string]interface{}{
+		"entries": []interface{}{
+			map[string]interface{}{
+				"start":      "2026-04-10T12:00:00Z",
+				"end":        "2026-04-10T13:00:00Z",
+				"title":      "Relayed",
+				"relay_from": "TVAlice123",
+			},
+		},
+	}
+	entries := extractGuideEntries(doc)
+	if len(entries) != 1 {
+		t.Fatalf("entries length = %d, want 1", len(entries))
+	}
+	if entries[0].RelayFrom != "TVAlice123" {
+		t.Errorf("RelayFrom = %q, want %q", entries[0].RelayFrom, "TVAlice123")
+	}
+}
+
+func TestGuideRelayFrom_ConfigParse(t *testing.T) {
+	cfg := map[string]interface{}{
+		"entries": []interface{}{
+			map[string]interface{}{
+				"start":      "2026-04-10T12:00:00Z",
+				"end":        "2026-04-10T13:00:00Z",
+				"title":      "Relayed",
+				"relay_from": "TVAlice123",
+			},
+		},
+	}
+	entries, _, err := parseGuideConfig(cfg)
+	if err != nil {
+		t.Fatalf("parseGuideConfig error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].RelayFrom != "TVAlice123" {
+		t.Errorf("RelayFrom = %q, want %q", entries[0].RelayFrom, "TVAlice123")
+	}
+}
+
+func TestNewClientWithProxy(t *testing.T) {
+	u, _ := url.Parse("socks5://localhost:9050")
+	c := newClientWithProxy(false, u)
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("transport is not *http.Transport")
+	}
+	if tr.Proxy == nil {
+		t.Error("newClientWithProxy should have Proxy set")
+	}
+}
+
+func TestNewClientWithProxy_Nil(t *testing.T) {
+	// nil proxy should behave like newClient (ProxyFromEnvironment)
+	c := newClientWithProxy(false, nil)
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("transport is not *http.Transport")
+	}
+	if tr.Proxy == nil {
+		t.Error("newClientWithProxy(nil) should still have ProxyFromEnvironment")
+	}
+}
+
+func TestBridgeApplyDefaults(t *testing.T) {
+	channels := []bridgeChannel{
+		{Name: "Test", Description: "from source"},
+		{Name: "Test2"},
+	}
+	bridgeApplyDefaults(channels, "default desc", []string{"tag1"}, "en", "UTC")
+
+	// Channel with existing description keeps it
+	if channels[0].Description != "from source" {
+		t.Errorf("channel 0 description = %q, want %q (source override)", channels[0].Description, "from source")
+	}
+	// Channel without description gets the default
+	if channels[1].Description != "default desc" {
+		t.Errorf("channel 1 description = %q, want %q", channels[1].Description, "default desc")
+	}
+	// Both get language/timezone defaults
+	if channels[0].Language != "en" {
+		t.Errorf("channel 0 language = %q, want %q", channels[0].Language, "en")
+	}
+	if channels[1].Timezone != "UTC" {
+		t.Errorf("channel 1 timezone = %q, want %q", channels[1].Timezone, "UTC")
+	}
+}
+
+func TestGuideRelayFrom_Absent(t *testing.T) {
+	entries := []guideEntry{
+		{Start: "2026-04-10T12:00:00Z", End: "2026-04-10T13:00:00Z", Title: "Local Show"},
+	}
+	xml := guideToXMLTV("TVBob456", "Bob's Channel", entries)
+	if strings.Contains(xml, "previously-shown") {
+		t.Error("XMLTV should not contain previously-shown when relay_from is empty")
 	}
 }
 
@@ -2218,6 +2793,16 @@ func TestResolveViewerChannelID(t *testing.T) {
 	}
 }
 
+// demoNodes is the full demo infrastructure: origin, relay, and public-facing relay.
+var demoNodes = []struct {
+	name string
+	host string
+}{
+	{"origin", "origin.demo.timelooptv.org:443"},
+	{"relay0", "relay0.demo.timelooptv.org:443"},
+	{"demo", "demo.timelooptv.org:443"},
+}
+
 // demoNode tries to reach the public TLTV demo server.
 // Returns the host or skips the test if the demo is unreachable.
 func demoNode(t *testing.T) string {
@@ -2231,116 +2816,140 @@ func demoNode(t *testing.T) string {
 	return host
 }
 
+// tryDemoNode checks reachability and skips if unreachable.
+func tryDemoNode(t *testing.T, host string) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
+	if err != nil {
+		t.Skipf("demo node %s unreachable: %v", host, err)
+	}
+	conn.Close()
+}
+
 const demoChannelID = "TVLoopRRV7V41vERa1n5xyMibevWCP7zVSnxGJq8va8MvU"
 
 func TestDemoNodeInfo(t *testing.T) {
-	host := demoNode(t)
-	client := newClient(false)
-	info, err := client.FetchNodeInfo(host)
-	if err != nil {
-		t.Fatalf("FetchNodeInfo: %v", err)
+	for _, node := range demoNodes {
+		t.Run(node.name, func(t *testing.T) {
+			tryDemoNode(t, node.host)
+			client := newClient(false)
+			info, err := client.FetchNodeInfo(node.host)
+			if err != nil {
+				t.Fatalf("FetchNodeInfo: %v", err)
+			}
+			if info.Protocol != "tltv" {
+				t.Errorf("protocol: got %q, want %q", info.Protocol, "tltv")
+			}
+			if len(info.Versions) == 0 {
+				t.Error("node reported no protocol versions")
+			}
+			allChannels := append(info.Channels, info.Relaying...)
+			if len(allChannels) == 0 {
+				t.Error("node has no channels (neither channels nor relaying)")
+			}
+			found := false
+			for _, ch := range allChannels {
+				if ch.ID == demoChannelID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("demo channel %s not found in node info", demoChannelID)
+			}
+			t.Logf("%s: %d channels, versions %v", node.name, len(allChannels), info.Versions)
+		})
 	}
-	if info.Protocol != "tltv" {
-		t.Errorf("protocol: got %q, want %q", info.Protocol, "tltv")
-	}
-	if len(info.Versions) == 0 {
-		t.Error("node reported no protocol versions")
-	}
-	if len(info.Channels) == 0 {
-		t.Error("node has no channels")
-	}
-	// Demo must list the known channel
-	found := false
-	for _, ch := range info.Channels {
-		if ch.ID == demoChannelID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("demo channel %s not found in node info", demoChannelID)
-	}
-	t.Logf("demo node: %d channels, versions %v", len(info.Channels), info.Versions)
 }
 
 func TestDemoFetchAndVerify(t *testing.T) {
-	host := demoNode(t)
-	client := newClient(false)
-
-	doc, err := client.FetchMetadata(host, demoChannelID, "")
-	if err != nil {
-		t.Fatalf("FetchMetadata: %v", err)
+	for _, node := range demoNodes {
+		t.Run(node.name, func(t *testing.T) {
+			tryDemoNode(t, node.host)
+			client := newClient(false)
+			doc, err := client.FetchMetadata(node.host, demoChannelID, "")
+			if err != nil {
+				t.Fatalf("FetchMetadata: %v", err)
+			}
+			if err := verifyDocument(doc, demoChannelID); err != nil {
+				t.Fatalf("verifyDocument failed: %v", err)
+			}
+			if getString(doc, "id") != demoChannelID {
+				t.Errorf("id mismatch: got %q", getString(doc, "id"))
+			}
+			t.Logf("%s: metadata verified, seq=%v", node.name, doc["seq"])
+		})
 	}
-	if err := verifyDocument(doc, demoChannelID); err != nil {
-		t.Fatalf("verifyDocument failed on demo metadata: %v", err)
-	}
-	if getString(doc, "id") != demoChannelID {
-		t.Errorf("id mismatch: got %q, want %q", getString(doc, "id"), demoChannelID)
-	}
-	t.Logf("demo metadata verified: seq=%v", doc["seq"])
 }
 
 func TestDemoGuideAndVerify(t *testing.T) {
-	host := demoNode(t)
-	client := newClient(false)
-
-	doc, err := client.FetchGuide(host, demoChannelID, "")
-	if err != nil {
-		t.Skipf("guide not available on demo: %v", err)
+	for _, node := range demoNodes {
+		t.Run(node.name, func(t *testing.T) {
+			tryDemoNode(t, node.host)
+			client := newClient(false)
+			doc, err := client.FetchGuide(node.host, demoChannelID, "")
+			if err != nil {
+				t.Skipf("guide not available: %v", err)
+			}
+			if err := verifyDocument(doc, demoChannelID); err != nil {
+				t.Fatalf("verifyDocument failed: %v", err)
+			}
+			if getString(doc, "from") == "" {
+				t.Error("guide missing 'from' field")
+			}
+			if getString(doc, "until") == "" {
+				t.Error("guide missing 'until' field")
+			}
+			t.Logf("%s: guide verified, from=%s until=%s", node.name, getString(doc, "from"), getString(doc, "until"))
+		})
 	}
-	if err := verifyDocument(doc, demoChannelID); err != nil {
-		t.Fatalf("verifyDocument failed on demo guide: %v", err)
-	}
-	if getString(doc, "from") == "" {
-		t.Error("guide missing 'from' field")
-	}
-	if getString(doc, "until") == "" {
-		t.Error("guide missing 'until' field")
-	}
-	t.Logf("demo guide verified: from=%s until=%s", getString(doc, "from"), getString(doc, "until"))
 }
 
 func TestDemoPeers(t *testing.T) {
-	host := demoNode(t)
-	client := newClient(false)
-
-	exchange, err := client.FetchPeers(host)
-	if err != nil {
-		t.Fatalf("FetchPeers: %v", err)
+	for _, node := range demoNodes {
+		t.Run(node.name, func(t *testing.T) {
+			tryDemoNode(t, node.host)
+			client := newClient(false)
+			exchange, err := client.FetchPeers(node.host)
+			if err != nil {
+				t.Fatalf("FetchPeers: %v", err)
+			}
+			if exchange == nil {
+				t.Fatal("FetchPeers returned nil")
+			}
+			t.Logf("%s: %d peers", node.name, len(exchange.Peers))
+		})
 	}
-	if exchange == nil {
-		t.Fatal("FetchPeers returned nil")
-	}
-	t.Logf("demo peers: %d", len(exchange.Peers))
 }
 
 func TestDemoStream(t *testing.T) {
-	host := demoNode(t)
-	client := newClient(false)
-
-	status, contentType, body, err := client.CheckStream(host, demoChannelID, "")
-	if err != nil {
-		t.Fatalf("CheckStream: %v", err)
+	for _, node := range demoNodes {
+		t.Run(node.name, func(t *testing.T) {
+			tryDemoNode(t, node.host)
+			client := newClient(false)
+			status, contentType, body, err := client.CheckStream(node.host, demoChannelID, "")
+			if err != nil {
+				t.Fatalf("CheckStream: %v", err)
+			}
+			if status != 200 {
+				t.Fatalf("expected 200, got %d", status)
+			}
+			if !strings.Contains(contentType, "mpegurl") {
+				t.Fatalf("unexpected content-type: %s", contentType)
+			}
+			segments := 0
+			for _, line := range strings.Split(body, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasSuffix(line, ".ts") || strings.HasSuffix(line, ".m4s") {
+					segments++
+				}
+			}
+			if segments == 0 {
+				t.Fatal("manifest has no segments")
+			}
+			t.Logf("%s: stream live, %d segments, %d bytes", node.name, segments, len(body))
+		})
 	}
-	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
-	}
-	if !strings.Contains(contentType, "mpegurl") {
-		t.Fatalf("unexpected content-type: %s", contentType)
-	}
-
-	// Verify HLS manifest has segments
-	segments := 0
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasSuffix(line, ".ts") || strings.HasSuffix(line, ".m4s") {
-			segments++
-		}
-	}
-	if segments == 0 {
-		t.Fatal("manifest has no segments")
-	}
-	t.Logf("demo stream live: %d segments, %d bytes", segments, len(body))
 }
 
 func TestDemoStreamURL(t *testing.T) {
@@ -2363,26 +2972,27 @@ func TestDemoStreamURL(t *testing.T) {
 }
 
 func TestDemoResolveEndToEnd(t *testing.T) {
-	host := demoNode(t)
-	client := newClient(false)
-
-	// Full resolve flow: node info -> metadata -> verify -> stream check
-	doc, err := client.FetchMetadata(host, demoChannelID, "")
-	if err != nil {
-		t.Fatalf("FetchMetadata: %v", err)
+	for _, node := range demoNodes {
+		t.Run(node.name, func(t *testing.T) {
+			tryDemoNode(t, node.host)
+			client := newClient(false)
+			doc, err := client.FetchMetadata(node.host, demoChannelID, "")
+			if err != nil {
+				t.Fatalf("FetchMetadata: %v", err)
+			}
+			if err := verifyDocument(doc, demoChannelID); err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			status, _, _, err := client.CheckStream(node.host, demoChannelID, "")
+			if err != nil {
+				t.Fatalf("CheckStream transport error: %v", err)
+			}
+			if status != 200 {
+				t.Errorf("expected stream 200, got %d", status)
+			}
+			t.Logf("%s: resolve end-to-end, metadata verified, stream %d", node.name, status)
+		})
 	}
-	if err := verifyDocument(doc, demoChannelID); err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-
-	status, _, _, err := client.CheckStream(host, demoChannelID, "")
-	if err != nil {
-		t.Fatalf("CheckStream transport error: %v", err)
-	}
-	if status != 200 {
-		t.Errorf("expected stream 200, got %d", status)
-	}
-	t.Logf("demo resolve: metadata verified, stream %d", status)
 }
 
 // ---------- Client methods via httptest ----------
@@ -2966,7 +3576,7 @@ func TestPrintInfoNode_CombinedProtocol(t *testing.T) {
 	}
 	// Just verify it doesn't panic with empty slices
 	useColor = false
-	printInfoNode(info, "test:443", "")
+	printInfoNode(info, "test:443", "", nil)
 }
 
 func TestPrintInfoNode_EmptyVersions(t *testing.T) {
@@ -2976,7 +3586,7 @@ func TestPrintInfoNode_EmptyVersions(t *testing.T) {
 	}
 	useColor = false
 	// Should not panic with empty versions
-	printInfoNode(info, "test:443", "")
+	printInfoNode(info, "test:443", "", nil)
 }
 
 func TestRelayPeers_OwnChannelsExcluded(t *testing.T) {

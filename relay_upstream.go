@@ -146,15 +146,25 @@ func relayFetchAndVerifyGuide(client *Client, channelID string, hints []string) 
 
 // checkChannelAccess verifies that metadata allows relaying.
 // Returns an error describing why relaying is not permitted.
+// Per spec §5.2: any access value other than "public" is not relayable.
+// Per spec §5.13: any status value other than "active" (or absent) is not relayable.
 func checkChannelAccess(doc map[string]interface{}) error {
-	if access, _ := doc["access"].(string); access == "token" {
-		return fmt.Errorf("private channel (access=token)")
+	access, _ := doc["access"].(string)
+	if access == "" {
+		access = "public"
+	}
+	if access != "public" {
+		return fmt.Errorf("channel not relayable (access=%s)", access)
 	}
 	if onDemand, ok := doc["on_demand"].(bool); ok && onDemand {
 		return fmt.Errorf("on-demand channel")
 	}
-	if status, _ := doc["status"].(string); status == "retired" {
-		return fmt.Errorf("retired channel")
+	status, _ := doc["status"].(string)
+	if status == "" {
+		status = "active"
+	}
+	if status != "active" {
+		return fmt.Errorf("channel not relayable (status=%s)", status)
 	}
 	return nil
 }
@@ -190,6 +200,9 @@ func extractGuideEntries(doc map[string]interface{}) []guideEntry {
 		}
 		if cat, ok := e["category"].(string); ok {
 			entry.Category = cat
+		}
+		if rf, ok := e["relay_from"].(string); ok {
+			entry.RelayFrom = rf
 		}
 		entries = append(entries, entry)
 	}

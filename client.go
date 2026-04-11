@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ type Client struct {
 // Use for user-chosen targets (node, fetch, guide, peers, stream).
 func newClient(insecure bool) *Client {
 	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: insecure,
 		},
@@ -65,6 +67,48 @@ func newClient(insecure bool) *Client {
 			Transport: tr,
 		},
 		insecure: insecure,
+	}
+}
+
+// newClientWithProxy creates a new TLTV HTTP client that routes through the
+// given proxy URL. If proxyURL is nil, behaves like newClient.
+func newClientWithProxy(insecure bool, proxyURL *url.URL) *Client {
+	proxyFunc := http.ProxyFromEnvironment
+	if proxyURL != nil {
+		proxyFunc = http.ProxyURL(proxyURL)
+	}
+	tr := &http.Transport{
+		Proxy: proxyFunc,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: insecure,
+		},
+		DialContext: (&net.Dialer{
+			Timeout: 5 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: 5 * time.Second,
+	}
+
+	return &Client{
+		http: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: tr,
+		},
+		insecure: insecure,
+	}
+}
+
+// newHTTPClientWithProxy creates a bare *http.Client that routes through the
+// given proxy URL. Used for bridge source/stream clients.
+func newHTTPClientWithProxy(proxyURL *url.URL) *http.Client {
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+	}
+	if proxyURL != nil {
+		tr.Proxy = http.ProxyURL(proxyURL)
+	}
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: tr,
 	}
 }
 
@@ -418,14 +462,130 @@ func parseTargetOrDiscover(s string, client *Client) (channelID, host string, er
 	if discErr != nil {
 		return "", "", fmt.Errorf("not a valid target and discovery failed on %s: %w", s, discErr)
 	}
-	if len(info.Channels) == 0 {
+	if err := checkV1Support(info); err != nil {
+		return "", "", fmt.Errorf("%s: %w", s, err)
+	}
+	// Check both origin channels and relayed channels (prefer origins first)
+	allRefs := make([]ChannelRef, 0, len(info.Channels)+len(info.Relaying))
+	allRefs = append(allRefs, info.Channels...)
+	allRefs = append(allRefs, info.Relaying...)
+	if len(allRefs) == 0 {
 		return "", "", fmt.Errorf("no channels found on %s", s)
 	}
-	if len(info.Channels) > 1 {
+	if len(allRefs) > 1 {
 		fmt.Fprintf(os.Stderr, "note: %s has %d channels, using %s (%s)\n",
-			s, len(info.Channels), info.Channels[0].ID, info.Channels[0].Name)
+			s, len(allRefs), allRefs[0].ID, allRefs[0].Name)
 	}
-	return info.Channels[0].ID, host, nil
+	return allRefs[0].ID, host, nil
+}
+
+// validateToken checks that a token conforms to spec §5.7:
+// URL-safe, max 256 chars, unreserved characters only (RFC 3986: A-Z a-z 0-9 - . _ ~).
+func validateToken(token string) error {
+	if len(token) > 256 {
+		return fmt.Errorf("token exceeds 256-character limit (%d chars)", len(token))
+	}
+	for i, c := range token {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~') {
+			return fmt.Errorf("token contains character %q at position %d (only A-Za-z0-9._~- allowed)", c, i)
+		}
+	}
+	return nil
+}
+
+// checkV1Support checks that a node supports protocol v1.
+// Returns an error if v1 is not in the versions array.
+func checkV1Support(info *NodeInfo) error {
+	for _, v := range info.Versions {
+		if v == 1 {
+			return nil
+		}
+	}
+	return fmt.Errorf("node does not support protocol v1 (versions: %v)", info.Versions)
+}
+
+// checkAccessMode checks that the metadata access mode is supported by this client.
+// Returns an error if the access mode is unknown (not "public" or "token").
+// Per spec §5.2: unknown access values must be treated as inaccessible.
+func checkAccessMode(doc map[string]interface{}) error {
+	access, _ := doc["access"].(string)
+	if access == "" || access == "public" || access == "token" {
+		return nil
+	}
+	return fmt.Errorf("channel uses an access mode this client doesn't support: %s", access)
+}
+
+// extractOrigins extracts the origins array from a verified metadata document.
+// Returns nil if the origins field is absent or not an array of strings.
+func extractOrigins(doc map[string]interface{}) []string {
+	v, ok := doc["origins"]
+	if !ok {
+		return nil
+	}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	var origins []string
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			origins = append(origins, s)
+		}
+	}
+	return origins
+}
+
+// hostnameMatchesOrigin checks if the connected hostname matches any entry
+// in the signed origins array. Handles port normalization: the default HTTPS
+// port (:443) is stripped from both sides before comparison. Case-insensitive.
+func hostnameMatchesOrigin(hostname string, origins []string) bool {
+	norm := normalizeOriginHost(hostname)
+	for _, o := range origins {
+		if normalizeOriginHost(o) == norm {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeOriginHost strips the default HTTPS port (:443) and lowercases
+// for comparison. "example.com:443" → "example.com", "example.com:8000" →
+// "example.com:8000", "Example.COM" → "example.com".
+func normalizeOriginHost(s string) string {
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return strings.ToLower(s)
+	}
+	if port == "443" {
+		return strings.ToLower(host)
+	}
+	return strings.ToLower(host) + ":" + port
+}
+
+// originCheck holds the result of verifying origin status from signed metadata.
+type originCheck struct {
+	Origins    []string // signed origins array (may be nil if field was absent)
+	HasOrigins bool     // true if metadata contained an origins field
+	IsOrigin   bool     // true if connected hostname is in signed origins
+}
+
+// checkOrigin extracts origins from verified metadata and checks if the
+// connected hostname is listed. Returns nil if doc is nil.
+func checkOrigin(doc map[string]interface{}, hostname string) *originCheck {
+	if doc == nil {
+		return nil
+	}
+	_, exists := doc["origins"]
+	origins := extractOrigins(doc)
+	if !exists {
+		return &originCheck{HasOrigins: false}
+	}
+	return &originCheck{
+		Origins:    origins,
+		HasOrigins: true,
+		IsOrigin:   hostnameMatchesOrigin(hostname, origins),
+	}
 }
 
 // extractToken extracts the access token from a tltv:// URI target string.

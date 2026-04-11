@@ -75,14 +75,45 @@ func cmdServerTest(args []string) {
 	nameArg := fs.String("name", os.Getenv("NAME"), "channel name")
 	fs.StringVar(nameArg, "n", os.Getenv("NAME"), "alias for --name")
 	showUptime := fs.Bool("uptime", os.Getenv("UPTIME") == "1", "show uptime instead of wall clock")
+	fs.BoolVar(showUptime, "u", os.Getenv("UPTIME") == "1", "alias for --uptime")
 	fontScale := fs.Int("font-scale", envInt("FONT_SCALE", 0), "font scale factor (0 = auto from resolution)")
+	fs.IntVar(fontScale, "f", envInt("FONT_SCALE", 0), "alias for --font-scale")
 	timezoneArg := fs.String("timezone", os.Getenv("TIMEZONE"), "IANA timezone for clock display (e.g. America/New_York)")
+	fs.StringVar(timezoneArg, "z", os.Getenv("TIMEZONE"), "alias for --timezone")
+
+	// --- Metadata ---
+	descriptionArg := fs.String("description", os.Getenv("DESCRIPTION"), "channel description")
+	fs.StringVar(descriptionArg, "D", os.Getenv("DESCRIPTION"), "alias for --description")
+	tagsArg := fs.String("tags", os.Getenv("TAGS"), "comma-separated tags (max 5)")
+	fs.StringVar(tagsArg, "T", os.Getenv("TAGS"), "alias for --tags")
+	languageArg := fs.String("language", os.Getenv("LANGUAGE"), "ISO 639-1 language code (e.g. en, ja)")
+	fs.StringVar(languageArg, "a", os.Getenv("LANGUAGE"), "alias for --language")
+	iconArg := fs.String("icon", os.Getenv("ICON"), "path to icon file (PNG, JPEG, or SVG)")
+	fs.StringVar(iconArg, "c", os.Getenv("ICON"), "alias for --icon")
+
+	// --- Access control ---
+	accessArg := fs.String("access", os.Getenv("ACCESS"), "access mode: public (default) or token")
+	fs.StringVar(accessArg, "A", os.Getenv("ACCESS"), "alias for --access")
+	tokenArg := fs.String("token", os.Getenv("TOKEN"), "access token for private channels")
+	fs.StringVar(tokenArg, "t", os.Getenv("TOKEN"), "alias for --token")
+	onDemand := fs.Bool("on-demand", os.Getenv("ON_DEMAND") == "1", "mark channel as on-demand")
+	fs.BoolVar(onDemand, "O", os.Getenv("ON_DEMAND") == "1", "alias for --on-demand")
+
+	// --- Multi-channel ---
+	numChannels := fs.Int("channels", envInt("CHANNELS", 1), "number of channels to generate")
+	fs.IntVar(numChannels, "N", envInt("CHANNELS", 1), "alias for --channels")
+	variantsArg := fs.String("variants", os.Getenv("VARIANTS"), "comma-separated renditions (e.g. 1080p,720p,360p)")
+	fs.StringVar(variantsArg, "V", os.Getenv("VARIANTS"), "alias for --variants")
 
 	// --- Encoder ---
 	widthArg := fs.Int("width", envInt("WIDTH", 640), "video width")
+	fs.IntVar(widthArg, "X", envInt("WIDTH", 640), "alias for --width")
 	heightArg := fs.Int("height", envInt("HEIGHT", 360), "video height")
+	fs.IntVar(heightArg, "Y", envInt("HEIGHT", 360), "alias for --height")
 	fpsArg := fs.Int("fps", envInt("FPS", 30), "frames per second")
+	fs.IntVar(fpsArg, "F", envInt("FPS", 30), "alias for --fps")
 	qpArg := fs.Int("qp", envInt("QP", 26), "quantization parameter (0-51)")
+	fs.IntVar(qpArg, "Q", envInt("QP", 26), "alias for --qp")
 
 	// --- Stream ---
 	defaultListen := ":8000"
@@ -99,7 +130,9 @@ func cmdServerTest(args []string) {
 	gossipEnabled := addGossipFlag(fs)
 
 	segDuration := fs.Int("segment-duration", envInt("SEGMENT_DURATION", 2), "HLS segment duration in seconds")
+	fs.IntVar(segDuration, "S", envInt("SEGMENT_DURATION", 2), "alias for --segment-duration")
 	segCount := fs.Int("segment-count", envInt("SEGMENT_COUNT", 5), "HLS playlist window size (number of segments)")
+	fs.IntVar(segCount, "s", envInt("SEGMENT_COUNT", 5), "alias for --segment-count")
 
 	// --- Cache ---
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -123,22 +156,33 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "name, and 1 kHz audio tone. Pure Go H.264/AAC encoder and HLS segmenter\n")
 		fmt.Fprintf(os.Stderr, "— no ffmpeg required. Useful for testing the full TLTV pipeline.\n\n")
 		fmt.Fprintf(os.Stderr, "Identity:\n")
-		fmt.Fprintf(os.Stderr, "  -k, --key FILE             channel key file (auto-generated if missing)\n\n")
+		fmt.Fprintf(os.Stderr, "  -k, --key FILE             channel key file (auto-generated if missing)\n")
+		fmt.Fprintf(os.Stderr, "  -N, --channels N           number of channels to generate (default: 1)\n\n")
 		fmt.Fprintf(os.Stderr, "Source:\n")
 		fmt.Fprintf(os.Stderr, "  -n, --name STRING          channel name on test screen (default: TLTV)\n")
-		fmt.Fprintf(os.Stderr, "      --uptime               show elapsed time instead of wall clock\n")
-		fmt.Fprintf(os.Stderr, "      --timezone TZ          IANA timezone for clock display (default: UTC)\n")
-		fmt.Fprintf(os.Stderr, "      --font-scale N         font scale, 0 = auto (default: 0)\n\n")
+		fmt.Fprintf(os.Stderr, "  -u, --uptime               show elapsed time instead of wall clock\n")
+		fmt.Fprintf(os.Stderr, "  -z, --timezone TZ          IANA timezone for clock display (default: UTC)\n")
+		fmt.Fprintf(os.Stderr, "  -f, --font-scale N         font scale, 0 = auto (default: 0)\n\n")
+		fmt.Fprintf(os.Stderr, "Metadata:\n")
+		fmt.Fprintf(os.Stderr, "  -D, --description TEXT     channel description\n")
+		fmt.Fprintf(os.Stderr, "  -T, --tags LIST            comma-separated tags (max 5)\n")
+		fmt.Fprintf(os.Stderr, "  -a, --language CODE        ISO 639-1 language code (e.g. en, ja)\n")
+		fmt.Fprintf(os.Stderr, "  -c, --icon PATH            icon file (PNG, JPEG, or SVG)\n\n")
+		fmt.Fprintf(os.Stderr, "Access control:\n")
+		fmt.Fprintf(os.Stderr, "  -A, --access MODE          access mode: public (default) or token\n")
+		fmt.Fprintf(os.Stderr, "  -t, --token STRING         access token for private channels\n")
+		fmt.Fprintf(os.Stderr, "  -O, --on-demand            mark channel as on-demand\n\n")
 		fmt.Fprintf(os.Stderr, "Encoder:\n")
-		fmt.Fprintf(os.Stderr, "      --width N              video width (default: 640)\n")
-		fmt.Fprintf(os.Stderr, "      --height N             video height (default: 360)\n")
-		fmt.Fprintf(os.Stderr, "      --fps N                frames per second (default: 30)\n")
-		fmt.Fprintf(os.Stderr, "      --qp N                 compression quality 0-51, lower = better (default: 26)\n\n")
+		fmt.Fprintf(os.Stderr, "  -V, --variants LIST        comma-separated renditions (e.g. 1080p,720p,360p)\n")
+		fmt.Fprintf(os.Stderr, "  -X, --width N              video width (default: 640)\n")
+		fmt.Fprintf(os.Stderr, "  -Y, --height N             video height (default: 360)\n")
+		fmt.Fprintf(os.Stderr, "  -F, --fps N                frames per second (default: 30)\n")
+		fmt.Fprintf(os.Stderr, "  -Q, --qp N                 compression quality 0-51, lower = better (default: 26)\n\n")
 		fmt.Fprintf(os.Stderr, "Stream:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR          listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST        public host:port for origins (omit for private origin)\n")
-		fmt.Fprintf(os.Stderr, "      --segment-duration N   HLS segment duration in seconds (default: 2)\n")
-		fmt.Fprintf(os.Stderr, "      --segment-count N      segments in playlist window (default: 5)\n\n")
+		fmt.Fprintf(os.Stderr, "  -S, --segment-duration N   HLS segment duration in seconds (default: 2)\n")
+		fmt.Fprintf(os.Stderr, "  -s, --segment-count N      segments in playlist window (default: 5)\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST           tltv:// URIs to advertise in peer exchange\n")
 		fmt.Fprintf(os.Stderr, "  -g, --gossip               re-advertise validated gossip-discovered channels\n\n")
@@ -162,7 +206,9 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT    log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH        log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "All flags also accept environment variables (uppercase, underscores):\n")
-		fmt.Fprintf(os.Stderr, "  KEY, NAME, UPTIME, TIMEZONE, FONT_SCALE, WIDTH, HEIGHT, FPS, QP,\n")
+		fmt.Fprintf(os.Stderr, "  KEY, CHANNELS, NAME, UPTIME, TIMEZONE, FONT_SCALE,\n")
+		fmt.Fprintf(os.Stderr, "  DESCRIPTION, TAGS, LANGUAGE, ICON,\n")
+		fmt.Fprintf(os.Stderr, "  ACCESS, TOKEN, ON_DEMAND=1, WIDTH, HEIGHT, FPS, QP,\n")
 		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT, PEERS, GOSSIP=1,\n")
 		fmt.Fprintf(os.Stderr, "  CONFIG, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
@@ -235,6 +281,15 @@ func cmdServerTest(args []string) {
 		}
 		if *qpArg != 26 {
 			cfg["qp"] = *qpArg
+		}
+		if *accessArg != "" && *accessArg != "public" {
+			cfg["access"] = *accessArg
+		}
+		if *tokenArg != "" {
+			cfg["token"] = *tokenArg
+		}
+		if *onDemand {
+			cfg["on_demand"] = true
 		}
 		if *hostnameArg != "" {
 			cfg["hostname"] = *hostnameArg
@@ -330,6 +385,31 @@ func cmdServerTest(args []string) {
 		os.Exit(1)
 	}
 
+	// Validate access control flags
+	access := *accessArg
+	if access == "" {
+		access = "public"
+	}
+	if access != "public" && access != "token" {
+		fmt.Fprintf(os.Stderr, "error: --access must be \"public\" or \"token\"\n")
+		os.Exit(1)
+	}
+	serverToken := *tokenArg
+	if access == "token" && serverToken == "" {
+		fmt.Fprintf(os.Stderr, "error: --access token requires --token\n")
+		os.Exit(1)
+	}
+	if serverToken != "" && access != "token" {
+		access = "token" // --token implies --access token
+	}
+	if serverToken != "" {
+		if err := validateToken(serverToken); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	serverIsPrivate := access == "token"
+
 	// Parse timezone for clock display
 	loc := time.UTC
 	if *timezoneArg != "" {
@@ -337,6 +417,30 @@ func cmdServerTest(args []string) {
 		loc, err = time.LoadLocation(*timezoneArg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: invalid --timezone %q: %v\n", *timezoneArg, err)
+			os.Exit(1)
+		}
+	}
+
+	// Load icon
+	iconData, iconCT := loadIcon(*iconArg)
+	iconFileName := "icon." + iconExtension(iconCT)
+
+	// Parse metadata options (always created — icon is always present)
+	metaOpts := &serverMetadataOpts{
+		Description:  *descriptionArg,
+		Language:     *languageArg,
+		Timezone:     *timezoneArg,
+		IconFileName: iconFileName,
+	}
+	if *tagsArg != "" {
+		for _, t := range strings.Split(*tagsArg, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				metaOpts.Tags = append(metaOpts.Tags, t)
+			}
+		}
+		if len(metaOpts.Tags) > 5 {
+			fmt.Fprintf(os.Stderr, "error: --tags accepts at most 5 tags\n")
 			os.Exit(1)
 		}
 	}
@@ -358,57 +462,15 @@ func cmdServerTest(args []string) {
 	framesPerSeg := h264.fps * *segDuration
 	ptsPerFrame := int64(90000 / h264.fps)
 
-	// --- Key management ---
-	var privKey ed25519.PrivateKey
-	var pubKey ed25519.PublicKey
-
-	if *keyFile != "" {
-		seed, err := readSeed(*keyFile)
-		if err != nil {
-			if os.IsNotExist(err) {
-				// Auto-generate key
-				logInfof("generating new key: %s", *keyFile)
-				pub, priv, gerr := ed25519.GenerateKey(rand.Reader)
-				if gerr != nil {
-					fmt.Fprintf(os.Stderr, "server: keygen: %v\n", gerr)
-					os.Exit(1)
-				}
-				if werr := writeSeed(*keyFile, priv.Seed()); werr != nil {
-					fmt.Fprintf(os.Stderr, "server: write key: %v\n", werr)
-					os.Exit(1)
-				}
-				privKey = priv
-				pubKey = pub
-			} else {
-				fmt.Fprintf(os.Stderr, "server: read key: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			privKey, pubKey = keyFromSeed(seed)
-		}
-	} else {
-		// Generate ephemeral key (no persistence)
-		var err error
-		pubKey, privKey, err = ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "server: keygen: %v\n", err)
-			os.Exit(1)
-		}
-		logInfof("using ephemeral key (use --key to persist)")
+	if *numChannels < 1 {
+		fatal("--channels must be >= 1")
 	}
 
-	channelID := makeChannelID(pubKey)
-
-	logInfof("starting test signal generator")
-	logInfof("channel: %s", channelID)
-	logInfof("channel name: %s", channelName)
-	if h264.cropRight > 0 || h264.cropBottom > 0 {
-		logInfof("resolution: %dx%d (encoded %dx%d) @ %dfps, QP=%d",
-			*widthArg, *heightArg, h264.width, h264.height, h264.fps, h264.qp)
-	} else {
-		logInfof("resolution: %dx%d @ %dfps, QP=%d", h264.width, h264.height, h264.fps, h264.qp)
+	// Parse variants
+	variants, err := parseVariants(*variantsArg)
+	if err != nil {
+		fatal("%v", err)
 	}
-	logInfof("HLS: %ds segments, %d-segment window", *segDuration, *segCount)
 
 	// Set up signal handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -421,17 +483,166 @@ func cmdServerTest(args []string) {
 		cancel()
 	}()
 
-	// Pre-encode static NAL units
+	// Pre-encode static NAL units (shared across all channels at same resolution)
 	sps := encodeSPS(h264)
 	pps := encodePPS(h264)
 	aud := encodeAUD()
 
-	// HLS segmenter
-	seg := newHLSSegmenter(*segCount, *segDuration)
-
-	// Sign channel documents
 	hostname := *hostnameArg
-	metadata, guide := serverSignDocs(channelID, channelName, hostname, privKey, serverGuideEntries)
+
+	// --- Initialize N channels ---
+	channels := make([]*serverChannel, *numChannels)
+	for i := 0; i < *numChannels; i++ {
+		// Key management: channel 1 uses --key, others auto-generate
+		var privKey ed25519.PrivateKey
+		var pubKey ed25519.PublicKey
+		keyPath := *keyFile
+		if i > 0 && keyPath != "" {
+			// Derive key path for additional channels
+			keyPath = fmt.Sprintf("ch%d.key", i+1)
+		}
+		if keyPath != "" {
+			seed, err := readSeed(keyPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					logInfof("generating new key: %s", keyPath)
+					pub, priv, gerr := ed25519.GenerateKey(rand.Reader)
+					if gerr != nil {
+						fatal("keygen: %v", gerr)
+					}
+					if werr := writeSeed(keyPath, priv.Seed()); werr != nil {
+						fatal("write key: %v", werr)
+					}
+					privKey = priv
+					pubKey = pub
+				} else {
+					fatal("read key %s: %v", keyPath, err)
+				}
+			} else {
+				privKey, pubKey = keyFromSeed(seed)
+			}
+		} else {
+			var err error
+			pubKey, privKey, err = ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				fatal("keygen: %v", err)
+			}
+			if i == 0 {
+				logInfof("using ephemeral keys (use --key to persist)")
+			}
+		}
+
+		chID := makeChannelID(pubKey)
+		chName := channelName
+		chDisplayName := displayName
+		if *numChannels > 1 {
+			chName = fmt.Sprintf("%s %d", channelName, i+1)
+			chDisplayName = strings.ToUpper(chName)
+		}
+
+		seg := newHLSSegmenter(*segCount, *segDuration)
+		metadata, guide := serverSignDocs(chID, chName, hostname, privKey, serverGuideEntries, access, *onDemand, metaOpts)
+
+		ch := &serverChannel{
+			channelID:   chID,
+			channelName: chName,
+			privKey:     privKey,
+			seg:         seg,
+			state: &serverState{
+				seg:          seg,
+				muxer:        &tsMuxer{},
+				sps:          sps,
+				pps:          pps,
+				aud:          aud,
+				frame:        newFrame(h264.width, h264.height),
+				h264:         h264,
+				channelName:  chDisplayName,
+				showUptime:   *showUptime,
+				fontScale:    *fontScale,
+				startTime:    time.Now().UTC(),
+				location:     loc,
+				framesPerSeg: framesPerSeg,
+				ptsPerFrame:  ptsPerFrame,
+				segDuration:  float64(*segDuration),
+				segDurationI: *segDuration,
+			},
+		}
+		// Initialize variants if specified
+		if len(variants) > 0 {
+			ch.variants = make([]serverVariant, len(variants))
+			for vi, v := range variants {
+				vw := (v.width + 15) / 16 * 16
+				vh := (v.height + 15) / 16 * 16
+				vH264 := &h264Settings{
+					width:      vw,
+					height:     vh,
+					cropRight:  vw - v.width,
+					cropBottom: vh - v.height,
+					fps:        *fpsArg,
+					qp:         *qpArg,
+				}
+				vSps := encodeSPS(vH264)
+				vPps := encodePPS(vH264)
+				vSeg := newHLSSegmenter(*segCount, *segDuration)
+				vSeg.segPrefix = v.label + "_"
+				levelIdc := selectLevel(v.width, v.height, *fpsArg)
+
+				ch.variants[vi] = serverVariant{
+					label:    v.label,
+					width:    v.width,
+					height:   v.height,
+					seg:      vSeg,
+					codecTag: codecTagFromLevel(levelIdc),
+					state: &serverState{
+						seg:          vSeg,
+						muxer:        &tsMuxer{},
+						sps:          vSps,
+						pps:          vPps,
+						aud:          aud,
+						frame:        newFrame(vw, vh),
+						h264:         vH264,
+						channelName:  chDisplayName,
+						showUptime:   *showUptime,
+						fontScale:    *fontScale,
+						startTime:    time.Now().UTC(),
+						location:     loc,
+						framesPerSeg: framesPerSeg,
+						ptsPerFrame:  ptsPerFrame,
+						segDuration:  float64(*segDuration),
+						segDurationI: *segDuration,
+					},
+				}
+			}
+			// Primary seg/state = first variant
+			ch.seg = ch.variants[0].seg
+			ch.state = ch.variants[0].state
+		}
+
+		ch.docs.Store(&serverDocs{
+			channelID:   chID,
+			channelName: chName,
+			metadata:    metadata,
+			guide:       guide,
+		})
+		channels[i] = ch
+
+		logInfof("channel %d: %s (%s)", i+1, chID, chName)
+	}
+
+	// For single-channel backward compat: also set global serverDocsState
+	if len(channels) == 1 {
+		d := channels[0].docs.Load()
+		serverDocsState.Store(d)
+	}
+
+	logInfof("starting test signal generator (%d channel(s))", *numChannels)
+	if h264.cropRight > 0 || h264.cropBottom > 0 {
+		logInfof("resolution: %dx%d (encoded %dx%d) @ %dfps, QP=%d",
+			*widthArg, *heightArg, h264.width, h264.height, h264.fps, h264.qp)
+	} else {
+		logInfof("resolution: %dx%d @ %dfps, QP=%d", h264.width, h264.height, h264.fps, h264.qp)
+	}
+	logInfof("HLS: %ds segments, %d-segment window", *segDuration, *segCount)
 
 	// Set up cache (if enabled)
 	var cache *hlsCache
@@ -454,7 +665,7 @@ func cmdServerTest(args []string) {
 		logInfof("peers: verifying %d external channels", len(peerTargets))
 	}
 
-	// Set up gossip registry (--gossip: discover channels from --peers nodes)
+	// Set up gossip registry
 	var gossipReg *peerRegistry
 	if *gossipEnabled && len(peerTargets) > 0 {
 		gossipReg = newPeerRegistry()
@@ -467,26 +678,67 @@ func cmdServerTest(args []string) {
 	// HTTP server
 	mux := http.NewServeMux()
 	if viewer.enabled {
-		viewerEmbedRoutes(mux, func() map[string]interface{} {
-			docs := serverDocsState.Load()
+		// Build channel lookup for viewer
+		chanMap := make(map[string]*serverChannel, len(channels))
+		for _, ch := range channels {
+			chanMap[ch.channelID] = ch
+		}
+		viewerEmbedRoutes(mux, func(reqChID string) map[string]interface{} {
+			// Pick requested channel, default to first
+			ch := channels[0]
+			if reqChID != "" {
+				if c, ok := chanMap[reqChID]; ok {
+					ch = c
+				}
+			}
+			docs := ch.docs.Load()
 			info := viewerBuildInfo(docs.channelID, docs.channelName, docs.metadata, docs.guide)
-			info["stream_src"] = "/tltv/v1/channels/" + docs.channelID + "/stream.m3u8"
-			info["xmltv_url"] = "/tltv/v1/channels/" + docs.channelID + "/guide.xml"
+			streamSrc := "/tltv/v1/channels/" + docs.channelID + "/stream.m3u8"
+			if serverToken != "" {
+				streamSrc += "?token=" + serverToken
+			}
+			info["stream_src"] = streamSrc
+			xmltvURL := "/tltv/v1/channels/" + docs.channelID + "/guide.xml"
+			if serverToken != "" {
+				xmltvURL += "?token=" + serverToken
+			}
+			info["xmltv_url"] = xmltvURL
 			if hostname != "" {
 				info["tltv_uri"] = formatTLTVUri(docs.channelID, []string{hostname}, "")
 			}
 			return info
+		}, func() []ChannelRef {
+			var refs []ChannelRef
+			for _, ch := range channels {
+				docs := ch.docs.Load()
+				refs = append(refs, ChannelRef{ID: docs.channelID, Name: docs.channelName})
+			}
+			return refs
 		})
 	} else {
 		statusPageRoutes(mux, func() *NodeInfo {
-			return &NodeInfo{
+			ni := &NodeInfo{
 				Protocol: "tltv",
 				Versions: []int{1},
-				Channels: []ChannelRef{{ID: channelID, Name: channelName}},
 			}
+			if !serverIsPrivate {
+				for _, ch := range channels {
+					docs := ch.docs.Load()
+					ni.Channels = append(ni.Channels, ChannelRef{ID: docs.channelID, Name: docs.channelName})
+				}
+			}
+			return ni
 		})
 	}
-	serverHTTP(mux, seg, channelID, channelName, metadata, guide, cache, peerReg, gossipReg)
+
+	if len(channels) == 1 && len(channels[0].variants) == 0 {
+		// Single-channel without variants: use existing serverHTTP for backward compat with tests
+		ch := channels[0]
+		d := ch.docs.Load()
+		serverHTTP(mux, ch.seg, ch.channelID, ch.channelName, d.metadata, d.guide, cache, peerReg, gossipReg, serverToken, serverIsPrivate, iconData, iconCT)
+	} else {
+		serverMultiHTTP(mux, channels, cache, peerReg, gossipReg, serverToken, serverIsPrivate, iconData, iconCT)
+	}
 
 	// Set up TLS (if enabled).
 	tlsCfg, tlsCleanup, tlsErr := tlsSetup(*hostnameArg, *tlsEnabled, *tlsCert, *tlsKey, *acmeEmail, *tlsStaging)
@@ -508,8 +760,9 @@ func cmdServerTest(args []string) {
 	}
 	addr := displayListenAddr(ln.Addr().String())
 	logInfof("listening on %s (%s)", addr, scheme)
-	logInfof("stream: %s://%s/tltv/v1/channels/%s/stream.m3u8", scheme, addr, channelID)
-	logInfof("tltv URI: tltv://%s@%s", channelID, addr)
+	for _, ch := range channels {
+		logInfof("stream: %s://%s/tltv/v1/channels/%s/stream.m3u8", scheme, addr, ch.channelID)
+	}
 	if viewer.enabled {
 		logInfof("viewer: %s://%s", scheme, addr)
 	}
@@ -540,44 +793,25 @@ func cmdServerTest(args []string) {
 		startCacheGoroutines(cache, *cacheStatsInterval, ctx.Done())
 	}
 
-	// Frame generation loop
-	state := &serverState{
-		seg:          seg,
-		muxer:        &tsMuxer{},
-		sps:          sps,
-		pps:          pps,
-		aud:          aud,
-		frame:        newFrame(h264.width, h264.height),
-		h264:         h264,
-		channelName:  displayName,
-		showUptime:   *showUptime,
-		fontScale:    *fontScale,
-		startTime:    time.Now().UTC(),
-		location:     loc,
-		framesPerSeg: framesPerSeg,
-		ptsPerFrame:  ptsPerFrame,
-		segDuration:  float64(*segDuration),
-		segDurationI: *segDuration,
+	// Generate first segment for all channels (all variants)
+	for _, ch := range channels {
+		serverGenerateAllVariants(ch)
 	}
 
 	ticker := time.NewTicker(time.Duration(*segDuration) * time.Second)
 	defer ticker.Stop()
 
-	// Generate the first segment immediately
-	state.generateSegment()
-
 	// Re-sign docs periodically (every 5 minutes)
 	resignTicker := time.NewTicker(5 * time.Minute)
 	defer resignTicker.Stop()
 
-	// Atomic config for reloadable fields (written by config goroutine, read by resign ticker)
+	// Atomic config for reloadable fields
 	var serverLiveConfig atomic.Pointer[serverReloadableConfig]
 	serverLiveConfig.Store(&serverReloadableConfig{
 		channelName:  channelName,
 		guideEntries: serverGuideEntries,
 	})
 
-	// Config watcher goroutine (if config file provided)
 	if *configPath != "" {
 		go configReloadLoop(ctx, newConfigWatcher(*configPath), func(cfg map[string]interface{}) {
 			serverApplyReloadedConfig(cfg, &serverLiveConfig)
@@ -593,12 +827,29 @@ func cmdServerTest(args []string) {
 			shutCancel()
 			return
 		case <-ticker.C:
-			state.generateSegment()
+			for _, ch := range channels {
+				serverGenerateAllVariants(ch)
+			}
 		case <-resignTicker.C:
 			lc := serverLiveConfig.Load()
-			state.channelName = strings.ToUpper(lc.channelName)
-			metadata, guide = serverSignDocs(channelID, lc.channelName, hostname, privKey, lc.guideEntries)
-			serverUpdateDocs(channelID, lc.channelName, metadata, guide)
+			for i, ch := range channels {
+				chName := lc.channelName
+				if *numChannels > 1 {
+					chName = fmt.Sprintf("%s %d", lc.channelName, i+1)
+				}
+				ch.state.channelName = strings.ToUpper(chName)
+				metadata, guide := serverSignDocs(ch.channelID, chName, hostname, ch.privKey, lc.guideEntries, access, *onDemand, metaOpts)
+				ch.docs.Store(&serverDocs{
+					channelID:   ch.channelID,
+					channelName: chName,
+					metadata:    metadata,
+					guide:       guide,
+				})
+				// Keep global state in sync for single-channel backward compat
+				if len(channels) == 1 {
+					serverDocsState.Store(ch.docs.Load())
+				}
+			}
 		}
 	}
 }
@@ -723,7 +974,37 @@ func (s *serverState) generateSegment() {
 
 // serverSignDocs signs metadata and guide documents for the server channel.
 // Pass customGuide to use specific entries; nil falls back to ephemeral midnight-to-midnight.
-func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.PrivateKey, customGuide []guideEntry) ([]byte, []byte) {
+// serverMetadataOpts holds optional metadata fields for serverSignDocs.
+type serverMetadataOpts struct {
+	Description  string
+	Tags         []string
+	Language     string
+	Timezone     string
+	IconFileName string // icon file name (e.g. "icon.svg"), empty = no icon field
+}
+
+// serverGenerateAllVariants generates a segment for the channel's primary
+// state and all variant states (if multi-rendition). After the first segment,
+// updates measured bandwidth on each variant.
+func serverGenerateAllVariants(ch *serverChannel) {
+	if len(ch.variants) == 0 {
+		ch.state.generateSegment()
+		return
+	}
+	for i := range ch.variants {
+		v := &ch.variants[i]
+		v.state.generateSegment()
+		// Update bandwidth from actual segment sizes after first segment
+		if v.bandwidth == 0 && v.seg.seqNum > 0 {
+			data := v.seg.getSegment(v.seg.seqNum - 1)
+			if data != nil {
+				v.bandwidth = len(data) * 8 / v.state.segDurationI
+			}
+		}
+	}
+}
+
+func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.PrivateKey, customGuide []guideEntry, access string, onDemand bool, opts *serverMetadataOpts) ([]byte, []byte) {
 	now := time.Now().UTC()
 
 	// --- Metadata ---
@@ -734,9 +1015,37 @@ func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.Pri
 		"name":    channelName,
 		"stream":  "/tltv/v1/channels/" + channelID + "/stream.m3u8",
 		"guide":   "/tltv/v1/channels/" + channelID + "/guide.json",
-		"access":  "public",
+		"access":  access,
 		"status":  "active",
 		"updated": now.Format(timestampFormat),
+	}
+	if opts != nil {
+		if opts.Description != "" {
+			doc["description"] = opts.Description
+		}
+		if len(opts.Tags) > 0 {
+			tags := opts.Tags
+			if len(tags) > 5 {
+				tags = tags[:5]
+			}
+			iface := make([]interface{}, len(tags))
+			for i, t := range tags {
+				iface[i] = t
+			}
+			doc["tags"] = iface
+		}
+		if opts.Language != "" {
+			doc["language"] = opts.Language
+		}
+		if opts.Timezone != "" {
+			doc["timezone"] = opts.Timezone
+		}
+		if opts.IconFileName != "" {
+			doc["icon"] = "/tltv/v1/channels/" + channelID + "/" + opts.IconFileName
+		}
+	}
+	if onDemand {
+		doc["on_demand"] = true
 	}
 	if hostname != "" {
 		doc["origins"] = []interface{}{hostname}
@@ -759,11 +1068,21 @@ func serverSignDocs(channelID, channelName, hostname string, privKey ed25519.Pri
 
 	var entries []interface{}
 	for _, e := range guideEntries {
-		entries = append(entries, map[string]interface{}{
+		entry := map[string]interface{}{
 			"start": e.Start,
 			"end":   e.End,
 			"title": e.Title,
-		})
+		}
+		if e.Description != "" {
+			entry["description"] = e.Description
+		}
+		if e.Category != "" {
+			entry["category"] = e.Category
+		}
+		if e.RelayFrom != "" {
+			entry["relay_from"] = e.RelayFrom
+		}
+		entries = append(entries, entry)
 	}
 
 	guideDoc := map[string]interface{}{
@@ -794,8 +1113,88 @@ type serverDocs struct {
 	guide       []byte
 }
 
+// serverChannel bundles all per-channel state for multi-channel server.
+type serverChannel struct {
+	channelID   string
+	channelName string
+	privKey     ed25519.PrivateKey
+	seg         *hlsSegmenter    // primary segmenter (single-variant or first variant)
+	state       *serverState     // primary state
+	variants    []serverVariant  // nil = single media playlist; non-nil = master playlist mode
+	docs        atomic.Pointer[serverDocs]
+}
+
+// serverVariant holds per-rendition state for multi-rendition mode.
+type serverVariant struct {
+	label     string         // e.g. "1080p"
+	width     int
+	height    int
+	seg       *hlsSegmenter
+	state     *serverState
+	bandwidth int            // measured bits/sec (updated after first segment)
+	codecTag  string         // e.g. "avc1.42c028"
+}
+
+// serverVariantPreset maps shorthand labels to width×height.
+var serverVariantPreset = map[string][2]int{
+	"4320p": {7680, 4320}, "2160p": {3840, 2160},
+	"1440p": {2560, 1440}, "1080p": {1920, 1080},
+	"720p":  {1280, 720},  "480p":  {854, 480},
+	"360p":  {640, 360},   "240p":  {426, 240},
+}
+
+// parseVariants parses a comma-separated variant string into resolution specs.
+func parseVariants(s string) ([]serverVariant, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var variants []serverVariant
+	seen := make(map[string]bool)
+	for _, label := range strings.Split(s, ",") {
+		label = strings.TrimSpace(strings.ToLower(label))
+		if label == "" {
+			continue
+		}
+		if seen[label] {
+			continue
+		}
+		seen[label] = true
+		dims, ok := serverVariantPreset[label]
+		if !ok {
+			return nil, fmt.Errorf("unknown variant %q (use 4320p/2160p/1440p/1080p/720p/480p/360p/240p)", label)
+		}
+		variants = append(variants, serverVariant{
+			label:  label,
+			width:  dims[0],
+			height: dims[1],
+		})
+	}
+	if len(variants) == 0 {
+		return nil, fmt.Errorf("no valid variants specified")
+	}
+	return variants, nil
+}
+
+// codecTagFromLevel returns the H.264 codec tag for a Baseline profile level.
+func codecTagFromLevel(levelIdc int) string {
+	return fmt.Sprintf("avc1.42c0%02x", levelIdc)
+}
+
+// masterPlaylist generates a master playlist string for the given variants.
+func masterPlaylist(variants []serverVariant) string {
+	var sb strings.Builder
+	sb.WriteString("#EXTM3U\n")
+	for _, v := range variants {
+		sb.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s,mp4a.40.2\"\n",
+			v.bandwidth, v.width, v.height, v.codecTag))
+		sb.WriteString("stream_" + v.label + ".m3u8\n")
+	}
+	return sb.String()
+}
+
 // serverDocsState is shared between the main goroutine (writer) and HTTP handlers
 // (readers). Uses atomic.Pointer to avoid data races on document re-signing.
+// Used by single-channel mode; multi-channel uses serverChannel.docs per channel.
 var serverDocsState atomic.Pointer[serverDocs]
 
 // serverUpdateDocs atomically swaps the signed documents read by HTTP handlers.

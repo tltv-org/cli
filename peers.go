@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -88,6 +89,32 @@ func addGossipFlag(fs *flag.FlagSet) *bool {
 	gossipEnabled := fs.Bool("gossip", os.Getenv("GOSSIP") == "1", "re-advertise validated gossip-discovered channels")
 	fs.BoolVar(gossipEnabled, "g", os.Getenv("GOSSIP") == "1", "alias for --gossip")
 	return gossipEnabled
+}
+
+// addProxyFlag registers --proxy/-x / PROXY env var on a FlagSet.
+// Accepts socks5://, http://, https:// proxy URLs.
+func addProxyFlag(fs *flag.FlagSet) *string {
+	p := fs.String("proxy", os.Getenv("PROXY"), "proxy URL (socks5://, http://, https://)")
+	fs.StringVar(p, "x", os.Getenv("PROXY"), "alias for --proxy")
+	return p
+}
+
+// parseProxyURL validates and parses a proxy URL string.
+// Returns nil if the string is empty.
+func parseProxyURL(s string) (*url.URL, error) {
+	if s == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %v", err)
+	}
+	switch u.Scheme {
+	case "socks5", "http", "https":
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q (use socks5://, http://, or https://)", u.Scheme)
+	}
+	return u, nil
 }
 
 // addConfigFlags registers --config and --dump-config flags on a FlagSet.

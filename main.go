@@ -423,6 +423,7 @@ func cmdSign(args []string) {
 	inFile := fs.String("input", "", "input JSON file (default: stdin)")
 	fs.StringVar(inFile, "i", "", "alias for --input")
 	autoSeq := fs.Bool("auto-seq", false, "set seq to current time and updated to now")
+	fs.BoolVar(autoSeq, "s", false, "alias for --auto-seq")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Sign a TLTV JSON document\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv sign -k <seed-file> [flags]\n\n")
@@ -430,11 +431,11 @@ func cmdSign(args []string) {
 		fmt.Fprintf(os.Stderr, "and outputs the signed document to stdout.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv sign -k channel.key < metadata.json\n")
-		fmt.Fprintf(os.Stderr, "  tltv sign -k channel.key -i doc.json --auto-seq\n\n")
+		fmt.Fprintf(os.Stderr, "  tltv sign -k channel.key -i doc.json -s\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -k, --key string      path to seed file (required)\n")
 		fmt.Fprintf(os.Stderr, "  -i, --input string    input JSON file (default: stdin)\n")
-		fmt.Fprintf(os.Stderr, "      --auto-seq        set seq to current time and updated to now\n")
+		fmt.Fprintf(os.Stderr, "  -s, --auto-seq        set seq to current time and updated to now\n")
 	}
 	fs.Parse(args)
 
@@ -801,16 +802,17 @@ func cmdMigrate(args []string) {
 	fromKey := fs.String("from-key", "", "path to OLD channel's seed file (required)")
 	fs.StringVar(fromKey, "k", "", "alias for --from-key")
 	toID := fs.String("to", "", "NEW channel ID (required)")
+	fs.StringVar(toID, "T", "", "alias for --to")
 	reason := fs.String("reason", "", "migration reason")
 	fs.StringVar(reason, "r", "", "alias for --reason")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Create a signed key migration document\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv migrate --from-key <old-seed-file> --to <new-channel-id> [--reason text]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv migrate -k <old-seed-file> -T <new-channel-id> [--reason text]\n\n")
 		fmt.Fprintf(os.Stderr, "The migration document is signed by the OLD key and served\n")
 		fmt.Fprintf(os.Stderr, "at the old channel's metadata endpoint.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -k, --from-key FILE    path to OLD channel's seed file (required)\n")
-		fmt.Fprintf(os.Stderr, "      --to ID            NEW channel ID (required)\n")
+		fmt.Fprintf(os.Stderr, "  -T, --to ID            NEW channel ID (required)\n")
 		fmt.Fprintf(os.Stderr, "  -r, --reason TEXT      migration reason\n")
 	}
 	fs.Parse(args)
@@ -902,6 +904,7 @@ var allCommands = []string{
 func cmdCompletion(args []string) {
 	fs := flag.NewFlagSet("completion", flag.ExitOnError)
 	install := fs.Bool("install", false, "write completions to the standard shell location")
+	fs.BoolVar(install, "i", false, "alias for --install")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Generate shell completion scripts\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv completion [--install] <shell>\n\n")
@@ -912,7 +915,7 @@ func cmdCompletion(args []string) {
 		fmt.Fprintf(os.Stderr, "  zsh:   /usr/local/share/zsh/site-functions/_tltv\n")
 		fmt.Fprintf(os.Stderr, "  fish:  ~/.config/fish/completions/tltv.fish\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fmt.Fprintf(os.Stderr, "      --install    write completions to the standard shell location\n")
+		fmt.Fprintf(os.Stderr, "  -i, --install    write completions to the standard shell location\n")
 	}
 	fs.Parse(args)
 

@@ -555,3 +555,174 @@ func TestReceiver_CacheStatusTracking(t *testing.T) {
 		t.Errorf("CacheHits = %d, want 1", snap.CacheHits)
 	}
 }
+
+// ---------- Master Playlist ----------
+
+func TestParseMasterPlaylist_Basic(t *testing.T) {
+	body := []byte(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS="avc1.42c028,mp4a.40.2"
+stream_1080p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS="avc1.42c01f,mp4a.40.2"
+stream_720p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS="avc1.42c01e,mp4a.40.2"
+stream_360p.m3u8
+`)
+
+	variants := parseMasterPlaylist(body)
+	if variants == nil {
+		t.Fatal("parseMasterPlaylist returned nil")
+	}
+	if len(variants) != 3 {
+		t.Fatalf("expected 3 variants, got %d", len(variants))
+	}
+
+	if variants[0].Bandwidth != 5000000 {
+		t.Errorf("variant 0 bandwidth = %d, want 5000000", variants[0].Bandwidth)
+	}
+	if variants[0].Resolution != "1920x1080" {
+		t.Errorf("variant 0 resolution = %q, want 1920x1080", variants[0].Resolution)
+	}
+	if variants[0].Width != 1920 || variants[0].Height != 1080 {
+		t.Errorf("variant 0 dims = %dx%d, want 1920x1080", variants[0].Width, variants[0].Height)
+	}
+	if variants[0].URI != "stream_1080p.m3u8" {
+		t.Errorf("variant 0 URI = %q, want stream_1080p.m3u8", variants[0].URI)
+	}
+	if variants[0].Codecs != "avc1.42c028,mp4a.40.2" {
+		t.Errorf("variant 0 codecs = %q", variants[0].Codecs)
+	}
+
+	if variants[2].Bandwidth != 800000 {
+		t.Errorf("variant 2 bandwidth = %d, want 800000", variants[2].Bandwidth)
+	}
+	if variants[2].Height != 360 {
+		t.Errorf("variant 2 height = %d, want 360", variants[2].Height)
+	}
+}
+
+func TestParseMasterPlaylist_MediaPlaylist(t *testing.T) {
+	// A media playlist (no STREAM-INF) should return nil
+	body := []byte(`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:42
+#EXTINF:6.0,
+seg42.ts
+#EXTINF:6.0,
+seg43.ts
+`)
+	variants := parseMasterPlaylist(body)
+	if variants != nil {
+		t.Errorf("media playlist should return nil, got %d variants", len(variants))
+	}
+}
+
+func TestParseMasterPlaylist_WithMedia(t *testing.T) {
+	// Master playlist with #EXT-X-MEDIA (audio) — should still parse variants
+	body := []byte(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Main",DEFAULT=YES,URI="audio_main.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="audio"
+stream_720p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="audio"
+stream_360p.m3u8
+`)
+	variants := parseMasterPlaylist(body)
+	if len(variants) != 2 {
+		t.Fatalf("expected 2 variants, got %d", len(variants))
+	}
+}
+
+func TestSelectVariant_Best(t *testing.T) {
+	variants := []hlsVariant{
+		{URI: "360p.m3u8", Bandwidth: 800000, Height: 360},
+		{URI: "1080p.m3u8", Bandwidth: 5000000, Height: 1080},
+		{URI: "720p.m3u8", Bandwidth: 2000000, Height: 720},
+	}
+	v := selectVariant(variants, "best")
+	if v.URI != "1080p.m3u8" {
+		t.Errorf("best = %q, want 1080p.m3u8", v.URI)
+	}
+}
+
+func TestSelectVariant_Worst(t *testing.T) {
+	variants := []hlsVariant{
+		{URI: "360p.m3u8", Bandwidth: 800000, Height: 360},
+		{URI: "1080p.m3u8", Bandwidth: 5000000, Height: 1080},
+		{URI: "720p.m3u8", Bandwidth: 2000000, Height: 720},
+	}
+	v := selectVariant(variants, "worst")
+	if v.URI != "360p.m3u8" {
+		t.Errorf("worst = %q, want 360p.m3u8", v.URI)
+	}
+}
+
+func TestSelectVariant_Resolution(t *testing.T) {
+	variants := []hlsVariant{
+		{URI: "360p.m3u8", Bandwidth: 800000, Height: 360},
+		{URI: "1080p.m3u8", Bandwidth: 5000000, Height: 1080},
+		{URI: "720p.m3u8", Bandwidth: 2000000, Height: 720},
+	}
+
+	v := selectVariant(variants, "720p")
+	if v.URI != "720p.m3u8" {
+		t.Errorf("720p = %q, want 720p.m3u8", v.URI)
+	}
+
+	v = selectVariant(variants, "480p")
+	if v.URI != "360p.m3u8" {
+		t.Errorf("480p closest = %q, want 360p.m3u8", v.URI)
+	}
+}
+
+func TestSelectVariant_DefaultBest(t *testing.T) {
+	variants := []hlsVariant{
+		{URI: "a.m3u8", Bandwidth: 100},
+		{URI: "b.m3u8", Bandwidth: 200},
+	}
+	v := selectVariant(variants, "")
+	if v.URI != "b.m3u8" {
+		t.Errorf("default = %q, want b.m3u8 (highest bandwidth)", v.URI)
+	}
+}
+
+func TestHlsAttr(t *testing.T) {
+	cases := []struct {
+		attrs, name, want string
+	}{
+		{"BANDWIDTH=5000000,RESOLUTION=1920x1080", "BANDWIDTH", "5000000"},
+		{"BANDWIDTH=5000000,RESOLUTION=1920x1080", "RESOLUTION", "1920x1080"},
+		{`BANDWIDTH=5000000,CODECS="avc1.42c028,mp4a.40.2"`, "CODECS", "avc1.42c028,mp4a.40.2"},
+		{"BANDWIDTH=500", "RESOLUTION", ""},
+	}
+	for _, tc := range cases {
+		got := hlsAttr(tc.attrs, tc.name)
+		if got != tc.want {
+			t.Errorf("hlsAttr(%q, %q) = %q, want %q", tc.attrs, tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestHlsAttr_NameCollision(t *testing.T) {
+	// BANDWIDTH must not match inside BANDWIDTHRATE
+	attrs := "BANDWIDTHRATE=999,BANDWIDTH=5000000"
+	got := hlsAttr(attrs, "BANDWIDTH")
+	if got != "5000000" {
+		t.Errorf("hlsAttr name collision: got %q, want %q", got, "5000000")
+	}
+}
+
+func TestHlsAttr_MissingClosingQuote(t *testing.T) {
+	attrs := `CODECS="avc1.42c028`
+	got := hlsAttr(attrs, "CODECS")
+	if got != "" {
+		t.Errorf("hlsAttr missing closing quote: got %q, want empty", got)
+	}
+}
+
+func TestHlsAttr_AtStart(t *testing.T) {
+	// Attribute at the start of the string (idx=0)
+	attrs := "RESOLUTION=1920x1080,BANDWIDTH=5000000"
+	got := hlsAttr(attrs, "RESOLUTION")
+	if got != "1920x1080" {
+		t.Errorf("hlsAttr at start: got %q, want %q", got, "1920x1080")
+	}
+}

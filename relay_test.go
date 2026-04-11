@@ -218,6 +218,28 @@ func TestRelayCheckAccess_Retired(t *testing.T) {
 	}
 }
 
+func TestRelayCheckAccess_UnknownAccess(t *testing.T) {
+	doc := map[string]interface{}{"access": "delegation", "status": "active"}
+	if err := checkChannelAccess(doc); err == nil {
+		t.Error("unknown access mode should be rejected")
+	}
+}
+
+func TestRelayCheckAccess_UnknownStatus(t *testing.T) {
+	doc := map[string]interface{}{"access": "public", "status": "archived"}
+	if err := checkChannelAccess(doc); err == nil {
+		t.Error("unknown status should be rejected")
+	}
+}
+
+func TestRelayCheckAccess_AbsentDefaults(t *testing.T) {
+	// Missing access and status should default to public/active → allowed
+	doc := map[string]interface{}{}
+	if err := checkChannelAccess(doc); err != nil {
+		t.Errorf("absent access/status should default to public/active: %v", err)
+	}
+}
+
 // ---------- Migration ----------
 
 func TestRelayIsMigration(t *testing.T) {
@@ -470,9 +492,9 @@ func TestRelayServerViewerCoexistence(t *testing.T) {
 
 	// Register viewer routes on the relay's mux — this used to panic
 	// with "GET /" vs "/tltv/" pattern conflict before the fix.
-	viewerEmbedRoutes(srv.mux, func() map[string]interface{} {
+	viewerEmbedRoutes(srv.mux, func(_ string) map[string]interface{} {
 		return map[string]interface{}{"channel_name": "test"}
-	})
+	}, nil)
 
 	// Viewer root serves HTML
 	w := httptest.NewRecorder()

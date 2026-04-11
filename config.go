@@ -217,6 +217,9 @@ func parseGuideConfig(v interface{}) (entries []guideEntry, filePath string, err
 		if s, ok := entryMap["category"].(string); ok {
 			entry.Category = s
 		}
+		if s, ok := entryMap["relay_from"].(string); ok {
+			entry.RelayFrom = s
+		}
 
 		if entry.Start == "" || entry.End == "" || entry.Title == "" {
 			continue // skip incomplete entries
@@ -338,6 +341,9 @@ func dumpDaemonConfig(cfg map[string]interface{}, w io.Writer) error {
 				}
 				if e.Category != "" {
 					entry["category"] = e.Category
+				}
+				if e.RelayFrom != "" {
+					entry["relay_from"] = e.RelayFrom
 				}
 				entries = append(entries, entry)
 			}

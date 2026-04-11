@@ -15,6 +15,7 @@ func cmdInfo(args []string) {
 	token := fs.String("token", "", "access token for private channels")
 	fs.StringVar(token, "t", "", "alias for --token")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
+	fs.BoolVar(noVerify, "V", false, "alias for --no-verify")
 	watch, interval := addWatchFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Show all info about a target\n\n")
@@ -28,7 +29,7 @@ func cmdInfo(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv info example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
-		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
+		fmt.Fprintf(os.Stderr, "  -V, --no-verify       skip signature verification\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
 		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
 	}
@@ -78,7 +79,7 @@ func infoNodeOnly(client *Client, host string) {
 		return
 	}
 
-	printInfoNode(info, host, "")
+	printInfoNode(info, host, "", nil)
 	fmt.Println()
 }
 
@@ -106,6 +107,22 @@ func infoFull(client *Client, channelID, host, token string, noVerify bool) {
 		guideSigErr = verifyDocument(guideDoc, channelID)
 	}
 
+	// Check access mode (spec §5.2)
+	var accessErr error
+	if metaErr == nil {
+		accessErr = checkAccessMode(metaDoc)
+	}
+
+	// Check origin status from signed metadata (§11)
+	var oc *originCheck
+	if metaErr == nil && metaSigErr == nil && !noVerify {
+		oc = checkOrigin(metaDoc, host)
+	}
+	var checks map[string]*originCheck
+	if oc != nil {
+		checks = map[string]*originCheck{channelID: oc}
+	}
+
 	if flagJSON {
 		result := map[string]interface{}{}
 
@@ -118,6 +135,13 @@ func infoFull(client *Client, channelID, host, token string, noVerify bool) {
 				"verified":   !noVerify && metaSigErr == nil,
 				"document":   metaDoc,
 			}
+			if accessErr != nil {
+				ch["access_warning"] = accessErr.Error()
+			}
+			status := getStringDefault(metaDoc, "status", "active")
+			if status != "active" && status != "retired" {
+				ch["status_warning"] = "unknown status: " + status
+			}
 			if stream := getString(metaDoc, "stream"); stream != "" {
 				ch["stream_url"] = base + stream
 			}
@@ -129,6 +153,20 @@ func infoFull(client *Client, channelID, host, token string, noVerify bool) {
 			ch["uri"] = formatTLTVUri(channelID, []string{host}, token)
 			if metaSigErr != nil {
 				ch["verification_error"] = metaSigErr.Error()
+			}
+			// Origin verification from signed metadata (§11)
+			if oc != nil && oc.HasOrigins {
+				ch["verified_origin"] = oc.IsOrigin
+				ch["signed_origins"] = oc.Origins
+				// Warn if discovery disagrees with signed origins
+				if !oc.IsOrigin && nodeErr == nil {
+					for _, nc := range nodeInfo.Channels {
+						if nc.ID == channelID {
+							ch["origin_warning"] = "node claims origin via unsigned discovery but hostname not in signed origins field"
+							break
+						}
+					}
+				}
 			}
 			result["channel"] = ch
 		}
@@ -224,8 +262,25 @@ func infoFull(client *Client, channelID, host, token string, noVerify bool) {
 		printField("Name", getString(metaDoc, "name"))
 		uri := formatTLTVUri(channelID, []string{host}, token)
 		printField("URI", uri)
-		printField("Status", getStringDefault(metaDoc, "status", "active"))
-		printField("Access", getStringDefault(metaDoc, "access", "public"))
+		status := getStringDefault(metaDoc, "status", "active")
+		if status != "active" && status != "retired" {
+			printField("Status", c(cYellow, status)+" (unknown)")
+		} else {
+			printField("Status", status)
+		}
+		accessVal := getStringDefault(metaDoc, "access", "public")
+		if accessErr != nil {
+			printField("Access", c(cYellow, accessVal)+" (unsupported)")
+		} else {
+			printField("Access", accessVal)
+		}
+
+		if lang := getString(metaDoc, "language"); lang != "" {
+			printField("Language", lang)
+		}
+		if tz := getString(metaDoc, "timezone"); tz != "" {
+			printField("Timezone", tz)
+		}
 
 		base := client.baseURL(host)
 		if stream := getString(metaDoc, "stream"); stream != "" {
@@ -236,10 +291,17 @@ func infoFull(client *Client, channelID, host, token string, noVerify bool) {
 			xmltvPath := strings.Replace(guide, "guide.json", "guide.xml", 1)
 			printField("XMLTV", base+xmltvPath)
 		}
+		if icon := getString(metaDoc, "icon"); icon != "" {
+			printField("Icon", base+icon)
+		}
+		if origins := extractOrigins(metaDoc); origins != nil {
+			printField("Origins", strings.Join(origins, ", "))
+		}
 		printField("Updated", getString(metaDoc, "updated"))
 		printField("Seq", getString(metaDoc, "seq"))
 		printRemainingKeys(metaDoc, "v", "id", "name", "status", "access", "stream",
-			"guide", "updated", "seq", "signature")
+			"guide", "icon", "origins", "updated", "seq", "signature", "language", "timezone",
+			"on_demand", "description", "tags")
 	}
 
 	// 2. Stream
@@ -355,7 +417,7 @@ func infoFull(client *Client, channelID, host, token string, noVerify bool) {
 		printHeader("Node: " + host)
 		printFail("could not reach: " + nodeErr.Error())
 	} else {
-		printInfoNode(nodeInfo, host, channelID)
+		printInfoNode(nodeInfo, host, channelID, checks)
 	}
 
 	// 5. Peers
@@ -387,7 +449,9 @@ func infoFull(client *Client, channelID, host, token string, noVerify bool) {
 }
 
 // printInfoNode prints the node section, optionally marking the active channel.
-func printInfoNode(info *NodeInfo, host, activeID string) {
+// checks maps channel IDs to origin verification results from signed metadata.
+// When nil or missing an entry, falls back to unsigned discovery labels.
+func printInfoNode(info *NodeInfo, host, activeID string, checks map[string]*originCheck) {
 	printHeader("Node: " + host)
 	if len(info.Versions) > 0 {
 		printField("Protocol", fmt.Sprintf("%s protocol v%d", info.Protocol, info.Versions[0]))
@@ -395,9 +459,41 @@ func printInfoNode(info *NodeInfo, host, activeID string) {
 		printField("Protocol", info.Protocol)
 	}
 
+	// Helper: build per-channel origin annotation from signed metadata.
+	// discoveryType is "channel" or "relay" from the unsigned discovery doc.
+	originAnnotation := func(chID, discoveryType string) string {
+		if checks == nil {
+			return ""
+		}
+		oc, ok := checks[chID]
+		if !ok || oc == nil || !oc.HasOrigins {
+			return ""
+		}
+		if oc.IsOrigin {
+			return c(cGreen, " (origin)")
+		}
+		originHint := ""
+		if len(oc.Origins) > 0 {
+			originHint = " — real origin is " + oc.Origins[0]
+		}
+		if discoveryType == "channel" {
+			// Discovery claims origin but signed metadata says otherwise
+			return c(cYellow, " (spoofed origin" + originHint + ")")
+		}
+		return c(cDim, " (relay" + originHint + ")")
+	}
+
+	// Determine section label — override "Origin" if signed data says otherwise
+	channelsLabel := "Origin Channels"
+	if activeID != "" && checks != nil {
+		if oc, ok := checks[activeID]; ok && oc != nil && oc.HasOrigins && !oc.IsOrigin {
+			channelsLabel = "Channels"
+		}
+	}
+
 	if len(info.Channels) > 0 {
 		fmt.Println()
-		fmt.Printf("  Origin Channels (%d)\n", len(info.Channels))
+		fmt.Printf("  %s (%d)\n", channelsLabel, len(info.Channels))
 		for _, ch := range info.Channels {
 			marker := "  "
 			if activeID != "" && ch.ID == activeID {
@@ -407,7 +503,7 @@ func printInfoNode(info *NodeInfo, host, activeID string) {
 					marker = "> "
 				}
 			}
-			fmt.Printf("  %s%s  %s\n", marker, ch.ID, c(cDim, ch.Name))
+			fmt.Printf("  %s%s  %s%s\n", marker, ch.ID, c(cDim, ch.Name), originAnnotation(ch.ID, "channel"))
 		}
 	}
 
@@ -423,7 +519,7 @@ func printInfoNode(info *NodeInfo, host, activeID string) {
 					marker = "> "
 				}
 			}
-			fmt.Printf("  %s%s  %s\n", marker, ch.ID, c(cDim, ch.Name))
+			fmt.Printf("  %s%s  %s%s\n", marker, ch.ID, c(cDim, ch.Name), originAnnotation(ch.ID, "relay"))
 		}
 	}
 }
@@ -483,7 +579,7 @@ func cmdNode(args []string) {
 			return
 		}
 
-		printInfoNode(info, host, "")
+		printInfoNode(info, host, "", nil)
 		fmt.Println()
 	})
 }
@@ -493,6 +589,7 @@ func cmdChannel(args []string) {
 	token := fs.String("token", "", "access token for private channels")
 	fs.StringVar(token, "t", "", "alias for --token")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
+	fs.BoolVar(noVerify, "V", false, "alias for --no-verify")
 	watch, interval := addWatchFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Fetch and verify channel metadata\n\n")
@@ -503,7 +600,7 @@ func cmdChannel(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv channel TVMkVH...@localhost:8000\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
-		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
+		fmt.Fprintf(os.Stderr, "  -V, --no-verify       skip signature verification\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
 		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
 	}
@@ -540,6 +637,9 @@ func cmdChannel(args []string) {
 			}
 		}
 
+		// Check for unknown access modes (spec §5.2)
+		accessErr := checkAccessMode(doc)
+
 		if flagJSON {
 			base := client.baseURL(host)
 			result := map[string]interface{}{
@@ -547,6 +647,13 @@ func cmdChannel(args []string) {
 				"host":       host,
 				"verified":   !*noVerify && sigErr == nil,
 				"document":   doc,
+			}
+			if accessErr != nil {
+				result["access_warning"] = accessErr.Error()
+			}
+			status := getStringDefault(doc, "status", "active")
+			if status != "active" && status != "retired" {
+				result["status_warning"] = "unknown status: " + status
 			}
 			if stream := getString(doc, "stream"); stream != "" {
 				result["stream_url"] = base + stream
@@ -599,8 +706,25 @@ func cmdChannel(args []string) {
 			}
 			printField("Name", getString(doc, "name"))
 			printField("URI", formatTLTVUri(channelID, []string{host}, *token))
-			printField("Status", getStringDefault(doc, "status", "active"))
-			printField("Access", getStringDefault(doc, "access", "public"))
+			status := getStringDefault(doc, "status", "active")
+			if status != "active" && status != "retired" {
+				printField("Status", c(cYellow, status)+" (unknown)")
+			} else {
+				printField("Status", status)
+			}
+			accessVal := getStringDefault(doc, "access", "public")
+			if accessErr != nil {
+				printField("Access", c(cYellow, accessVal)+" (unsupported)")
+			} else {
+				printField("Access", accessVal)
+			}
+
+			if lang := getString(doc, "language"); lang != "" {
+				printField("Language", lang)
+			}
+			if tz := getString(doc, "timezone"); tz != "" {
+				printField("Timezone", tz)
+			}
 
 			base := client.baseURL(host)
 			if stream := getString(doc, "stream"); stream != "" {
@@ -611,10 +735,17 @@ func cmdChannel(args []string) {
 				xmltvPath := strings.Replace(guide, "guide.json", "guide.xml", 1)
 				printField("XMLTV", base+xmltvPath)
 			}
+			if icon := getString(doc, "icon"); icon != "" {
+				printField("Icon", base+icon)
+			}
+			if origins := extractOrigins(doc); origins != nil {
+				printField("Origins", strings.Join(origins, ", "))
+			}
 			printField("Updated", getString(doc, "updated"))
 			printField("Seq", getString(doc, "seq"))
 			printRemainingKeys(doc, "v", "id", "name", "status", "access", "stream",
-				"guide", "updated", "seq", "signature")
+				"guide", "icon", "origins", "updated", "seq", "signature", "language", "timezone",
+				"on_demand", "description", "tags")
 		}
 
 		if isTestChannel(channelID) {
@@ -679,7 +810,9 @@ func cmdGuide(args []string) {
 	token := fs.String("token", "", "access token for private channels")
 	fs.StringVar(token, "t", "", "alias for --token")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
+	fs.BoolVar(noVerify, "V", false, "alias for --no-verify")
 	xmltv := fs.Bool("xmltv", false, "output as XMLTV XML")
+	fs.BoolVar(xmltv, "x", false, "alias for --xmltv")
 	watch, interval := addWatchFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Fetch and verify a channel guide\n\n")
@@ -689,8 +822,8 @@ func cmdGuide(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv guide TVMkVH...@example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
-		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
-		fmt.Fprintf(os.Stderr, "      --xmltv           output as XMLTV XML\n")
+		fmt.Fprintf(os.Stderr, "  -V, --no-verify       skip signature verification\n")
+		fmt.Fprintf(os.Stderr, "  -x, --xmltv           output as XMLTV XML\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
 		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
 	}
@@ -804,6 +937,9 @@ func cmdGuide(args []string) {
 					}
 				}
 				timeRange := marker + " " + start + " - " + end
+				if rf := getString(entry, "relay_from"); rf != "" {
+					title += " [relay: " + rf + "]"
+				}
 				rows = append(rows, []string{timeRange, title, cat})
 			}
 			printTable([]string{"  Time", "Title", "Category"}, rows)
@@ -872,6 +1008,7 @@ func cmdStream(args []string) {
 	token := fs.String("token", "", "access token for private channels")
 	fs.StringVar(token, "t", "", "alias for --token")
 	urlOnly := fs.Bool("url", false, "print only the stream URL")
+	fs.BoolVar(urlOnly, "u", false, "alias for --url")
 	watch, interval := addWatchFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Check stream status and manifest info\n\n")
@@ -881,7 +1018,7 @@ func cmdStream(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv stream TVMkVH...@example.com\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
-		fmt.Fprintf(os.Stderr, "      --url             print only the stream URL\n")
+		fmt.Fprintf(os.Stderr, "  -u, --url             print only the stream URL\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
 		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
 	}
@@ -1155,6 +1292,7 @@ func cmdResolve(args []string) {
 	token := fs.String("token", "", "access token (overrides URI token)")
 	fs.StringVar(token, "t", "", "alias for --token")
 	noVerify := fs.Bool("no-verify", false, "skip signature verification")
+	fs.BoolVar(noVerify, "V", false, "alias for --no-verify")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Resolve a tltv:// URI end-to-end\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: tltv resolve <uri>\n\n")
@@ -1165,7 +1303,7 @@ func cmdResolve(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv resolve \"tltv://TVMkVH...?via=relay1.com:443,relay2.com:443\"\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token (overrides URI token)\n")
-		fmt.Fprintf(os.Stderr, "      --no-verify       skip signature verification\n")
+		fmt.Fprintf(os.Stderr, "  -V, --no-verify       skip signature verification\n")
 	}
 	fs.Parse(args)
 
@@ -1214,6 +1352,7 @@ func cmdResolve(args []string) {
 	// Try each hint
 	var resolvedHost string
 	var metadata map[string]interface{}
+	var resolvedOC *originCheck
 	var streamStatus int
 	var streamContentType string
 
@@ -1314,8 +1453,22 @@ func cmdResolve(args []string) {
 			}
 		}
 
+		// Check origin status from signed metadata (§11)
+		resolvedOC = checkOrigin(doc, host)
 		if !flagJSON {
-			fmt.Printf(" ... %s\n", c(cGreen, "verified"))
+			if resolvedOC != nil && resolvedOC.HasOrigins {
+				if resolvedOC.IsOrigin {
+					fmt.Printf(" ... %s %s\n", c(cGreen, "verified"), c(cDim, "(origin)"))
+				} else {
+					originHint := ""
+					if len(resolvedOC.Origins) > 0 {
+						originHint = " — origin is " + resolvedOC.Origins[0]
+					}
+					fmt.Printf(" ... %s %s\n", c(cGreen, "verified"), c(cYellow, "(relay"+originHint+")"))
+				}
+			} else {
+				fmt.Printf(" ... %s\n", c(cGreen, "verified"))
+			}
 		}
 		resolvedHost = host
 		metadata = doc
@@ -1422,6 +1575,10 @@ func cmdResolve(args []string) {
 		if finalChannelID != uri.ChannelID {
 			result["migrated_from"] = uri.ChannelID
 		}
+		if resolvedOC != nil && resolvedOC.HasOrigins {
+			result["verified_origin"] = resolvedOC.IsOrigin
+			result["signed_origins"] = resolvedOC.Origins
+		}
 		if docType != "migration" {
 			result["stream_status"] = streamStatus
 			result["stream_live"] = streamStatus == 200
@@ -1505,6 +1662,9 @@ func outputXMLTV(channelID string, guide map[string]interface{}) {
 		}
 		if cat := getString(entry, "category"); cat != "" {
 			fmt.Printf("    <category>%s</category>\n", xmlEscape(cat))
+		}
+		if rf := getString(entry, "relay_from"); rf != "" {
+			fmt.Printf("    <previously-shown channel=\"%s\" />\n", xmlEscape(rf))
 		}
 		fmt.Println("  </programme>")
 	}

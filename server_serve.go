@@ -8,6 +8,16 @@ import (
 	"strings"
 )
 
+// setServerPrivateHeaders sets Referrer-Policy and overrides Cache-Control
+// for private server channels.
+func setServerPrivateHeaders(w http.ResponseWriter, isPrivate bool) {
+	if !isPrivate {
+		return
+	}
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "private, no-store")
+}
+
 // serverCacheStatus returns the Cache-Status header value for a hit/miss.
 func serverCacheStatus(hit bool) string {
 	if hit {
@@ -37,7 +47,9 @@ func serveSegment(w http.ResponseWriter, r *http.Request, seg *hlsSegmenter, num
 // serverHTTP sets up HTTP handlers for the server command.
 // Serves HLS stream and TLTV protocol endpoints.
 // Pass cache=nil to disable caching. Pass gossipReg=nil to disable gossip.
-func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName string, metadata, guide []byte, cache *hlsCache, peerReg *peerRegistry, gossipReg *peerRegistry) {
+// serverToken is the expected access token (empty string = public channel).
+// serverIsPrivate controls well-known listing exclusion.
+func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName string, metadata, guide []byte, cache *hlsCache, peerReg *peerRegistry, gossipReg *peerRegistry, serverToken string, serverIsPrivate bool, iconData []byte, iconCT string) {
 	// Store initial docs atomically
 	serverDocsState.Store(&serverDocs{
 		channelID:   channelID,
@@ -53,15 +65,21 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		docs := serverDocsState.Load()
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "max-age=60")
-		writeJSON(w, map[string]interface{}{
-			"protocol": "tltv",
-			"versions": []int{1},
-			"channels": []interface{}{
+		var channels []interface{}
+		if !serverIsPrivate {
+			channels = []interface{}{
 				map[string]interface{}{
 					"id":   docs.channelID,
 					"name": docs.channelName,
 				},
-			},
+			}
+		} else {
+			channels = []interface{}{}
+		}
+		writeJSON(w, map[string]interface{}{
+			"protocol": "tltv",
+			"versions": []int{1},
+			"channels": channels,
 			"relaying": []interface{}{},
 		}, http.StatusOK)
 	})
@@ -73,6 +91,9 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		id := r.PathValue("id")
 		if id != docs.channelID {
 			jsonError(w, "channel_not_found", http.StatusNotFound)
+			return
+		}
+		if !checkRequestToken(w, r, serverToken) {
 			return
 		}
 		if docs.metadata == nil {
@@ -91,12 +112,14 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				w.Header().Set("Cache-Control", "max-age=60")
 				w.Header().Set("Cache-Status", serverCacheStatus(hit))
+				setServerPrivateHeaders(w, serverIsPrivate)
 				w.Write(data)
 				return
 			}
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "max-age=60")
+		setServerPrivateHeaders(w, serverIsPrivate)
 		w.Write(docs.metadata)
 	})
 
@@ -109,6 +132,9 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 
 		if id != docs.channelID {
 			jsonError(w, "channel_not_found", http.StatusNotFound)
+			return
+		}
+		if !checkRequestToken(w, r, serverToken) {
 			return
 		}
 
@@ -130,12 +156,14 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 					w.Header().Set("Content-Type", "application/json; charset=utf-8")
 					w.Header().Set("Cache-Control", "max-age=300")
 					w.Header().Set("Cache-Status", serverCacheStatus(hit))
+					setServerPrivateHeaders(w, serverIsPrivate)
 					w.Write(data)
 					return
 				}
 			}
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "max-age=300")
+			setServerPrivateHeaders(w, serverIsPrivate)
 			w.Write(docs.guide)
 
 		case "guide.xml":
@@ -156,6 +184,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 					w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 					w.Header().Set("Cache-Control", "max-age=300")
 					w.Header().Set("Cache-Status", serverCacheStatus(hit))
+					setServerPrivateHeaders(w, serverIsPrivate)
 					w.Write(data)
 					return
 				}
@@ -163,6 +192,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			xml := serverGuideToXMLTV(docs.guide, docs.channelID, docs.channelName)
 			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 			w.Header().Set("Cache-Control", "max-age=300")
+			setServerPrivateHeaders(w, serverIsPrivate)
 			w.Write([]byte(xml))
 
 		case "stream.m3u8":
@@ -178,6 +208,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 					w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 					w.Header().Set("Cache-Control", "no-cache, no-store")
 					w.Header().Set("Cache-Status", serverCacheStatus(hit))
+					setServerPrivateHeaders(w, serverIsPrivate)
 					w.Write(data)
 					return
 				}
@@ -189,7 +220,18 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			}
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			w.Header().Set("Cache-Control", "no-cache, no-store")
+			setServerPrivateHeaders(w, serverIsPrivate)
 			w.Write([]byte(manifest))
+
+		case "icon.svg", "icon.png", "icon.jpg":
+			if len(iconData) > 0 {
+				w.Header().Set("Content-Type", iconCT)
+				w.Header().Set("Cache-Control", "max-age=86400")
+				setServerPrivateHeaders(w, serverIsPrivate)
+				w.Write(iconData)
+			} else {
+				http.NotFound(w, r)
+			}
 
 		default:
 			// Segment files via protocol path: /tltv/v1/channels/{id}/seg{N}.ts
@@ -212,11 +254,13 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 						w.Header().Set("Cache-Control", "max-age=10")
 						w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 						w.Header().Set("Cache-Status", serverCacheStatus(hit))
+						setServerPrivateHeaders(w, serverIsPrivate)
 						w.Write(data)
 						return
 					}
 					// Cache fetch error (segment not found) — fall through to 404
 				}
+				setServerPrivateHeaders(w, serverIsPrivate)
 				serveSegment(w, r, seg, subPath[3:len(subPath)-3])
 				return
 			}
@@ -278,6 +322,242 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 	})
 
 	// Catch-all: 404 for unknown paths
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == "OPTIONS" {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.NotFound(w, r)
+	})
+}
+
+// serverMultiHTTP sets up HTTP handlers for multi-channel server mode.
+// Each serverChannel has its own segmenter and docs. Shared: cache, peers, gossip, icon, token.
+func serverMultiHTTP(mux *http.ServeMux, channels []*serverChannel, cache *hlsCache, peerReg *peerRegistry, gossipReg *peerRegistry, serverToken string, serverIsPrivate bool, iconData []byte, iconCT string) {
+	// Build lookup map
+	chanMap := make(map[string]*serverChannel, len(channels))
+	for _, ch := range channels {
+		chanMap[ch.channelID] = ch
+	}
+
+	// Node info: GET /.well-known/tltv
+	mux.HandleFunc("GET /.well-known/tltv", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "max-age=60")
+		var chList []interface{}
+		if !serverIsPrivate {
+			for _, ch := range channels {
+				docs := ch.docs.Load()
+				chList = append(chList, map[string]interface{}{
+					"id":   docs.channelID,
+					"name": docs.channelName,
+				})
+			}
+		}
+		if chList == nil {
+			chList = []interface{}{}
+		}
+		writeJSON(w, map[string]interface{}{
+			"protocol": "tltv",
+			"versions": []int{1},
+			"channels": chList,
+			"relaying": []interface{}{},
+		}, http.StatusOK)
+	})
+
+	// Channel metadata: GET /tltv/v1/channels/{id}
+	mux.HandleFunc("GET /tltv/v1/channels/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		id := r.PathValue("id")
+		ch, ok := chanMap[id]
+		if !ok {
+			jsonError(w, "channel_not_found", http.StatusNotFound)
+			return
+		}
+		if !checkRequestToken(w, r, serverToken) {
+			return
+		}
+		docs := ch.docs.Load()
+		if docs.metadata == nil {
+			jsonError(w, "channel_not_found", http.StatusNotFound)
+			return
+		}
+		if cache != nil {
+			data, _, hit, err := cache.getOrFetch(r.URL.Path, func() (*hlsCacheFetchResult, error) {
+				d := ch.docs.Load()
+				if d.metadata == nil {
+					return nil, &hlsCacheUpstreamError{status: http.StatusNotFound}
+				}
+				return &hlsCacheFetchResult{data: d.metadata, contentType: "application/json; charset=utf-8"}, nil
+			})
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.Header().Set("Cache-Control", "max-age=60")
+				w.Header().Set("Cache-Status", serverCacheStatus(hit))
+				setServerPrivateHeaders(w, serverIsPrivate)
+				w.Write(data)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "max-age=60")
+		setServerPrivateHeaders(w, serverIsPrivate)
+		w.Write(docs.metadata)
+	})
+
+	// Channel sub-paths: guide, stream, segments, icon
+	mux.HandleFunc("GET /tltv/v1/channels/{id}/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		id := r.PathValue("id")
+		subPath := r.PathValue("path")
+		ch, ok := chanMap[id]
+		if !ok {
+			jsonError(w, "channel_not_found", http.StatusNotFound)
+			return
+		}
+		if !checkRequestToken(w, r, serverToken) {
+			return
+		}
+		docs := ch.docs.Load()
+
+		switch subPath {
+		case "guide.json":
+			if docs.guide == nil {
+				jsonError(w, "channel_not_found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "max-age=300")
+			setServerPrivateHeaders(w, serverIsPrivate)
+			w.Write(docs.guide)
+
+		case "guide.xml":
+			if docs.guide == nil {
+				jsonError(w, "channel_not_found", http.StatusNotFound)
+				return
+			}
+			xml := serverGuideToXMLTV(docs.guide, docs.channelID, docs.channelName)
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.Header().Set("Cache-Control", "max-age=300")
+			setServerPrivateHeaders(w, serverIsPrivate)
+			w.Write([]byte(xml))
+
+		case "stream.m3u8":
+			if len(ch.variants) > 0 {
+				// Master playlist
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				w.Header().Set("Cache-Control", "no-cache, no-store")
+				setServerPrivateHeaders(w, serverIsPrivate)
+				w.Write([]byte(masterPlaylist(ch.variants)))
+			} else {
+				manifest := ch.seg.getManifest()
+				if manifest == "" {
+					http.Error(w, "stream not ready", http.StatusServiceUnavailable)
+					return
+				}
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				w.Header().Set("Cache-Control", "no-cache, no-store")
+				setServerPrivateHeaders(w, serverIsPrivate)
+				w.Write([]byte(manifest))
+			}
+
+		case "icon.svg", "icon.png", "icon.jpg":
+			if len(iconData) > 0 {
+				w.Header().Set("Content-Type", iconCT)
+				w.Header().Set("Cache-Control", "max-age=86400")
+				setServerPrivateHeaders(w, serverIsPrivate)
+				w.Write(iconData)
+			} else {
+				http.NotFound(w, r)
+			}
+
+		default:
+			// Variant media playlists: stream_{label}.m3u8
+			if strings.HasPrefix(subPath, "stream_") && strings.HasSuffix(subPath, ".m3u8") && len(ch.variants) > 0 {
+				label := subPath[7 : len(subPath)-5] // strip "stream_" and ".m3u8"
+				for i := range ch.variants {
+					if ch.variants[i].label == label {
+						manifest := ch.variants[i].seg.getManifest()
+						if manifest == "" {
+							http.Error(w, "stream not ready", http.StatusServiceUnavailable)
+							return
+						}
+						w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+						w.Header().Set("Cache-Control", "no-cache, no-store")
+						setServerPrivateHeaders(w, serverIsPrivate)
+						w.Write([]byte(manifest))
+						return
+					}
+				}
+				http.NotFound(w, r)
+				return
+			}
+			// Segment files: seg{N}.ts or {label}_seg{N}.ts (variants)
+			if strings.HasSuffix(subPath, ".ts") {
+				segName := subPath
+				targetSeg := ch.seg // default segmenter
+				// Check for variant prefix: e.g. "720p_seg0.ts"
+				if len(ch.variants) > 0 {
+					for i := range ch.variants {
+						prefix := ch.variants[i].label + "_"
+						if strings.HasPrefix(segName, prefix) {
+							targetSeg = ch.variants[i].seg
+							segName = segName[len(prefix):]
+							break
+						}
+					}
+				}
+				if strings.HasPrefix(segName, "seg") {
+					setServerPrivateHeaders(w, serverIsPrivate)
+					serveSegment(w, r, targetSeg, segName[3:len(segName)-3])
+					return
+				}
+			}
+			http.NotFound(w, r)
+		}
+	})
+
+	// Peers
+	mux.HandleFunc("GET /tltv/v1/peers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "max-age=300")
+		var external []peerEntry
+		if peerReg != nil {
+			external = peerReg.ListPeers()
+		}
+		if gossipReg != nil {
+			external = append(external, gossipReg.ListPeers()...)
+		}
+		writeJSON(w, map[string]interface{}{
+			"peers": buildPeersResponse(nil, external),
+		}, http.StatusOK)
+	})
+
+	// Health
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]interface{}{
+			"status":   "ok",
+			"channels": len(channels),
+		}, http.StatusOK)
+	})
+
+	// Method rejection for TLTV paths
+	mux.HandleFunc("/tltv/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == "OPTIONS" {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Allow", "GET, OPTIONS")
+		jsonError(w, "method_not_allowed", http.StatusMethodNotAllowed)
+	})
+
+	// Catch-all
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		if r.Method == "OPTIONS" {

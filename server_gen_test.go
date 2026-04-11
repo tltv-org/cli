@@ -364,7 +364,7 @@ func TestServerSignDocs_EphemeralGuide(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 	id := makeChannelID(pub)
 
-	metadata, guide := serverSignDocs(id, "TEST", "", priv, nil)
+	metadata, guide := serverSignDocs(id, "TEST", "", priv, nil, "public", false, nil)
 	if metadata == nil {
 		t.Fatal("metadata is nil")
 	}
@@ -425,7 +425,7 @@ func TestServerGuideXMLTV(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 	id := makeChannelID(pub)
 
-	_, guide := serverSignDocs(id, "TEST", "", priv, nil)
+	_, guide := serverSignDocs(id, "TEST", "", priv, nil, "public", false, nil)
 	if guide == nil {
 		t.Fatal("guide is nil")
 	}
@@ -672,14 +672,14 @@ func TestServerCache_ManifestCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	seg.pushSegment([]byte("ts-data-0"), 2.0)
 
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil, "", false, nil, "")
 
 	// First request: MISS
 	req := httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil)
@@ -712,14 +712,14 @@ func TestServerCache_SegmentCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	seg.pushSegment([]byte("ts-data-0"), 2.0)
 
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil, "", false, nil, "")
 
 	path := "/tltv/v1/channels/" + channelID + "/seg0.ts"
 
@@ -748,12 +748,12 @@ func TestServerCache_MetadataCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil, "", false, nil, "")
 
 	path := "/tltv/v1/channels/" + channelID
 
@@ -777,12 +777,12 @@ func TestServerCache_GuideCacheStatus(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	cache := newHLSCache(100)
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, cache, nil, nil, "", false, nil, "")
 
 	// guide.json
 	w := httptest.NewRecorder()
@@ -819,17 +819,17 @@ func TestServerViewerCoexistence(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	seg.pushSegment([]byte("ts-data"), 2.0)
 
 	mux := http.NewServeMux()
 	// Register viewer BEFORE server routes — same order as production code
-	viewerEmbedRoutes(mux, func() map[string]interface{} {
+	viewerEmbedRoutes(mux, func(_ string) map[string]interface{} {
 		return map[string]interface{}{"channel_name": "TEST"}
-	})
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil)
+	}, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "", false, nil, "")
 
 	// Viewer root serves HTML
 	w := httptest.NewRecorder()
@@ -875,13 +875,13 @@ func TestServerCache_NilCacheNoHeaders(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	pub := priv.Public().(ed25519.PublicKey)
 	channelID := makeChannelID(pub)
-	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
 
 	seg := newHLSSegmenter(5, 2)
 	seg.pushSegment([]byte("ts-data"), 2.0)
 
 	mux := http.NewServeMux()
-	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil)
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "", false, nil, "")
 
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil))
@@ -890,5 +890,785 @@ func TestServerCache_NilCacheNoHeaders(t *testing.T) {
 	}
 	if cs := w.Header().Get("Cache-Status"); cs != "" {
 		t.Errorf("nil cache should not set Cache-Status, got %q", cs)
+	}
+}
+
+// ---------- Server Private Channels ----------
+
+func TestServerPrivateChannel_Metadata(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "token", false, nil)
+
+	// Check that metadata has access: "token"
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	if access, _ := doc["access"].(string); access != "token" {
+		t.Errorf("access = %q, want \"token\"", access)
+	}
+}
+
+func TestServerPrivateChannel_OnDemand(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", true, nil)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	if onDemand, ok := doc["on_demand"].(bool); !ok || !onDemand {
+		t.Errorf("on_demand = %v, want true", doc["on_demand"])
+	}
+}
+
+func TestServerPrivateChannel_TokenRequired(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "token", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data"), 2.0)
+
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "secret123", true, nil, "")
+
+	// Without token → 403
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID, nil))
+	if w.Code != 403 {
+		t.Errorf("no token: status = %d, want 403", w.Code)
+	}
+
+	// With wrong token → 403
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"?token=wrong", nil))
+	if w.Code != 403 {
+		t.Errorf("wrong token: status = %d, want 403", w.Code)
+	}
+
+	// With correct token → 200
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"?token=secret123", nil))
+	if w.Code != 200 {
+		t.Errorf("correct token: status = %d, want 200", w.Code)
+	}
+}
+
+func TestServerPrivateChannel_StreamTokenRequired(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "token", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data"), 2.0)
+
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "secret123", true, nil, "")
+
+	// Stream without token → 403
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8", nil))
+	if w.Code != 403 {
+		t.Errorf("no token: status = %d, want 403", w.Code)
+	}
+
+	// Stream with correct token → 200
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8?token=secret123", nil))
+	if w.Code != 200 {
+		t.Errorf("correct token: status = %d, want 200", w.Code)
+	}
+}
+
+func TestServerPrivateChannel_HiddenFromWellKnown(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "token", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "secret123", true, nil, "")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/.well-known/tltv", nil))
+	if w.Code != 200 {
+		t.Fatalf("well-known status = %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	channels, _ := resp["channels"].([]interface{})
+	if len(channels) != 0 {
+		t.Errorf("private channel should not appear in well-known, got %d channels", len(channels))
+	}
+}
+
+func TestServerPrivateChannel_PrivateHeaders(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "token", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "secret123", true, nil, "")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"?token=secret123", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if rp := w.Header().Get("Referrer-Policy"); rp != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", rp)
+	}
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "private") {
+		t.Errorf("Cache-Control = %q, want private", cc)
+	}
+}
+
+func TestServerPublicChannel_NoTokenRequired(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data"), 2.0)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "", false, nil, "")
+
+	// Public channel: no token needed → 200
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID, nil))
+	if w.Code != 200 {
+		t.Errorf("public channel without token: status = %d, want 200", w.Code)
+	}
+
+	// No Referrer-Policy header on public channels
+	if rp := w.Header().Get("Referrer-Policy"); rp != "" {
+		t.Errorf("public channel should not set Referrer-Policy, got %q", rp)
+	}
+}
+
+// ---------- Server Metadata Options ----------
+
+func TestServerMetadataOpts_Description(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	opts := &serverMetadataOpts{Description: "24/7 test signal"}
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, opts)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	if desc, _ := doc["description"].(string); desc != "24/7 test signal" {
+		t.Errorf("description = %q, want %q", desc, "24/7 test signal")
+	}
+}
+
+func TestServerMetadataOpts_Tags(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	opts := &serverMetadataOpts{Tags: []string{"test", "experimental"}}
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, opts)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	tags, ok := doc["tags"].([]interface{})
+	if !ok || len(tags) != 2 {
+		t.Fatalf("tags = %v, want 2-element array", doc["tags"])
+	}
+	if tags[0] != "test" || tags[1] != "experimental" {
+		t.Errorf("tags = %v, want [test, experimental]", tags)
+	}
+}
+
+func TestServerMetadataOpts_TagsMax5(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	opts := &serverMetadataOpts{Tags: []string{"a", "b", "c", "d", "e", "f"}}
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, opts)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	tags, _ := doc["tags"].([]interface{})
+	if len(tags) != 5 {
+		t.Errorf("tags length = %d, want 5 (truncated)", len(tags))
+	}
+}
+
+func TestServerMetadataOpts_Language(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	opts := &serverMetadataOpts{Language: "ja"}
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, opts)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	if lang, _ := doc["language"].(string); lang != "ja" {
+		t.Errorf("language = %q, want %q", lang, "ja")
+	}
+}
+
+func TestServerMetadataOpts_Timezone(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	opts := &serverMetadataOpts{Timezone: "America/New_York"}
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, opts)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	if tz, _ := doc["timezone"].(string); tz != "America/New_York" {
+		t.Errorf("timezone = %q, want %q", tz, "America/New_York")
+	}
+}
+
+func TestServerMetadataOpts_Icon(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	opts := &serverMetadataOpts{IconFileName: "icon.svg"}
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, opts)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	icon, _ := doc["icon"].(string)
+	want := "/tltv/v1/channels/" + channelID + "/icon.svg"
+	if icon != want {
+		t.Errorf("icon = %q, want %q", icon, want)
+	}
+}
+
+func TestServerIconEndpoint(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	opts := &serverMetadataOpts{IconFileName: "icon.svg"}
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, opts)
+
+	seg := newHLSSegmenter(5, 2)
+	mux := http.NewServeMux()
+	iconData := []byte("<svg>test</svg>")
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "", false, iconData, "image/svg+xml")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/icon.svg", nil))
+	if w.Code != 200 {
+		t.Fatalf("icon status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("Content-Type = %q, want image/svg+xml", ct)
+	}
+	if w.Body.String() != "<svg>test</svg>" {
+		t.Errorf("icon body = %q", w.Body.String())
+	}
+}
+
+func TestServerIconEndpoint_NoIcon(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	mux := http.NewServeMux()
+	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "", false, nil, "")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/icon.svg", nil))
+	if w.Code != 404 {
+		t.Errorf("icon without data: status = %d, want 404", w.Code)
+	}
+}
+
+// ---------- Multi-Channel Server ----------
+
+func TestServerMultiChannel_WellKnown(t *testing.T) {
+	// Create 3 channels
+	var channels []*serverChannel
+	for i := 0; i < 3; i++ {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		chID := makeChannelID(pub)
+		name := fmt.Sprintf("Test %d", i+1)
+		seg := newHLSSegmenter(5, 2)
+		metadata, guide := serverSignDocs(chID, name, "", priv, nil, "public", false, nil)
+
+		ch := &serverChannel{
+			channelID:   chID,
+			channelName: name,
+			privKey:     priv,
+			seg:         seg,
+		}
+		ch.docs.Store(&serverDocs{
+			channelID:   chID,
+			channelName: name,
+			metadata:    metadata,
+			guide:       guide,
+		})
+		channels = append(channels, ch)
+	}
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, channels, nil, nil, nil, "", false, nil, "")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/.well-known/tltv", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	chList, _ := resp["channels"].([]interface{})
+	if len(chList) != 3 {
+		t.Fatalf("channels = %d, want 3", len(chList))
+	}
+}
+
+func TestServerMultiChannel_IndependentMetadata(t *testing.T) {
+	var channels []*serverChannel
+	for i := 0; i < 2; i++ {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		chID := makeChannelID(pub)
+		name := fmt.Sprintf("Test %d", i+1)
+		seg := newHLSSegmenter(5, 2)
+		metadata, guide := serverSignDocs(chID, name, "", priv, nil, "public", false, nil)
+
+		ch := &serverChannel{
+			channelID:   chID,
+			channelName: name,
+			privKey:     priv,
+			seg:         seg,
+		}
+		ch.docs.Store(&serverDocs{
+			channelID:   chID,
+			channelName: name,
+			metadata:    metadata,
+			guide:       guide,
+		})
+		channels = append(channels, ch)
+	}
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, channels, nil, nil, nil, "", false, nil, "")
+
+	// Each channel has unique metadata
+	for _, ch := range channels {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+ch.channelID, nil))
+		if w.Code != 200 {
+			t.Fatalf("channel %s: status = %d", ch.channelID, w.Code)
+		}
+		var doc map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &doc)
+		if getString(doc, "name") != ch.channelName {
+			t.Errorf("channel %s: name = %q, want %q", ch.channelID, getString(doc, "name"), ch.channelName)
+		}
+	}
+
+	// Unknown channel → 404
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/TVbogus", nil))
+	if w.Code != 404 {
+		t.Errorf("unknown channel: status = %d, want 404", w.Code)
+	}
+}
+
+func TestServerMultiChannel_Health(t *testing.T) {
+	var channels []*serverChannel
+	for i := 0; i < 3; i++ {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		chID := makeChannelID(pub)
+		seg := newHLSSegmenter(5, 2)
+		metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "public", false, nil)
+
+		ch := &serverChannel{channelID: chID, privKey: priv, seg: seg}
+		ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+		channels = append(channels, ch)
+	}
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, channels, nil, nil, nil, "", false, nil, "")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if n, _ := resp["channels"].(float64); int(n) != 3 {
+		t.Errorf("channels = %v, want 3", resp["channels"])
+	}
+}
+
+func TestServerMultiChannel_IndependentStreams(t *testing.T) {
+	var channels []*serverChannel
+	for i := 0; i < 2; i++ {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		chID := makeChannelID(pub)
+		seg := newHLSSegmenter(5, 2)
+		seg.pushSegment([]byte(fmt.Sprintf("data-%d", i)), 2.0)
+		metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "public", false, nil)
+
+		ch := &serverChannel{channelID: chID, privKey: priv, seg: seg}
+		ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+		channels = append(channels, ch)
+	}
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, channels, nil, nil, nil, "", false, nil, "")
+
+	// Each channel serves its own stream
+	for _, ch := range channels {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+ch.channelID+"/stream.m3u8", nil))
+		if w.Code != 200 {
+			t.Fatalf("channel %s stream: status = %d", ch.channelID, w.Code)
+		}
+	}
+}
+
+func TestServerMultiChannel_PrivateHiddenFromWellKnown(t *testing.T) {
+	var channels []*serverChannel
+	for i := 0; i < 2; i++ {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		chID := makeChannelID(pub)
+		seg := newHLSSegmenter(5, 2)
+		metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "token", false, nil)
+		ch := &serverChannel{channelID: chID, privKey: priv, seg: seg}
+		ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+		channels = append(channels, ch)
+	}
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, channels, nil, nil, nil, "secret", true, nil, "")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/.well-known/tltv", nil))
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	chList, _ := resp["channels"].([]interface{})
+	if len(chList) != 0 {
+		t.Errorf("private channels should be hidden from well-known, got %d", len(chList))
+	}
+}
+
+func TestServerMultiChannel_TokenRequired(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	seg := newHLSSegmenter(5, 2)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "token", false, nil)
+	ch := &serverChannel{channelID: chID, privKey: priv, seg: seg}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "secret", true, nil, "")
+
+	// No token → 403
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID, nil))
+	if w.Code != 403 {
+		t.Errorf("no token: status = %d, want 403", w.Code)
+	}
+
+	// With token → 200
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"?token=secret", nil))
+	if w.Code != 200 {
+		t.Errorf("with token: status = %d, want 200", w.Code)
+	}
+}
+
+func TestServerMultiChannel_GuidePerChannel(t *testing.T) {
+	var channels []*serverChannel
+	for i := 0; i < 2; i++ {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		chID := makeChannelID(pub)
+		name := fmt.Sprintf("Test %d", i+1)
+		seg := newHLSSegmenter(5, 2)
+		metadata, guide := serverSignDocs(chID, name, "", priv, nil, "public", false, nil)
+		ch := &serverChannel{channelID: chID, channelName: name, privKey: priv, seg: seg}
+		ch.docs.Store(&serverDocs{channelID: chID, channelName: name, metadata: metadata, guide: guide})
+		channels = append(channels, ch)
+	}
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, channels, nil, nil, nil, "", false, nil, "")
+
+	for _, ch := range channels {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+ch.channelID+"/guide.json", nil))
+		if w.Code != 200 {
+			t.Fatalf("channel %s guide: status = %d", ch.channelID, w.Code)
+		}
+		var doc map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &doc)
+		if getString(doc, "id") != ch.channelID {
+			t.Errorf("guide id = %q, want %q", getString(doc, "id"), ch.channelID)
+		}
+	}
+}
+
+// ---------- Multi-Rendition ----------
+
+func TestParseVariants_Valid(t *testing.T) {
+	variants, err := parseVariants("1080p,720p,360p")
+	if err != nil {
+		t.Fatalf("parseVariants: %v", err)
+	}
+	if len(variants) != 3 {
+		t.Fatalf("variants = %d, want 3", len(variants))
+	}
+	if variants[0].width != 1920 || variants[0].height != 1080 {
+		t.Errorf("1080p = %dx%d", variants[0].width, variants[0].height)
+	}
+	if variants[2].width != 640 || variants[2].height != 360 {
+		t.Errorf("360p = %dx%d", variants[2].width, variants[2].height)
+	}
+}
+
+func TestParseVariants_Empty(t *testing.T) {
+	variants, err := parseVariants("")
+	if err != nil || variants != nil {
+		t.Errorf("empty = %v, %v; want nil, nil", variants, err)
+	}
+}
+
+func TestParseVariants_Unknown(t *testing.T) {
+	_, err := parseVariants("1080p,potato")
+	if err == nil {
+		t.Error("unknown variant should fail")
+	}
+}
+
+func TestParseVariants_Dedup(t *testing.T) {
+	variants, err := parseVariants("720p,720p,360p")
+	if err != nil {
+		t.Fatalf("parseVariants: %v", err)
+	}
+	if len(variants) != 2 {
+		t.Errorf("dedup: variants = %d, want 2", len(variants))
+	}
+}
+
+func TestMasterPlaylist(t *testing.T) {
+	variants := []serverVariant{
+		{label: "1080p", width: 1920, height: 1080, bandwidth: 5000000, codecTag: "avc1.42c028"},
+		{label: "720p", width: 1280, height: 720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+	}
+	m := masterPlaylist(variants)
+	if !strings.Contains(m, "#EXTM3U") {
+		t.Error("missing #EXTM3U")
+	}
+	if !strings.Contains(m, "BANDWIDTH=5000000") {
+		t.Error("missing 1080p bandwidth")
+	}
+	if !strings.Contains(m, "RESOLUTION=1280x720") {
+		t.Error("missing 720p resolution")
+	}
+	if !strings.Contains(m, "stream_720p.m3u8") {
+		t.Error("missing variant URI")
+	}
+}
+
+func TestServerMultiRendition_MasterPlaylist(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "public", false, nil)
+
+	// Create channel with 2 variants
+	ch := &serverChannel{channelID: chID, channelName: "Test", privKey: priv}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	seg720 := newHLSSegmenter(5, 2)
+	seg720.segPrefix = "720p_"
+	seg720.pushSegment([]byte("720p-data"), 2.0)
+
+	seg360 := newHLSSegmenter(5, 2)
+	seg360.segPrefix = "360p_"
+	seg360.pushSegment([]byte("360p-data"), 2.0)
+
+	ch.variants = []serverVariant{
+		{label: "720p", width: 1280, height: 720, seg: seg720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+		{label: "360p", width: 640, height: 360, seg: seg360, bandwidth: 800000, codecTag: "avc1.42c01e"},
+	}
+	ch.seg = seg720
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "", false, nil, "")
+
+	// stream.m3u8 → master playlist
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("master playlist: status = %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "stream_720p.m3u8") {
+		t.Error("master playlist missing 720p variant")
+	}
+	if !strings.Contains(body, "stream_360p.m3u8") {
+		t.Error("master playlist missing 360p variant")
+	}
+
+	// stream_720p.m3u8 → media playlist
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream_720p.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("720p media playlist: status = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "720p_seg") {
+		t.Error("720p playlist should reference 720p_ prefixed segments")
+	}
+
+	// 720p_seg0.ts → 720p segment data
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/720p_seg0.ts", nil))
+	if w.Code != 200 {
+		t.Fatalf("720p segment: status = %d", w.Code)
+	}
+	if w.Body.String() != "720p-data" {
+		t.Errorf("720p segment data = %q", w.Body.String())
+	}
+
+	// 360p_seg0.ts → 360p segment data
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/360p_seg0.ts", nil))
+	if w.Code != 200 {
+		t.Fatalf("360p segment: status = %d", w.Code)
+	}
+	if w.Body.String() != "360p-data" {
+		t.Errorf("360p segment data = %q", w.Body.String())
+	}
+}
+
+func TestServerMultiRendition_TokenRequired(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "token", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.segPrefix = "720p_"
+	seg.pushSegment([]byte("data"), 2.0)
+
+	ch := &serverChannel{channelID: chID, privKey: priv, seg: seg}
+	ch.variants = []serverVariant{
+		{label: "720p", width: 1280, height: 720, seg: seg, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+	}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "secret", true, nil, "")
+
+	// Master playlist without token → 403
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream.m3u8", nil))
+	if w.Code != 403 {
+		t.Errorf("no token master: status = %d, want 403", w.Code)
+	}
+
+	// Variant playlist without token → 403
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream_720p.m3u8", nil))
+	if w.Code != 403 {
+		t.Errorf("no token variant: status = %d, want 403", w.Code)
+	}
+
+	// With token → 200
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream.m3u8?token=secret", nil))
+	if w.Code != 200 {
+		t.Errorf("with token master: status = %d, want 200", w.Code)
+	}
+}
+
+func TestServerMultiChannel_WithVariants(t *testing.T) {
+	var channels []*serverChannel
+	for i := 0; i < 2; i++ {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		chID := makeChannelID(pub)
+		name := fmt.Sprintf("Test %d", i+1)
+		metadata, guide := serverSignDocs(chID, name, "", priv, nil, "public", false, nil)
+
+		seg720 := newHLSSegmenter(5, 2)
+		seg720.segPrefix = "720p_"
+		seg720.pushSegment([]byte(fmt.Sprintf("720p-ch%d", i)), 2.0)
+
+		seg360 := newHLSSegmenter(5, 2)
+		seg360.segPrefix = "360p_"
+		seg360.pushSegment([]byte(fmt.Sprintf("360p-ch%d", i)), 2.0)
+
+		ch := &serverChannel{channelID: chID, channelName: name, privKey: priv, seg: seg720}
+		ch.variants = []serverVariant{
+			{label: "720p", width: 1280, height: 720, seg: seg720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+			{label: "360p", width: 640, height: 360, seg: seg360, bandwidth: 800000, codecTag: "avc1.42c01e"},
+		}
+		ch.docs.Store(&serverDocs{channelID: chID, channelName: name, metadata: metadata, guide: guide})
+		channels = append(channels, ch)
+	}
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, channels, nil, nil, nil, "", false, nil, "")
+
+	// Each channel serves its own master playlist
+	for _, ch := range channels {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+ch.channelID+"/stream.m3u8", nil))
+		if w.Code != 200 {
+			t.Fatalf("channel %s master: status = %d", ch.channelID, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "stream_720p.m3u8") {
+			t.Errorf("channel %s missing 720p variant", ch.channelID)
+		}
+	}
+
+	// Segments are independent per channel
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channels[0].channelID+"/720p_seg0.ts", nil))
+	if w.Body.String() != "720p-ch0" {
+		t.Errorf("ch0 720p segment = %q, want 720p-ch0", w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channels[1].channelID+"/720p_seg0.ts", nil))
+	if w.Body.String() != "720p-ch1" {
+		t.Errorf("ch1 720p segment = %q, want 720p-ch1", w.Body.String())
+	}
+}
+
+func TestServerNoVariants_SinglePlaylist(t *testing.T) {
+	// Without variants, stream.m3u8 is a media playlist (backward compat)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("ts-data"), 2.0)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "public", false, nil)
+
+	ch := &serverChannel{channelID: chID, privKey: priv, seg: seg}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "", false, nil, "")
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "EXT-X-STREAM-INF") {
+		t.Error("single-variant should return media playlist, not master")
+	}
+	if !strings.Contains(body, "#EXTINF") {
+		t.Error("media playlist should contain #EXTINF")
+	}
+}
+
+func TestServerMetadataOpts_Nil(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, _ := serverSignDocs(channelID, "TEST", "", priv, nil, "public", false, nil)
+
+	var doc map[string]interface{}
+	json.Unmarshal(metadata, &doc)
+	// nil opts → no optional fields
+	if _, ok := doc["description"]; ok {
+		t.Error("nil opts should not produce description field")
+	}
+	if _, ok := doc["tags"]; ok {
+		t.Error("nil opts should not produce tags field")
 	}
 }

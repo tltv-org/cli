@@ -247,7 +247,7 @@ func TestServerPeersEndpoint_Empty(t *testing.T) {
 	channelID := makeChannelID(pub)
 	_ = priv
 	seg := newHLSSegmenter(5, 2)
-	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, nil, nil)
+	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, nil, nil, "", false, nil, "")
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()
@@ -275,7 +275,7 @@ func TestServerPeersEndpoint_WithPeerReg(t *testing.T) {
 	peerReg := newPeerRegistry()
 	peerReg.Update("TVfriend", "Friend Channel", []string{"friend.tv:443"})
 
-	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, peerReg, nil)
+	serverHTTP(mux, seg, channelID, "Test", nil, nil, nil, peerReg, nil, "", false, nil, "")
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()

@@ -68,7 +68,7 @@ tltv viewer demo.timelooptv.org
 
 | Command | Description |
 |---|---|
-| `server test` | SMPTE color bar test signal generator ([docs](docs/server.md)) |
+| `server test` | Test signal generator (`--channels N`, `--variants 1080p,720p`) ([docs](docs/server.md)) |
 | `bridge` | Bridge origin server ([docs](docs/bridge.md)) |
 | `relay` | Caching relay with signature verification ([docs](docs/relay.md)) |
 
@@ -81,7 +81,7 @@ tltv viewer demo.timelooptv.org
 | Command | Description |
 |---|---|
 | `viewer <target>` | Local web viewer with HLS.js player |
-| `receiver <target>` | Headless HLS consumer (`--monitor`, `--record`, `--pipe`) |
+| `receiver <target>` | Headless HLS consumer (`--monitor`, `--record`, `--pipe`, `--quality`) |
 
 ### Identity
 
@@ -140,7 +140,7 @@ Global flags work before or after the subcommand: `tltv --json channel ...` and 
 
 ## Protocol Conformance
 
-Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 350 tests. Run `make test` to verify.
+Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 370 tests. Run `make test` to verify.
 
 ## Links
 

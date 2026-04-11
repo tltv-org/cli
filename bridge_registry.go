@@ -26,7 +26,9 @@ type bridgeRegisteredChannel struct {
 	Name        string
 	Description string
 	Language    string
-	Logo        string
+	Timezone     string
+	IconFileName string
+	Logo         string
 	StreamURL   string
 	Access      string
 	Token       string
@@ -46,11 +48,12 @@ func (ch *bridgeRegisteredChannel) IsPrivate() bool {
 // bridgeRegistry manages channel identities and signed documents.
 // Thread-safe via sync.RWMutex with immutable replacement pattern.
 type bridgeRegistry struct {
-	mu         sync.RWMutex
-	channels   map[string]*bridgeRegisteredChannel // TLTV channel ID -> channel
-	byUpstream map[string]string                   // upstream ID -> TLTV channel ID
-	keysDir    string
-	hostname   string
+	mu           sync.RWMutex
+	channels     map[string]*bridgeRegisteredChannel // TLTV channel ID -> channel
+	byUpstream   map[string]string                   // upstream ID -> TLTV channel ID
+	keysDir      string
+	hostname     string
+	iconFileName string // icon file name for all channels (e.g. "icon.svg")
 }
 
 // ---------- Constructor ----------
@@ -115,7 +118,7 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 			// Update existing channel -- build new immutable struct
 			old := r.channels[tltvID]
 			updated := &bridgeRegisteredChannel{
-				ChannelID:   old.ChannelID,
+				ChannelID:    old.ChannelID,
 				PublicKey:    old.PublicKey,
 				PrivateKey:   old.PrivateKey,
 				UpstreamID:   old.UpstreamID,
@@ -123,6 +126,8 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 				Description:  ch.Description,
 				Tags:         ch.Tags,
 				Language:     ch.Language,
+				Timezone:     ch.Timezone,
+				IconFileName: r.iconFileName,
 				Logo:         ch.Logo,
 				StreamURL:    ch.Stream,
 				Access:       ch.Access,
@@ -143,7 +148,7 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 			channelID := makeChannelID(pub)
 
 			registered := &bridgeRegisteredChannel{
-				ChannelID:   channelID,
+				ChannelID:    channelID,
 				PublicKey:    pub,
 				PrivateKey:   priv,
 				UpstreamID:   ch.ID,
@@ -151,6 +156,8 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 				Description:  ch.Description,
 				Tags:         ch.Tags,
 				Language:     ch.Language,
+				Timezone:     ch.Timezone,
+				IconFileName: r.iconFileName,
 				Logo:         ch.Logo,
 				StreamURL:    ch.Stream,
 				Access:       ch.Access,
@@ -303,12 +310,18 @@ func bridgeSignMetadata(ch *bridgeRegisteredChannel, hostname string) ([]byte, e
 	if ch.Language != "" {
 		doc["language"] = ch.Language
 	}
+	if ch.Timezone != "" {
+		doc["timezone"] = ch.Timezone
+	}
 	if ch.OnDemand {
 		doc["on_demand"] = true
 	}
 
-	// Always include guide path
+	// Always include guide and icon paths
 	doc["guide"] = "/tltv/v1/channels/" + ch.ChannelID + "/guide.json"
+	if ch.IconFileName != "" {
+		doc["icon"] = "/tltv/v1/channels/" + ch.ChannelID + "/" + ch.IconFileName
+	}
 
 	// Origins
 	if hostname != "" {
@@ -367,6 +380,9 @@ func bridgeSignGuide(ch *bridgeRegisteredChannel) ([]byte, error) {
 		}
 		if e.Category != "" {
 			entry["category"] = e.Category
+		}
+		if e.RelayFrom != "" {
+			entry["relay_from"] = e.RelayFrom
 		}
 		entries = append(entries, entry)
 	}

@@ -20,8 +20,11 @@ func cmdRelay(args []string) {
 
 	// Input flags
 	channelsStr := fs.String("channels", os.Getenv("CHANNELS"), "tltv:// URIs or id@host:port (comma-separated)")
+	fs.StringVar(channelsStr, "c", os.Getenv("CHANNELS"), "alias for --channels")
 	nodeStr := fs.String("node", os.Getenv("NODE"), "relay all public channels from node(s) (comma-separated host:port)")
+	fs.StringVar(nodeStr, "n", os.Getenv("NODE"), "alias for --node")
 	configPath := fs.String("config", os.Getenv("CONFIG"), "path to relay config file (JSON)")
+	fs.StringVar(configPath, "f", os.Getenv("CONFIG"), "alias for --config")
 
 	// Server flags
 	defaultListen := ":8000"
@@ -36,9 +39,11 @@ func cmdRelay(args []string) {
 
 	peersStr := addPeersFlag(fs)
 	gossipEnabled := addGossipFlag(fs)
+	proxyStr := addProxyFlag(fs)
 
 	// --- Config ---
 	dumpConfigRelay := fs.Bool("dump-config", false, "print resolved config as JSON and exit")
+	fs.BoolVar(dumpConfigRelay, "D", false, "alias for --dump-config")
 
 	// Cache flags
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -55,30 +60,35 @@ func cmdRelay(args []string) {
 		defaultMetaPoll = v
 	}
 	metaPollStr := fs.String("meta-poll", defaultMetaPoll, "metadata poll interval")
+	fs.StringVar(metaPollStr, "m", defaultMetaPoll, "alias for --meta-poll")
 
 	defaultGuidePoll := "15m"
 	if v := os.Getenv("GUIDE_POLL"); v != "" {
 		defaultGuidePoll = v
 	}
 	guidePollStr := fs.String("guide-poll", defaultGuidePoll, "guide poll interval")
+	fs.StringVar(guidePollStr, "G", defaultGuidePoll, "alias for --guide-poll")
 
 	defaultPeerPoll := "30m"
 	if v := os.Getenv("PEER_POLL"); v != "" {
 		defaultPeerPoll = v
 	}
 	peerPollStr := fs.String("peer-poll", defaultPeerPoll, "peer poll interval")
+	fs.StringVar(peerPollStr, "p", defaultPeerPoll, "alias for --peer-poll")
 
 	defaultMaxPeers := 100
 	if v := os.Getenv("MAX_PEERS"); v != "" {
 		fmt.Sscanf(v, "%d", &defaultMaxPeers)
 	}
 	maxPeers := fs.Int("max-peers", defaultMaxPeers, "max peers in exchange")
+	fs.IntVar(maxPeers, "M", defaultMaxPeers, "alias for --max-peers")
 
 	defaultStaleDays := 7
 	if v := os.Getenv("STALE_DAYS"); v != "" {
 		fmt.Sscanf(v, "%d", &defaultStaleDays)
 	}
 	staleDays := fs.Int("stale-days", defaultStaleDays, "drop peers not seen in N days")
+	fs.IntVar(staleDays, "s", defaultStaleDays, "alias for --stale-days")
 
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
@@ -89,17 +99,18 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "Re-serves existing TLTV channels from upstream nodes with full\n")
 		fmt.Fprintf(os.Stderr, "signature verification. Proxies streams, participates in gossip.\n\n")
 		fmt.Fprintf(os.Stderr, "Input:\n")
-		fmt.Fprintf(os.Stderr, "      --channels LIST      tltv:// URIs or id@host:port (comma-separated)\n")
-		fmt.Fprintf(os.Stderr, "      --node HOST:PORT     relay all public channels from a node (comma-separated)\n\n")
+		fmt.Fprintf(os.Stderr, "  -c, --channels LIST      tltv:// URIs or id@host:port (comma-separated)\n")
+		fmt.Fprintf(os.Stderr, "  -n, --node HOST:PORT     relay all public channels from a node (comma-separated)\n\n")
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for peer exchange\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
-		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n\n")
+		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n")
+		fmt.Fprintf(os.Stderr, "  -x, --proxy URL          proxy URL (socks5://, http://, https://)\n\n")
 		fmt.Fprintf(os.Stderr, "Config:\n")
-		fmt.Fprintf(os.Stderr, "      --config PATH        relay config file (JSON)\n")
-		fmt.Fprintf(os.Stderr, "      --dump-config        print resolved config as JSON and exit\n\n")
+		fmt.Fprintf(os.Stderr, "  -f, --config PATH        relay config file (JSON)\n")
+		fmt.Fprintf(os.Stderr, "  -D, --dump-config        print resolved config as JSON and exit\n\n")
 		fmt.Fprintf(os.Stderr, "Cache:\n")
 		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory HLS stream cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
@@ -114,11 +125,11 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --viewer [CHANNEL]   serve built-in web player at / (channel ID or tltv:// URI;\n")
 		fmt.Fprintf(os.Stderr, "                           must be a relayed channel; default: first channel)\n\n")
 		fmt.Fprintf(os.Stderr, "Tuning:\n")
-		fmt.Fprintf(os.Stderr, "      --meta-poll DUR      metadata poll interval (default: 60s)\n")
-		fmt.Fprintf(os.Stderr, "      --guide-poll DUR     guide poll interval (default: 15m)\n")
-		fmt.Fprintf(os.Stderr, "      --peer-poll DUR      peer poll interval (default: 30m)\n")
-		fmt.Fprintf(os.Stderr, "      --max-peers INT      max peers in exchange (default: 100)\n")
-		fmt.Fprintf(os.Stderr, "      --stale-days INT     drop peers not seen in N days (default: 7)\n\n")
+		fmt.Fprintf(os.Stderr, "  -m, --meta-poll DUR      metadata poll interval (default: 60s)\n")
+		fmt.Fprintf(os.Stderr, "  -G, --guide-poll DUR     guide poll interval (default: 15m)\n")
+		fmt.Fprintf(os.Stderr, "  -p, --peer-poll DUR      peer poll interval (default: 30m)\n")
+		fmt.Fprintf(os.Stderr, "  -M, --max-peers INT      max peers in exchange (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "  -s, --stale-days INT     drop peers not seen in N days (default: 7)\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL    log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
@@ -292,8 +303,14 @@ func cmdRelay(args []string) {
 		os.Exit(1)
 	}
 
+	// Parse proxy URL
+	proxyURL, err := parseProxyURL(*proxyStr)
+	if err != nil {
+		fatal("%v", err)
+	}
+
 	// Create upstream client
-	client := newClient(flagInsecure)
+	client := newClientWithProxy(flagInsecure, proxyURL)
 
 	// Discover relay targets
 	logInfof("discovering channels...")
@@ -411,7 +428,7 @@ func cmdRelay(args []string) {
 
 		if viewerChID != "" {
 			chID := viewerChID
-			viewerEmbedRoutes(server.mux, func() map[string]interface{} {
+			viewerEmbedRoutes(server.mux, func(_ string) map[string]interface{} {
 				current := registry.GetChannel(chID)
 				if current == nil {
 					return map[string]interface{}{}
@@ -423,7 +440,7 @@ func cmdRelay(args []string) {
 					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
 				}
 				return info
-			})
+			}, nil)
 		}
 	} else {
 		statusPageRoutes(server.mux, func() *NodeInfo {

@@ -849,9 +849,9 @@ func TestBridgeViewerCoexistence(t *testing.T) {
 
 	// Register viewer routes on the bridge's mux — this used to panic
 	// with "GET /" vs "/tltv/" pattern conflict before the fix.
-	viewerEmbedRoutes(srv.mux, func() map[string]interface{} {
+	viewerEmbedRoutes(srv.mux, func(_ string) map[string]interface{} {
 		return map[string]interface{}{"channel_name": "test"}
-	})
+	}, nil)
 
 	// Viewer root serves HTML
 	w := httptest.NewRecorder()

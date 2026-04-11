@@ -26,6 +26,7 @@ type hlsSegmenter struct {
 	seqNum         uint64 // next sequence number to assign
 	count          int    // segments currently in ring (0 to ringSize)
 	manifest       string // cached manifest string
+	segPrefix      string // segment filename prefix (e.g. "720p_" for variant segments)
 }
 
 func newHLSSegmenter(ringSize, targetDuration int) *hlsSegmenter {
@@ -75,7 +76,7 @@ func (s *hlsSegmenter) rebuildManifest() {
 		idx := (s.head - s.count + i + s.ringSize) % s.ringSize
 		seg := &s.ring[idx]
 		fmt.Fprintf(&b, "#EXTINF:%.6f,\n", seg.duration)
-		fmt.Fprintf(&b, "seg%d.ts\n", seg.seqNum)
+		fmt.Fprintf(&b, "%sseg%d.ts\n", s.segPrefix, seg.seqNum)
 	}
 
 	s.manifest = b.String()

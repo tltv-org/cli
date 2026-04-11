@@ -24,6 +24,7 @@ type bridgeChannel struct {
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	Language    string   `json:"language,omitempty"`
+	Timezone    string   `json:"timezone,omitempty"`
 	Logo        string   `json:"logo,omitempty"`
 	Access      string   `json:"access,omitempty"`
 	Token       string   `json:"token,omitempty"`
@@ -32,12 +33,13 @@ type bridgeChannel struct {
 
 // guideEntry represents a programme in a channel guide.
 type guideEntry struct {
-	Channel     string `json:"channel,omitempty"` // only in JSON guide input
+	Channel     string `json:"channel,omitempty"`    // only in JSON guide input
 	Start       string `json:"start"`
 	End         string `json:"end"`
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
 	Category    string `json:"category,omitempty"`
+	RelayFrom   string `json:"relay_from,omitempty"` // source channel ID (spec §6.3)
 }
 
 // bridgeSidecar is the JSON schema for directory-mode sidecar files.
@@ -310,7 +312,11 @@ func bridgeScanDirectory(dir string) ([]bridgeChannel, map[string][]guideEntry, 
 					ch.Access = sc.Access
 				}
 				if sc.Token != "" {
-					ch.Token = sc.Token
+					if err := validateToken(sc.Token); err != nil {
+						logErrorf("channel %s: invalid token: %v", baseName, err)
+					} else {
+						ch.Token = sc.Token
+					}
 				}
 				ch.OnDemand = sc.OnDemand
 				if len(sc.Guide) > 0 {
