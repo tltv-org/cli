@@ -1417,15 +1417,12 @@ func cmdResolve(args []string) {
 			}
 		}
 
-		// Step 2: Negotiate version
-		bestVersion := 0
-		for _, v := range info.Versions {
-			if v > bestVersion {
-				bestVersion = v
+		// Step 2: Require TLTV protocol v1 support
+		if err := checkV1Support(info); err != nil {
+			if !flagJSON {
+				fmt.Printf(" ... %s\n", c(cRed, "protocol: "+err.Error()))
 			}
-		}
-		if bestVersion == 0 {
-			bestVersion = 1 // fallback
+			continue
 		}
 
 		// Step 3: Fetch metadata

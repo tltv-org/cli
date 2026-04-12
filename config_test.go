@@ -455,6 +455,33 @@ func TestApplyConfigToFlags_SkipsArrays(t *testing.T) {
 	}
 }
 
+func TestApplyConfigToFlags_ExplicitFalseDoesNotBlockOtherBoolFlags(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cache := fs.Bool("cache", false, "enable cache")
+	viewer := fs.Bool("viewer", false, "enable viewer")
+	fs.Parse([]string{"--cache=false"})
+
+	applyConfigToFlags(fs, map[string]interface{}{"viewer": true})
+	if *cache {
+		t.Fatal("cache should remain false")
+	}
+	if !*viewer {
+		t.Fatal("viewer config should still apply when another bool flag was explicitly set false")
+	}
+}
+
+func TestApplyConfigToFlags_ShortAliasMarksLongFlagExplicit(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	name := fs.String("name", "", "channel name")
+	fs.StringVar(name, "n", "", "alias for --name")
+	fs.Parse([]string{"-n", "From CLI"})
+
+	applyConfigToFlags(fs, map[string]interface{}{"name": "From Config"})
+	if *name != "From CLI" {
+		t.Fatalf("name = %q, want CLI value preserved", *name)
+	}
+}
+
 // ---------- gossipNodesFromPeers ----------
 
 func TestGossipNodesFromPeers_Basic(t *testing.T) {
@@ -658,6 +685,30 @@ func TestBridgeApplyReloadedConfig_GuideFilePath(t *testing.T) {
 	result := liveConfig.Load()
 	if result.guide != "new-guide.xml" {
 		t.Errorf("guide = %q, want new-guide.xml", result.guide)
+	}
+}
+
+func TestBridgeApplyReloadedConfig_InlineGuideUsesUpstreamIDs(t *testing.T) {
+	var liveConfig atomic.Pointer[bridgeReloadableConfig]
+	liveConfig.Store(&bridgeReloadableConfig{stream: "http://src.tv/live.m3u8", name: "Test", guide: ""})
+
+	registry := newBridgeRegistry(t.TempDir(), "")
+	if err := registry.UpdateChannels([]bridgeChannel{{ID: "upstream-1", Name: "Test", Stream: "http://src.tv/live.m3u8"}}); err != nil {
+		t.Fatalf("UpdateChannels: %v", err)
+	}
+
+	cfg := map[string]interface{}{
+		"guide": map[string]interface{}{"entries": []interface{}{map[string]interface{}{
+			"start": "2026-04-08T00:00:00Z",
+			"end":   "2026-04-09T00:00:00Z",
+			"title": "Inline Show",
+		}}},
+	}
+
+	bridgeApplyReloadedConfig(cfg, &liveConfig, registry)
+	ch := registry.ListChannels()[0]
+	if len(ch.Guide) != 1 || ch.Guide[0].Title != "Inline Show" {
+		t.Fatalf("inline guide not applied via upstream ID, got %+v", ch.Guide)
 	}
 }
 

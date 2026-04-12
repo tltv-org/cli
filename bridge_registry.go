@@ -183,21 +183,20 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 	return nil
 }
 
-// UpdateGuide updates guide entries for channels. Keys are upstream channel IDs.
+// UpdateGuide replaces guide entries for all registered channels.
+// Keys are upstream channel IDs. Any registered channel missing from the map has
+// its guide cleared and falls back to the default ephemeral guide on re-sign.
 func (r *bridgeRegistry) UpdateGuide(guide map[string][]guideEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for upstreamID, entries := range guide {
-		tltvID, ok := r.byUpstream[upstreamID]
-		if !ok {
-			continue
-		}
+	for upstreamID, tltvID := range r.byUpstream {
+		entries := guide[upstreamID]
 		old := r.channels[tltvID]
 
 		// Build new immutable struct with updated guide
 		updated := &bridgeRegisteredChannel{
-			ChannelID:   old.ChannelID,
+			ChannelID:    old.ChannelID,
 			PublicKey:    old.PublicKey,
 			PrivateKey:   old.PrivateKey,
 			UpstreamID:   old.UpstreamID,
@@ -205,6 +204,8 @@ func (r *bridgeRegistry) UpdateGuide(guide map[string][]guideEntry) {
 			Description:  old.Description,
 			Tags:         old.Tags,
 			Language:     old.Language,
+			Timezone:     old.Timezone,
+			IconFileName: old.IconFileName,
 			Logo:         old.Logo,
 			StreamURL:    old.StreamURL,
 			Access:       old.Access,

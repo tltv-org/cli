@@ -13,20 +13,23 @@ import (
 // relayServer implements the TLTV protocol HTTP endpoints for relayed channels.
 type relayServer struct {
 	registry *relayRegistry
-	client   *Client        // for proxying streams from upstream
-	cache    *hlsCache      // optional HLS cache (nil = disabled)
-	peerReg  *peerRegistry  // optional external peers from --peers (nil = disabled)
+	client   *Client             // for proxying streams from upstream
+	cache    *hlsCache           // optional HLS cache (nil = disabled)
+	peerReg  *peerRegistry       // optional external peers from --peers (nil = disabled)
+	bufMgr   *relayBufferManager // optional buffer manager (nil = no buffering)
 	mux      *http.ServeMux
 }
 
 // newRelayServer creates a relay HTTP server with all protocol endpoints.
-// Pass cache=nil to disable caching, peerReg=nil to disable external peers.
-func newRelayServer(registry *relayRegistry, client *Client, cache *hlsCache, peerReg *peerRegistry) *relayServer {
+// Pass cache=nil to disable caching, peerReg=nil to disable external peers,
+// bufMgr=nil to disable buffering.
+func newRelayServer(registry *relayRegistry, client *Client, cache *hlsCache, peerReg *peerRegistry, bufMgr *relayBufferManager) *relayServer {
 	s := &relayServer{
 		registry: registry,
 		client:   client,
 		cache:    cache,
 		peerReg:  peerReg,
+		bufMgr:   bufMgr,
 		mux:      http.NewServeMux(),
 	}
 
@@ -63,16 +66,24 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *relayServer) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	channels := s.registry.ListChannels()
 
-	var relaying []ChannelRef
+	var relaying []interface{}
 	for _, ch := range channels {
 		// Skip migrated entries (they have no stream, just the migration doc)
 		if ch.Name == "(migrated)" {
 			continue
 		}
-		relaying = append(relaying, ChannelRef{ID: ch.ChannelID, Name: ch.Name})
+		entry := map[string]interface{}{
+			"id":   ch.ChannelID,
+			"name": ch.Name,
+		}
+		// Include delay field when buffer+delay is active
+		if s.bufMgr != nil && s.bufMgr.delay > 0 {
+			entry["delay"] = int(s.bufMgr.delay.Seconds())
+		}
+		relaying = append(relaying, entry)
 	}
 	if relaying == nil {
-		relaying = []ChannelRef{}
+		relaying = []interface{}{}
 	}
 
 	w.Header().Set("Cache-Control", "max-age=60")
@@ -194,6 +205,34 @@ func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *re
 		return
 	}
 
+	// Buffer path: serve from proactive buffers if available.
+	// - stream.m3u8 serves the cached root master playlist when upstream is multivariant,
+	//   or a generated buffered media playlist when upstream is single-variant.
+	// - child media playlists (stream_*.m3u8, audio_*.m3u8, subs_*.m3u8) serve generated
+	//   buffered manifests.
+	// - segment and subtitle files serve directly from buffered bytes.
+	// Falls through to upstream proxy if a buffer is empty or unavailable.
+	if s.bufMgr != nil {
+		if subPath == "stream.m3u8" {
+			if manifest := s.bufMgr.GetRootManifest(ch.ChannelID); manifest != "" {
+				setStreamHeaders(w, subPath, false)
+				w.Write([]byte(manifest))
+				return
+			}
+		}
+		if strings.HasSuffix(subPath, ".m3u8") {
+			if manifest := s.bufMgr.GetManifest(ch.ChannelID, subPath); manifest != "" {
+				setStreamHeaders(w, subPath, false)
+				w.Write([]byte(manifest))
+				return
+			}
+		} else if data := s.bufMgr.GetSegmentByPath(ch.ChannelID, subPath); data != nil {
+			setStreamHeaders(w, subPath, false)
+			w.Write(data)
+			return
+		}
+	}
+
 	if ch.StreamHint == "" {
 		jsonError(w, "stream_unavailable", http.StatusServiceUnavailable)
 		return
@@ -289,5 +328,3 @@ func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *re
 
 	io.Copy(w, resp.Body)
 }
-
-

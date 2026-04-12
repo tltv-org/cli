@@ -995,3 +995,273 @@ func padCoordinate(b []byte, size int) []byte {
 	copy(padded[size-len(b):], b)
 	return padded
 }
+
+// ---------- Multi-Domain Cert Store ----------
+
+// certStore manages TLS certificates for multiple hostnames using a shared
+// ACME account. Used by the router (§3.0b) and multi-hostname daemons (§3.0c).
+type certStore struct {
+	mu       sync.RWMutex
+	certs    map[string]*tls.Certificate // hostname → cert
+	expiry   map[string]time.Time        // hostname → expiry
+	managers map[string]*acmeManager     // hostname → ACME manager
+
+	dataDir      string
+	email        string
+	directoryURL string
+	staging      bool
+
+	// Shared ACME account (created on first issuance).
+	accountKey *ecdsa.PrivateKey
+	accountURL string
+
+	// Renewal tracking.
+	renewCancel context.CancelFunc
+}
+
+func newCertStore(dataDir, email, directoryURL string, staging bool) *certStore {
+	if dataDir == "" {
+		dataDir = "./certs"
+	}
+	if directoryURL == "" {
+		if staging {
+			directoryURL = acmeStagingDirectory
+		} else {
+			directoryURL = acmeProductionDirectory
+		}
+	}
+	return &certStore{
+		certs:        make(map[string]*tls.Certificate),
+		expiry:       make(map[string]time.Time),
+		managers:     make(map[string]*acmeManager),
+		dataDir:      dataDir,
+		email:        email,
+		directoryURL: directoryURL,
+		staging:      staging,
+	}
+}
+
+// GetCertificate implements crypto/tls.Config.GetCertificate for multi-domain.
+// Dispatches by SNI hostname.
+func (cs *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	hostname := hello.ServerName
+	if hostname == "" {
+		return nil, fmt.Errorf("certstore: no SNI hostname in TLS ClientHello")
+	}
+
+	cs.mu.RLock()
+	cert, ok := cs.certs[hostname]
+	cs.mu.RUnlock()
+
+	if ok && cert != nil {
+		return cert, nil
+	}
+
+	return nil, fmt.Errorf("certstore: no certificate for %s", hostname)
+}
+
+// EnsureCert loads or issues a certificate for the given hostname.
+// Blocks until a valid certificate is available.
+func (cs *certStore) EnsureCert(ctx context.Context, hostname string) error {
+	mgr := cs.getOrCreateManager(hostname)
+	if err := mgr.EnsureCert(ctx); err != nil {
+		return err
+	}
+
+	// Copy cert into the store's central map.
+	mgr.mu.RLock()
+	cert := mgr.cert
+	expiry := mgr.certExpiry
+	mgr.mu.RUnlock()
+
+	cs.mu.Lock()
+	cs.certs[hostname] = cert
+	cs.expiry[hostname] = expiry
+	cs.mu.Unlock()
+
+	return nil
+}
+
+// AddManualCert adds a manually-loaded certificate for a hostname.
+func (cs *certStore) AddManualCert(hostname string, cert *tls.Certificate) {
+	cs.mu.Lock()
+	cs.certs[hostname] = cert
+	if cert.Leaf != nil {
+		cs.expiry[hostname] = cert.Leaf.NotAfter
+	}
+	cs.mu.Unlock()
+}
+
+// Hostnames returns all hostnames with certificates.
+func (cs *certStore) Hostnames() []string {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	hosts := make([]string, 0, len(cs.certs))
+	for h := range cs.certs {
+		hosts = append(hosts, h)
+	}
+	return hosts
+}
+
+// StartRenewals starts background renewal goroutines for all managed hostnames.
+// Call StopRenewals on shutdown.
+func (cs *certStore) StartRenewals() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cs.renewCancel = cancel
+
+	cs.mu.RLock()
+	managers := make([]*acmeManager, 0, len(cs.managers))
+	for _, mgr := range cs.managers {
+		managers = append(managers, mgr)
+	}
+	cs.mu.RUnlock()
+
+	for _, mgr := range managers {
+		go cs.renewLoop(ctx, mgr)
+	}
+}
+
+// StopRenewals stops all background renewal goroutines.
+func (cs *certStore) StopRenewals() {
+	if cs.renewCancel != nil {
+		cs.renewCancel()
+	}
+}
+
+// renewLoop checks one hostname hourly and syncs certs back to the store.
+func (cs *certStore) renewLoop(ctx context.Context, mgr *acmeManager) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			mgr.mu.RLock()
+			expiry := mgr.certExpiry
+			hostname := mgr.hostname
+			mgr.mu.RUnlock()
+
+			if expiry.IsZero() || time.Until(expiry) > 30*24*time.Hour {
+				continue
+			}
+
+			logInfof("certstore: certificate for %s expires in %d days, renewing...",
+				hostname, int(time.Until(expiry).Hours()/24))
+
+			renewCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			if err := mgr.Issue(renewCtx); err != nil {
+				logErrorf("certstore: renewal for %s failed: %v (will retry in 1h)", hostname, err)
+				cancel()
+				continue
+			}
+			cancel()
+
+			// Sync renewed cert to store.
+			mgr.mu.RLock()
+			cert := mgr.cert
+			exp := mgr.certExpiry
+			mgr.mu.RUnlock()
+
+			cs.mu.Lock()
+			cs.certs[hostname] = cert
+			cs.expiry[hostname] = exp
+			cs.mu.Unlock()
+		}
+	}
+}
+
+// getOrCreateManager returns the ACME manager for a hostname, creating one if needed.
+// Shares the ACME account across all managers.
+func (cs *certStore) getOrCreateManager(hostname string) *acmeManager {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if mgr, ok := cs.managers[hostname]; ok {
+		return mgr
+	}
+
+	mgr := newACMEManager(hostname, cs.email, cs.dataDir, cs.directoryURL)
+
+	// Share ACME account key across managers.
+	if cs.accountKey != nil {
+		mgr.accountKey = cs.accountKey
+		mgr.accountURL = cs.accountURL
+	}
+
+	cs.managers[hostname] = mgr
+	return mgr
+}
+
+// HTTPHandler returns an HTTP handler for port 80 that serves ACME challenges
+// for ALL managed hostnames and redirects other traffic to HTTPS.
+func (cs *certStore) HTTPHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ACME HTTP-01 challenge.
+		if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
+			token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
+
+			// Check all managers for this token.
+			cs.mu.RLock()
+			for _, mgr := range cs.managers {
+				mgr.challengeMu.Lock()
+				keyAuth, ok := mgr.challenges[token]
+				mgr.challengeMu.Unlock()
+				if ok {
+					cs.mu.RUnlock()
+					w.Header().Set("Content-Type", "application/octet-stream")
+					w.Write([]byte(keyAuth))
+					return
+				}
+			}
+			cs.mu.RUnlock()
+
+			http.NotFound(w, r)
+			return
+		}
+
+		// Redirect HTTP → HTTPS (use request Host header for multi-domain).
+		host := r.Host
+		if host == "" {
+			host = "localhost"
+		}
+		target := "https://" + host + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+}
+
+// StartHTTPServer starts the HTTP server on the given address for ACME challenges.
+func (cs *certStore) StartHTTPServer(addr string) (*http.Server, error) {
+	if addr == "" {
+		addr = ":80"
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           cs.HTTPHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", addr, err)
+	}
+
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logErrorf("certstore: http server: %v", err)
+		}
+	}()
+
+	return srv, nil
+}
+
+// TLSConfig returns a tls.Config backed by this cert store.
+func (cs *certStore) TLSConfig() *tls.Config {
+	return &tls.Config{
+		GetCertificate: cs.GetCertificate,
+		MinVersion:     tls.VersionTLS12,
+	}
+}

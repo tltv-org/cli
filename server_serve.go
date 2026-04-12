@@ -26,6 +26,14 @@ func serverCacheStatus(hit bool) string {
 	return "MISS"
 }
 
+func serverManifestBytes(manifest, token string) []byte {
+	data := []byte(manifest)
+	if token == "" {
+		return data
+	}
+	return rewriteManifest("", data, token)
+}
+
 // serveSegment writes an HLS segment response for the given sequence number.
 func serveSegment(w http.ResponseWriter, r *http.Request, seg *hlsSegmenter, numStr string) {
 	seqNum, err := strconv.ParseUint(numStr, 10, 64)
@@ -202,7 +210,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 					if m == "" {
 						return nil, &hlsCacheUpstreamError{status: http.StatusServiceUnavailable}
 					}
-					return &hlsCacheFetchResult{data: []byte(m), contentType: "application/vnd.apple.mpegurl"}, nil
+					return &hlsCacheFetchResult{data: serverManifestBytes(m, serverToken), contentType: "application/vnd.apple.mpegurl"}, nil
 				})
 				if err == nil {
 					w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -221,7 +229,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			w.Header().Set("Cache-Control", "no-cache, no-store")
 			setServerPrivateHeaders(w, serverIsPrivate)
-			w.Write([]byte(manifest))
+			w.Write(serverManifestBytes(manifest, serverToken))
 
 		case "icon.svg", "icon.png", "icon.jpg":
 			if len(iconData) > 0 {
@@ -446,13 +454,13 @@ func serverMultiHTTP(mux *http.ServeMux, channels []*serverChannel, cache *hlsCa
 			w.Write([]byte(xml))
 
 		case "stream.m3u8":
-			if len(ch.variants) > 0 {
-				// Master playlist
+			if len(ch.variants) > 0 || len(ch.audioTracks) > 0 || len(ch.subtitleTracks) > 0 {
+				// Master playlist (video variants, audio-only, or both)
 				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 				w.Header().Set("Cache-Control", "no-cache, no-store")
 				setServerPrivateHeaders(w, serverIsPrivate)
-				w.Write([]byte(masterPlaylist(ch.variants)))
-			} else {
+				w.Write(serverManifestBytes(masterPlaylist(ch.variants, ch.audioTracks, ch.subtitleTracks, ch.state != nil && !ch.state.noAudio), serverToken))
+			} else if ch.seg != nil {
 				manifest := ch.seg.getManifest()
 				if manifest == "" {
 					http.Error(w, "stream not ready", http.StatusServiceUnavailable)
@@ -461,7 +469,9 @@ func serverMultiHTTP(mux *http.ServeMux, channels []*serverChannel, cache *hlsCa
 				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 				w.Header().Set("Cache-Control", "no-cache, no-store")
 				setServerPrivateHeaders(w, serverIsPrivate)
-				w.Write([]byte(manifest))
+				w.Write(serverManifestBytes(manifest, serverToken))
+			} else {
+				http.Error(w, "stream not ready", http.StatusServiceUnavailable)
 			}
 
 		case "icon.svg", "icon.png", "icon.jpg":
@@ -475,6 +485,78 @@ func serverMultiHTTP(mux *http.ServeMux, channels []*serverChannel, cache *hlsCa
 			}
 
 		default:
+			// Subtitle track media playlists: subs_{name}.m3u8
+			if strings.HasPrefix(subPath, "subs_") && strings.HasSuffix(subPath, ".m3u8") && len(ch.subtitleTracks) > 0 {
+				trackName := subPath[5 : len(subPath)-5] // strip "subs_" and ".m3u8"
+				for i := range ch.subtitleTracks {
+					if ch.subtitleTracks[i].name == trackName {
+						manifest := ch.subtitleTracks[i].seg.getManifest()
+						if manifest == "" {
+							http.Error(w, "stream not ready", http.StatusServiceUnavailable)
+							return
+						}
+						w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+						w.Header().Set("Cache-Control", "no-cache, no-store")
+						setServerPrivateHeaders(w, serverIsPrivate)
+						w.Write(serverManifestBytes(manifest, serverToken))
+						return
+					}
+				}
+				http.NotFound(w, r)
+				return
+			}
+
+			// Subtitle VTT segments: subs_{name}_seg{N}.vtt
+			if strings.HasPrefix(subPath, "subs_") && strings.HasSuffix(subPath, ".vtt") && len(ch.subtitleTracks) > 0 {
+				for i := range ch.subtitleTracks {
+					prefix := "subs_" + ch.subtitleTracks[i].name + "_"
+					if strings.HasPrefix(subPath, prefix) {
+						segName := subPath[len(prefix):]
+						if strings.HasPrefix(segName, "seg") {
+							numStr := segName[3 : len(segName)-4] // strip "seg" and ".vtt"
+							seqNum, parseErr := strconv.ParseUint(numStr, 10, 64)
+							if parseErr != nil {
+								http.NotFound(w, r)
+								return
+							}
+							vtt := ch.subtitleTracks[i].seg.getSegment(seqNum)
+							if vtt == "" {
+								http.NotFound(w, r)
+								return
+							}
+							w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+							w.Header().Set("Cache-Control", "max-age=10")
+							setServerPrivateHeaders(w, serverIsPrivate)
+							w.Write([]byte(vtt))
+							return
+						}
+					}
+				}
+				http.NotFound(w, r)
+				return
+			}
+
+			// Audio track media playlists: audio_{name}.m3u8
+			if strings.HasPrefix(subPath, "audio_") && strings.HasSuffix(subPath, ".m3u8") && len(ch.audioTracks) > 0 {
+				trackName := subPath[6 : len(subPath)-5] // strip "audio_" and ".m3u8"
+				for i := range ch.audioTracks {
+					if ch.audioTracks[i].name == trackName {
+						manifest := ch.audioTracks[i].seg.getManifest()
+						if manifest == "" {
+							http.Error(w, "stream not ready", http.StatusServiceUnavailable)
+							return
+						}
+						w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+						w.Header().Set("Cache-Control", "no-cache, no-store")
+						setServerPrivateHeaders(w, serverIsPrivate)
+						w.Write(serverManifestBytes(manifest, serverToken))
+						return
+					}
+				}
+				http.NotFound(w, r)
+				return
+			}
+
 			// Variant media playlists: stream_{label}.m3u8
 			if strings.HasPrefix(subPath, "stream_") && strings.HasSuffix(subPath, ".m3u8") && len(ch.variants) > 0 {
 				label := subPath[7 : len(subPath)-5] // strip "stream_" and ".m3u8"
@@ -488,19 +570,30 @@ func serverMultiHTTP(mux *http.ServeMux, channels []*serverChannel, cache *hlsCa
 						w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 						w.Header().Set("Cache-Control", "no-cache, no-store")
 						setServerPrivateHeaders(w, serverIsPrivate)
-						w.Write([]byte(manifest))
+						w.Write(serverManifestBytes(manifest, serverToken))
 						return
 					}
 				}
 				http.NotFound(w, r)
 				return
 			}
-			// Segment files: seg{N}.ts or {label}_seg{N}.ts (variants)
+			// Segment files: seg{N}.ts, {label}_seg{N}.ts (variants), audio_{name}_seg{N}.ts
 			if strings.HasSuffix(subPath, ".ts") {
 				segName := subPath
 				targetSeg := ch.seg // default segmenter
+				// Check for audio track prefix: e.g. "audio_rock_seg0.ts"
+				if len(ch.audioTracks) > 0 {
+					for i := range ch.audioTracks {
+						prefix := "audio_" + ch.audioTracks[i].name + "_"
+						if strings.HasPrefix(segName, prefix) {
+							targetSeg = ch.audioTracks[i].seg
+							segName = segName[len(prefix):]
+							break
+						}
+					}
+				}
 				// Check for variant prefix: e.g. "720p_seg0.ts"
-				if len(ch.variants) > 0 {
+				if len(ch.variants) > 0 && targetSeg == ch.seg {
 					for i := range ch.variants {
 						prefix := ch.variants[i].label + "_"
 						if strings.HasPrefix(segName, prefix) {

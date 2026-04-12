@@ -41,6 +41,24 @@ docker run -v keys:/data -p 8000:8000 \
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
 | `-k`, `--key` | `KEY` | *(ephemeral)* | Ed25519 seed file (hex). Auto-generated if omitted. |
+| `--channels` | `CHANNELS` | 1 | Number of channels to generate. Each gets its own key, test pattern label, and protocol endpoints. Channel 1 uses `--key`; channels 2+ auto-generate to `ch2.key`, `ch3.key`, etc. |
+
+#### Metadata
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--description` | `DESCRIPTION` | — | Channel description (included in signed metadata) |
+| `--tags` | `TAGS` | — | Comma-separated tags, max 5 (e.g. `test,experimental`) |
+| `--language` | `LANGUAGE` | — | ISO 639-1 language code (e.g. `en`, `ja`) |
+| `--icon` | `ICON` | *(TLTV logo SVG)* | Path to icon file (PNG, JPEG, or SVG). Default: built-in TLTV logo. |
+
+#### Access Control
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--access` | `ACCESS` | `public` | Access mode: `public` or `token` |
+| `--token` | `TOKEN` | — | Access token for private channels (implies `--access token`) |
+| `--on-demand` | `ON_DEMAND=1` | off | Mark channel as on-demand |
 
 #### Display
 
@@ -55,6 +73,7 @@ docker run -v keys:/data -p 8000:8000 \
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
+| `--variants` | `VARIANTS` | — | Comma-separated renditions (e.g. `1080p,720p,360p`). When set, `stream.m3u8` returns a master playlist. Presets: `240p`–`4320p`. |
 | `--width` | `WIDTH` | 640 | Video width (16–7680). Non-16-aligned values rounded up internally. |
 | `--height` | `HEIGHT` | 360 | Video height (16–4320). Non-16-aligned values rounded up internally. |
 | `--fps` | `FPS` | 30 | Frames per second |
@@ -72,7 +91,7 @@ docker run -v keys:/data -p 8000:8000 \
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
 | `-l`, `--listen` | `LISTEN` | `:8000` | Listen address. Changes to `:443` when `--tls` is enabled. |
-| `-H`, `--hostname` | `HOSTNAME` | *(auto)* | Public `host:port` for the `origins` field in metadata |
+| `-H`, `--hostname` | `HOSTNAME` | *(auto)* | Public `host:port` for the `origins` field in metadata. Omit to create a private origin that relays cannot discover. |
 
 #### TLS
 
@@ -106,7 +125,7 @@ hourly in the background; certs renew when <30 days remain.
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
-| `--viewer` | `VIEWER=1` | off | Serve built-in HLS.js web player at `/` |
+| `--viewer` | `VIEWER=1` | off | Serve built-in HLS.js web player at `/` (private channels require `/?token=...`) |
 
 #### Logging
 
@@ -190,6 +209,21 @@ convenience paths. All stream access goes through protocol paths
 **HOSTNAME in Docker.** Docker sets `HOSTNAME` to the container ID by default.
 Always set it explicitly (`-e HOSTNAME=public.example.com`) or the metadata
 `origins` field will contain the container ID.
+
+**Private origins.** Omit `--hostname` to run a private origin. Without a
+hostname, the signed metadata contains no `origins` field, so relays and peers
+cannot discover or advertise the server's address. Viewers must be given the
+address directly.
+
+**Private viewer auth.** When `--viewer` is enabled on a private channel, the
+embedded viewer root (`/`) and `/api/info` require the same `?token=...` used by
+the protocol endpoints. The viewer JSON never echoes the raw secret back to the
+browser.
+
+**Private HLS manifests.** For `access=token`, generated server playlists
+(`stream.m3u8`, master playlists, variant playlists, audio playlists, subtitle
+playlists) append `?token=...` to every child URI so playback continues after
+the first manifest fetch.
 
 **Resolution rounding.** Non-16-aligned dimensions are rounded up internally
 (H.264 macroblock alignment). The SPS includes frame cropping to report the

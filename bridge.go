@@ -338,9 +338,7 @@ func cmdBridge(args []string) {
 			}
 		}
 	}
-	if len(guide) > 0 {
-		registry.UpdateGuide(guide)
-	}
+	registry.UpdateGuide(guide)
 
 	// Log registered channels
 	for _, ch := range registry.ListChannels() {
@@ -386,7 +384,7 @@ func cmdBridge(args []string) {
 	if len(bridgeGuideEntries) > 0 {
 		guideMap := make(map[string][]guideEntry)
 		for _, ch := range registry.ListChannels() {
-			guideMap[ch.ChannelID] = bridgeGuideEntries
+			guideMap[ch.UpstreamID] = bridgeGuideEntries
 		}
 		registry.UpdateGuide(guideMap)
 	}
@@ -613,9 +611,7 @@ func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *
 			}
 		}
 	}
-	if len(guide) > 0 {
-		registry.UpdateGuide(guide)
-	}
+	registry.UpdateGuide(guide)
 
 	logDebugf("poll: %d channels", len(channels))
 }
@@ -664,7 +660,7 @@ func bridgeApplyReloadedConfig(cfg map[string]interface{}, liveConfig *atomic.Po
 			// Apply inline guide entries directly to registry
 			guideMap := make(map[string][]guideEntry)
 			for _, ch := range registry.ListChannels() {
-				guideMap[ch.ChannelID] = entries
+				guideMap[ch.UpstreamID] = entries
 			}
 			registry.UpdateGuide(guideMap)
 			logInfof("config: guide updated (%d inline entries)", len(entries))

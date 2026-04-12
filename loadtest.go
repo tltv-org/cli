@@ -124,13 +124,7 @@ func cmdLoadtest(args []string) {
 	logInfof("validating target...")
 	client := newClientWithProxy(flagInsecure, proxyURL)
 
-	valRecv := &Receiver{
-		Target:         target,
-		DirectURL:      *directURL,
-		Client:         client,
-		Stats:          &ReceiverStats{StartTime: time.Now()},
-		VerifyMetadata: *directURL == "",
-	}
+	valRecv := newLoadtestValidationReceiver(target, *directURL, client, *quality)
 	valCtx, valCancel := context.WithTimeout(context.Background(), connTimeout)
 	valRecv.OnSegment = func(sr ReceiverSegmentResult) {
 		if sr.Err == nil {
@@ -233,6 +227,17 @@ spawnLoop:
 		loadtestPrintJSON(agg, target, *directURL, testDuration, *numReceivers, rampDuration)
 	} else {
 		loadtestPrintSummary(agg, target, *directURL, testDuration, *numReceivers, rampDuration)
+	}
+}
+
+func newLoadtestValidationReceiver(target, directURL string, client *Client, quality string) *Receiver {
+	return &Receiver{
+		Target:         target,
+		DirectURL:      directURL,
+		Client:         client,
+		Stats:          &ReceiverStats{StartTime: time.Now()},
+		Quality:        quality,
+		VerifyMetadata: directURL == "",
 	}
 }
 

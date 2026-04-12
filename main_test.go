@@ -3604,7 +3604,7 @@ func TestRelayPeers_OwnChannelsExcluded(t *testing.T) {
 	}
 	registry.UpdateChannel(channelID, res.Raw, res.Doc, []string{host})
 
-	srv := newRelayServer(registry, client, nil, nil)
+	srv := newRelayServer(registry, client, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()

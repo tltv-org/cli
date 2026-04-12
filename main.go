@@ -79,7 +79,8 @@ func usage() {
 	fmt.Fprintf(w, "Servers:\n")
 	fmt.Fprintf(w, "  server test            SMPTE test signal generator\n")
 	fmt.Fprintf(w, "  bridge                 Bridge origin server\n")
-	fmt.Fprintf(w, "  relay                  Relay node\n\n")
+	fmt.Fprintf(w, "  relay                  Relay node\n")
+	fmt.Fprintf(w, "  router                 SNI routing reverse proxy\n\n")
 	fmt.Fprintf(w, "Clients:\n")
 	fmt.Fprintf(w, "  viewer <target>        Open a local web viewer\n")
 	fmt.Fprintf(w, "  receiver <target>      Consume an HLS stream\n\n")
@@ -195,6 +196,8 @@ dispatch:
 		cmdBridge(cmdArgs)
 	case "relay":
 		cmdRelay(cmdArgs)
+	case "router":
+		cmdRouter(cmdArgs)
 	case "receiver":
 		cmdReceiver(cmdArgs)
 	case "viewer":
@@ -893,7 +896,7 @@ func cmdVersion() {
 var allCommands = []string{
 	"info", "channel", "stream", "guide", "node", "peers",
 	"resolve", "crawl",
-	"server", "bridge", "relay",
+	"server", "bridge", "relay", "router",
 	"viewer", "receiver",
 	"keygen", "vanity", "inspect",
 	"sign", "verify", "template", "migrate",

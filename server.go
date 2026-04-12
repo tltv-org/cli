@@ -105,6 +105,18 @@ func cmdServerTest(args []string) {
 	variantsArg := fs.String("variants", os.Getenv("VARIANTS"), "comma-separated renditions (e.g. 1080p,720p,360p)")
 	fs.StringVar(variantsArg, "V", os.Getenv("VARIANTS"), "alias for --variants")
 
+	// --- Stream composition ---
+	audioTracksArg := fs.String("audio-tracks", os.Getenv("AUDIO_TRACKS"), "demuxed audio tracks (e.g. rock:440,jazz:880)")
+	fs.StringVar(audioTracksArg, "R", os.Getenv("AUDIO_TRACKS"), "alias for --audio-tracks")
+	subtitlesArg := fs.String("subtitles", os.Getenv("SUBTITLES"), "subtitle tracks (e.g. clock,counter,lorem)")
+	fs.StringVar(subtitlesArg, "W", os.Getenv("SUBTITLES"), "alias for --subtitles")
+	audioOnly := fs.Bool("audio-only", os.Getenv("AUDIO_ONLY") == "1", "audio-only channel (no video)")
+	fs.BoolVar(audioOnly, "B", os.Getenv("AUDIO_ONLY") == "1", "alias for --audio-only")
+	noAudio := fs.Bool("no-audio", os.Getenv("NO_AUDIO") == "1", "video-only mode (no audio)")
+	fs.BoolVar(noAudio, "M", os.Getenv("NO_AUDIO") == "1", "alias for --no-audio")
+	programDateTime := fs.Bool("program-date-time", os.Getenv("PROGRAM_DATE_TIME") == "1", "insert EXT-X-PROGRAM-DATE-TIME tags")
+	fs.BoolVar(programDateTime, "d", os.Getenv("PROGRAM_DATE_TIME") == "1", "alias for --program-date-time")
+
 	// --- Encoder ---
 	widthArg := fs.Int("width", envInt("WIDTH", 640), "video width")
 	fs.IntVar(widthArg, "X", envInt("WIDTH", 640), "alias for --width")
@@ -172,6 +184,12 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  -A, --access MODE          access mode: public (default) or token\n")
 		fmt.Fprintf(os.Stderr, "  -t, --token STRING         access token for private channels\n")
 		fmt.Fprintf(os.Stderr, "  -O, --on-demand            mark channel as on-demand\n\n")
+		fmt.Fprintf(os.Stderr, "Stream composition:\n")
+		fmt.Fprintf(os.Stderr, "  -R, --audio-tracks LIST    demuxed audio tracks (e.g. rock:440,jazz:880)\n")
+		fmt.Fprintf(os.Stderr, "  -W, --subtitles LIST       subtitle tracks (e.g. clock,counter,lorem)\n")
+		fmt.Fprintf(os.Stderr, "  -B, --audio-only           audio-only channel (no video)\n")
+		fmt.Fprintf(os.Stderr, "  -M, --no-audio             video-only mode (no audio in segments)\n")
+		fmt.Fprintf(os.Stderr, "  -d, --program-date-time    insert EXT-X-PROGRAM-DATE-TIME tags\n\n")
 		fmt.Fprintf(os.Stderr, "Encoder:\n")
 		fmt.Fprintf(os.Stderr, "  -V, --variants LIST        comma-separated renditions (e.g. 1080p,720p,360p)\n")
 		fmt.Fprintf(os.Stderr, "  -X, --width N              video width (default: 640)\n")
@@ -208,7 +226,9 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "All flags also accept environment variables (uppercase, underscores):\n")
 		fmt.Fprintf(os.Stderr, "  KEY, CHANNELS, NAME, UPTIME, TIMEZONE, FONT_SCALE,\n")
 		fmt.Fprintf(os.Stderr, "  DESCRIPTION, TAGS, LANGUAGE, ICON,\n")
-		fmt.Fprintf(os.Stderr, "  ACCESS, TOKEN, ON_DEMAND=1, WIDTH, HEIGHT, FPS, QP,\n")
+		fmt.Fprintf(os.Stderr, "  ACCESS, TOKEN, ON_DEMAND=1, AUDIO_TRACKS, SUBTITLES, AUDIO_ONLY=1,\n")
+		fmt.Fprintf(os.Stderr, "  NO_AUDIO=1, PROGRAM_DATE_TIME=1,\n")
+		fmt.Fprintf(os.Stderr, "  WIDTH, HEIGHT, FPS, QP,\n")
 		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT, PEERS, GOSSIP=1,\n")
 		fmt.Fprintf(os.Stderr, "  CONFIG, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
@@ -290,6 +310,21 @@ func cmdServerTest(args []string) {
 		}
 		if *onDemand {
 			cfg["on_demand"] = true
+		}
+		if *audioTracksArg != "" {
+			cfg["audio_tracks"] = *audioTracksArg
+		}
+		if *subtitlesArg != "" {
+			cfg["subtitles"] = *subtitlesArg
+		}
+		if *audioOnly {
+			cfg["audio_only"] = true
+		}
+		if *noAudio {
+			cfg["no_audio"] = true
+		}
+		if *programDateTime {
+			cfg["program_date_time"] = true
 		}
 		if *hostnameArg != "" {
 			cfg["hostname"] = *hostnameArg
@@ -466,10 +501,52 @@ func cmdServerTest(args []string) {
 		fatal("--channels must be >= 1")
 	}
 
+	// Parse subtitle tracks
+	subtitleTracks, err := parseSubtitleTracks(*subtitlesArg)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	// Parse audio tracks
+	audioTracks, err := parseAudioTracks(*audioTracksArg)
+	if err != nil {
+		fatal("%v", err)
+	}
+	// --audio-only and --no-audio are mutually exclusive
+	if *audioOnly && *noAudio {
+		fatal("--audio-only and --no-audio are mutually exclusive")
+	}
+	// --audio-tracks and --no-audio are mutually exclusive
+	if len(audioTracks) > 0 && *noAudio {
+		fatal("--audio-tracks and --no-audio are mutually exclusive")
+	}
+	// --audio-only without --audio-tracks creates a default "main" track
+	if *audioOnly && len(audioTracks) == 0 {
+		audioTracks = []serverAudioTrack{{name: "main"}}
+	}
+	// When audio tracks are set, video segments become video-only (audio is demuxed)
+	if len(audioTracks) > 0 && !*audioOnly {
+		*noAudio = true
+	}
+
 	// Parse variants
 	variants, err := parseVariants(*variantsArg)
 	if err != nil {
 		fatal("%v", err)
+	}
+	// Audio tracks / subtitle tracks require a master playlist.
+	// If no --variants specified, create a single variant from the default resolution.
+	// For --audio-only, skip video variants entirely.
+	if *audioOnly {
+		variants = nil // no video variants
+	} else if (len(audioTracks) > 0 || len(subtitleTracks) > 0) && len(variants) == 0 {
+		levelIdc := selectLevel(*widthArg, *heightArg, *fpsArg)
+		variants = []serverVariant{{
+			label:    fmt.Sprintf("%dp", *heightArg),
+			width:    *widthArg,
+			height:   *heightArg,
+			codecTag: codecTagFromLevel(levelIdc),
+		}}
 	}
 
 	// Set up signal handling
@@ -540,32 +617,46 @@ func cmdServerTest(args []string) {
 			chDisplayName = strings.ToUpper(chName)
 		}
 
-		seg := newHLSSegmenter(*segCount, *segDuration)
 		metadata, guide := serverSignDocs(chID, chName, hostname, privKey, serverGuideEntries, access, *onDemand, metaOpts)
 
-		ch := &serverChannel{
-			channelID:   chID,
-			channelName: chName,
-			privKey:     privKey,
-			seg:         seg,
-			state: &serverState{
-				seg:          seg,
-				muxer:        &tsMuxer{},
-				sps:          sps,
-				pps:          pps,
-				aud:          aud,
-				frame:        newFrame(h264.width, h264.height),
-				h264:         h264,
-				channelName:  chDisplayName,
-				showUptime:   *showUptime,
-				fontScale:    *fontScale,
-				startTime:    time.Now().UTC(),
-				location:     loc,
-				framesPerSeg: framesPerSeg,
-				ptsPerFrame:  ptsPerFrame,
-				segDuration:  float64(*segDuration),
-				segDurationI: *segDuration,
-			},
+		var ch *serverChannel
+		if *audioOnly {
+			// Audio-only channel: no video state, only audio tracks
+			ch = &serverChannel{
+				channelID:   chID,
+				channelName: chName,
+				privKey:     privKey,
+			}
+		} else {
+			seg := newHLSSegmenter(*segCount, *segDuration)
+			if *programDateTime {
+				seg.programDateTime = true
+			}
+			ch = &serverChannel{
+				channelID:   chID,
+				channelName: chName,
+				privKey:     privKey,
+				seg:         seg,
+				state: &serverState{
+					seg:          seg,
+					muxer:        &tsMuxer{},
+					sps:          sps,
+					pps:          pps,
+					aud:          aud,
+					frame:        newFrame(h264.width, h264.height),
+					h264:         h264,
+					channelName:  chDisplayName,
+					showUptime:   *showUptime,
+					fontScale:    *fontScale,
+					startTime:    time.Now().UTC(),
+					location:     loc,
+					framesPerSeg: framesPerSeg,
+					ptsPerFrame:  ptsPerFrame,
+					segDuration:  float64(*segDuration),
+					segDurationI: *segDuration,
+					noAudio:      *noAudio,
+				},
+			}
 		}
 		// Initialize variants if specified
 		if len(variants) > 0 {
@@ -584,6 +675,9 @@ func cmdServerTest(args []string) {
 				vSps := encodeSPS(vH264)
 				vPps := encodePPS(vH264)
 				vSeg := newHLSSegmenter(*segCount, *segDuration)
+				if *programDateTime {
+					vSeg.programDateTime = true
+				}
 				vSeg.segPrefix = v.label + "_"
 				levelIdc := selectLevel(v.width, v.height, *fpsArg)
 
@@ -610,12 +704,47 @@ func cmdServerTest(args []string) {
 						ptsPerFrame:  ptsPerFrame,
 						segDuration:  float64(*segDuration),
 						segDurationI: *segDuration,
+						noAudio:      *noAudio,
 					},
 				}
 			}
 			// Primary seg/state = first variant
 			ch.seg = ch.variants[0].seg
 			ch.state = ch.variants[0].state
+		}
+
+		// Initialize audio tracks (if demuxed audio mode)
+		if len(audioTracks) > 0 {
+			ch.audioTracks = make([]serverAudioTrack, len(audioTracks))
+			for ai, at := range audioTracks {
+				atSeg := newHLSSegmenter(*segCount, *segDuration)
+				if *programDateTime {
+					atSeg.programDateTime = true
+				}
+				atSeg.segPrefix = "audio_" + at.name + "_"
+				ch.audioTracks[ai] = serverAudioTrack{
+					name:         at.name,
+					seg:          atSeg,
+					muxer:        &tsMuxer{},
+					segDurationI: *segDuration,
+					ptsPerFrame:  ptsPerFrame,
+					framesPerSeg: framesPerSeg,
+				}
+			}
+		}
+
+		// Initialize subtitle tracks
+		if len(subtitleTracks) > 0 {
+			ch.subtitleTracks = make([]serverSubtitleTrack, len(subtitleTracks))
+			for si, st := range subtitleTracks {
+				stSeg := newSubtitleSegmenter(*segCount, *segDuration)
+				stSeg.segPrefix = "subs_" + st.name + "_"
+				ch.subtitleTracks[si] = serverSubtitleTrack{
+					name:         st.name,
+					seg:          stSeg,
+					segDurationI: *segDuration,
+				}
+			}
 		}
 
 		ch.docs.Store(&serverDocs{
@@ -643,6 +772,25 @@ func cmdServerTest(args []string) {
 		logInfof("resolution: %dx%d @ %dfps, QP=%d", h264.width, h264.height, h264.fps, h264.qp)
 	}
 	logInfof("HLS: %ds segments, %d-segment window", *segDuration, *segCount)
+	if len(audioTracks) > 0 {
+		names := make([]string, len(audioTracks))
+		for i, at := range audioTracks {
+			names[i] = at.name
+		}
+		logInfof("audio tracks: %s (demuxed)", strings.Join(names, ", "))
+	} else if *noAudio {
+		logInfof("audio: disabled (video-only mode)")
+	}
+	if len(subtitleTracks) > 0 {
+		names := make([]string, len(subtitleTracks))
+		for i, st := range subtitleTracks {
+			names[i] = st.name
+		}
+		logInfof("subtitle tracks: %s (WebVTT)", strings.Join(names, ", "))
+	}
+	if *programDateTime {
+		logInfof("HLS: EXT-X-PROGRAM-DATE-TIME enabled")
+	}
 
 	// Set up cache (if enabled)
 	var cache *hlsCache
@@ -692,21 +840,7 @@ func cmdServerTest(args []string) {
 				}
 			}
 			docs := ch.docs.Load()
-			info := viewerBuildInfo(docs.channelID, docs.channelName, docs.metadata, docs.guide)
-			streamSrc := "/tltv/v1/channels/" + docs.channelID + "/stream.m3u8"
-			if serverToken != "" {
-				streamSrc += "?token=" + serverToken
-			}
-			info["stream_src"] = streamSrc
-			xmltvURL := "/tltv/v1/channels/" + docs.channelID + "/guide.xml"
-			if serverToken != "" {
-				xmltvURL += "?token=" + serverToken
-			}
-			info["xmltv_url"] = xmltvURL
-			if hostname != "" {
-				info["tltv_uri"] = formatTLTVUri(docs.channelID, []string{hostname}, "")
-			}
-			return info
+			return serverViewerInfo(docs, hostname)
 		}, func() []ChannelRef {
 			var refs []ChannelRef
 			for _, ch := range channels {
@@ -714,7 +848,7 @@ func cmdServerTest(args []string) {
 				refs = append(refs, ChannelRef{ID: docs.channelID, Name: docs.channelName})
 			}
 			return refs
-		})
+		}, viewerRouteOptions{authToken: serverToken, private: serverIsPrivate})
 	} else {
 		statusPageRoutes(mux, func() *NodeInfo {
 			ni := &NodeInfo{
@@ -731,7 +865,7 @@ func cmdServerTest(args []string) {
 		})
 	}
 
-	if len(channels) == 1 && len(channels[0].variants) == 0 {
+	if len(channels) == 1 && serverUseLegacyHTTP(channels[0]) {
 		// Single-channel without variants: use existing serverHTTP for backward compat with tests
 		ch := channels[0]
 		d := ch.docs.Load()
@@ -874,6 +1008,8 @@ type serverState struct {
 	segDuration  float64
 	segDurationI int // integer seconds for audio frame count
 
+	noAudio bool // video-only mode (no audio PID, no audio frames)
+
 	frameNum      uint64
 	audioFrameNum uint64 // running AAC frame counter (continuous across segments)
 }
@@ -894,14 +1030,21 @@ func (s *serverState) generateSegment() {
 	tsData = append(tsData, patPkt[:]...)
 
 	var pmtPkt [tsPacketSize]byte
-	s.muxer.writePMT(pmtPkt[:])
+	if s.noAudio {
+		s.muxer.writePMTVideoOnly(pmtPkt[:])
+	} else {
+		s.muxer.writePMT(pmtPkt[:])
+	}
 	tsData = append(tsData, pmtPkt[:]...)
 
-	// Pre-generate all audio ADTS frames for this segment.
+	// Pre-generate all audio ADTS frames for this segment (unless video-only).
 	// Audio frame count is derived from the running sample counter so that
 	// PTS is continuous across segments with no gaps.
-	segEndPTS := int64(s.frameNum+uint64(s.framesPerSeg)) * s.ptsPerFrame
-	audioFrames := generateAudioFrames(s.audioFrameNum, segEndPTS)
+	var audioFrames []audioFrame
+	if !s.noAudio {
+		segEndPTS := int64(s.frameNum+uint64(s.framesPerSeg)) * s.ptsPerFrame
+		audioFrames = generateAudioFrames(s.audioFrameNum, segEndPTS)
+	}
 
 	var cachedNAL []byte
 	var cachedTimeStr string
@@ -919,9 +1062,12 @@ func (s *serverState) generateSegment() {
 	// batch, repeating. The video batch size is chosen so that audio PES
 	// batches are roughly evenly spaced.
 	audioIdx := 0
-	videoBatchSize := s.framesPerSeg / ((len(audioFrames) + audioPESBatchSize - 1) / audioPESBatchSize)
-	if videoBatchSize < 1 {
-		videoBatchSize = 1
+	videoBatchSize := s.framesPerSeg // default: all video, no audio interleaving
+	if len(audioFrames) > 0 {
+		videoBatchSize = s.framesPerSeg / ((len(audioFrames) + audioPESBatchSize - 1) / audioPESBatchSize)
+		if videoBatchSize < 1 {
+			videoBatchSize = 1
+		}
 	}
 
 	for i := 0; i < s.framesPerSeg; i++ {
@@ -984,23 +1130,32 @@ type serverMetadataOpts struct {
 }
 
 // serverGenerateAllVariants generates a segment for the channel's primary
-// state and all variant states (if multi-rendition). After the first segment,
+// state and all variant states (if multi-rendition). Also generates audio
+// track segments when demuxed audio is enabled. After the first segment,
 // updates measured bandwidth on each variant.
 func serverGenerateAllVariants(ch *serverChannel) {
-	if len(ch.variants) == 0 {
+	if len(ch.variants) == 0 && ch.state != nil {
 		ch.state.generateSegment()
-		return
-	}
-	for i := range ch.variants {
-		v := &ch.variants[i]
-		v.state.generateSegment()
-		// Update bandwidth from actual segment sizes after first segment
-		if v.bandwidth == 0 && v.seg.seqNum > 0 {
-			data := v.seg.getSegment(v.seg.seqNum - 1)
-			if data != nil {
-				v.bandwidth = len(data) * 8 / v.state.segDurationI
+	} else if len(ch.variants) > 0 {
+		for i := range ch.variants {
+			v := &ch.variants[i]
+			v.state.generateSegment()
+			// Update bandwidth from actual segment sizes after first segment
+			if v.bandwidth == 0 && v.seg.seqNum > 0 {
+				data := v.seg.getSegment(v.seg.seqNum - 1)
+				if data != nil {
+					v.bandwidth = len(data) * 8 / v.state.segDurationI
+				}
 			}
 		}
+	}
+	// Generate audio track segments
+	for i := range ch.audioTracks {
+		ch.audioTracks[i].generateAudioSegment()
+	}
+	// Generate subtitle track segments
+	for i := range ch.subtitleTracks {
+		ch.subtitleTracks[i].generateSubtitleSegment()
 	}
 }
 
@@ -1113,34 +1268,134 @@ type serverDocs struct {
 	guide       []byte
 }
 
+func serverViewerInfo(docs *serverDocs, hostname string) map[string]interface{} {
+	info := viewerBuildInfo(docs.channelID, docs.channelName, docs.metadata, docs.guide)
+	info["stream_src"] = "/tltv/v1/channels/" + docs.channelID + "/stream.m3u8"
+	info["xmltv_url"] = "/tltv/v1/channels/" + docs.channelID + "/guide.xml"
+	if hostname != "" {
+		info["tltv_uri"] = formatTLTVUri(docs.channelID, []string{hostname}, "")
+	}
+	return info
+}
+
 // serverChannel bundles all per-channel state for multi-channel server.
 type serverChannel struct {
-	channelID   string
-	channelName string
-	privKey     ed25519.PrivateKey
-	seg         *hlsSegmenter    // primary segmenter (single-variant or first variant)
-	state       *serverState     // primary state
-	variants    []serverVariant  // nil = single media playlist; non-nil = master playlist mode
-	docs        atomic.Pointer[serverDocs]
+	channelID      string
+	channelName    string
+	privKey        ed25519.PrivateKey
+	seg            *hlsSegmenter         // primary segmenter (single-variant or first variant)
+	state          *serverState          // primary state
+	variants       []serverVariant       // nil = single media playlist; non-nil = master playlist mode
+	audioTracks    []serverAudioTrack    // nil = muxed audio; non-nil = demuxed audio per EXT-X-MEDIA
+	subtitleTracks []serverSubtitleTrack // nil = no subtitles; non-nil = per EXT-X-MEDIA TYPE=SUBTITLES
+	docs           atomic.Pointer[serverDocs]
+}
+
+// serverUseLegacyHTTP returns true when a channel can safely use the original
+// single-channel HTTP handlers. Channels with master playlists, demuxed media,
+// or audio-only mode must use serverMultiHTTP even when only one channel exists.
+func serverUseLegacyHTTP(ch *serverChannel) bool {
+	if ch == nil || ch.seg == nil {
+		return false
+	}
+	return len(ch.variants) == 0 && len(ch.audioTracks) == 0 && len(ch.subtitleTracks) == 0
 }
 
 // serverVariant holds per-rendition state for multi-rendition mode.
 type serverVariant struct {
-	label     string         // e.g. "1080p"
+	label     string // e.g. "1080p"
 	width     int
 	height    int
 	seg       *hlsSegmenter
 	state     *serverState
-	bandwidth int            // measured bits/sec (updated after first segment)
-	codecTag  string         // e.g. "avc1.42c028"
+	bandwidth int    // measured bits/sec (updated after first segment)
+	codecTag  string // e.g. "avc1.42c028"
+}
+
+// serverAudioTrack holds per-track state for demuxed audio (EXT-X-MEDIA TYPE=AUDIO).
+type serverAudioTrack struct {
+	name          string
+	seg           *hlsSegmenter
+	muxer         *tsMuxer
+	audioFrameNum uint64
+	segDurationI  int
+	ptsPerFrame   int64
+	framesPerSeg  int
+}
+
+// generateAudioSegment generates an audio-only MPEG-TS segment for this track.
+func (at *serverAudioTrack) generateAudioSegment() {
+	// Pre-allocate: audio-only segments are small (~50 KB for 2s)
+	tsData := make([]byte, 0, 65536)
+
+	// PAT + audio-only PMT
+	var patPkt [tsPacketSize]byte
+	at.muxer.writePAT(patPkt[:])
+	tsData = append(tsData, patPkt[:]...)
+
+	var pmtPkt [tsPacketSize]byte
+	at.muxer.writePMTAudioOnly(pmtPkt[:])
+	tsData = append(tsData, pmtPkt[:]...)
+
+	// Generate audio frames for segment duration
+	segEndPTS := int64(at.audioFrameNum+uint64(audioFramesForSegment(at.segDurationI))) * aacPTSPerFrame
+	frames := generateAudioFrames(at.audioFrameNum, segEndPTS)
+
+	// Write audio PES batches
+	const batchSize = 16
+	for i := 0; i < len(frames); i += batchSize {
+		end := i + batchSize
+		if end > len(frames) {
+			end = len(frames)
+		}
+		tsData = at.muxer.writeAudioPES(tsData, frames[i:end])
+	}
+
+	at.audioFrameNum += uint64(len(frames))
+	at.seg.pushSegment(tsData, float64(at.segDurationI))
+}
+
+// parseAudioTracks parses "name:freq,name:freq,..." or "name,name,...".
+// Frequency is parsed but cosmetic (all tracks use the same 1kHz pre-encoded loop).
+func parseAudioTracks(s string) ([]serverAudioTrack, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var tracks []serverAudioTrack
+	seen := make(map[string]bool)
+	for _, spec := range strings.Split(s, ",") {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
+			continue
+		}
+		name := spec
+		if idx := strings.Index(spec, ":"); idx >= 0 {
+			name = spec[:idx]
+			// frequency after : is cosmetic — parsed but not used
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("empty audio track name")
+		}
+		lower := strings.ToLower(name)
+		if seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		tracks = append(tracks, serverAudioTrack{name: lower})
+	}
+	if len(tracks) == 0 {
+		return nil, fmt.Errorf("no valid audio tracks specified")
+	}
+	return tracks, nil
 }
 
 // serverVariantPreset maps shorthand labels to width×height.
 var serverVariantPreset = map[string][2]int{
 	"4320p": {7680, 4320}, "2160p": {3840, 2160},
 	"1440p": {2560, 1440}, "1080p": {1920, 1080},
-	"720p":  {1280, 720},  "480p":  {854, 480},
-	"360p":  {640, 360},   "240p":  {426, 240},
+	"720p": {1280, 720}, "480p": {854, 480},
+	"360p": {640, 360}, "240p": {426, 240},
 }
 
 // parseVariants parses a comma-separated variant string into resolution specs.
@@ -1180,16 +1435,87 @@ func codecTagFromLevel(levelIdc int) string {
 	return fmt.Sprintf("avc1.42c0%02x", levelIdc)
 }
 
-// masterPlaylist generates a master playlist string for the given variants.
-func masterPlaylist(variants []serverVariant) string {
+// masterPlaylist generates a master playlist string for the given variants,
+// with optional demuxed audio tracks and subtitle tracks.
+func masterPlaylist(variants []serverVariant, audioTracks []serverAudioTrack, subtitleTracks []serverSubtitleTrack, muxedAudio bool) string {
+	hasAudio := len(audioTracks) > 0
+	hasSubs := len(subtitleTracks) > 0
+
 	var sb strings.Builder
 	sb.WriteString("#EXTM3U\n")
+
+	// EXT-X-INDEPENDENT-SEGMENTS is required when audio/video are demuxed
+	if hasAudio || hasSubs {
+		sb.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
+	}
+
+	// Audio track declarations (EXT-X-MEDIA TYPE=AUDIO)
+	for i, at := range audioTracks {
+		def := "NO"
+		autosel := ""
+		if i == 0 {
+			def = "YES"
+			autosel = ",AUTOSELECT=YES"
+		}
+		// Title-case the name for display
+		displayName := strings.ToUpper(at.name[:1]) + at.name[1:]
+		sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"%s\",DEFAULT=%s%s,URI=\"audio_%s.m3u8\"\n",
+			displayName, def, autosel, at.name))
+	}
+
+	// Subtitle track declarations (EXT-X-MEDIA TYPE=SUBTITLES)
+	for i, st := range subtitleTracks {
+		def := "NO"
+		autosel := ""
+		if i == 0 {
+			def = "YES"
+			autosel = ",AUTOSELECT=YES"
+		}
+		displayName := strings.ToUpper(st.name[:1]) + st.name[1:]
+		sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"%s\",DEFAULT=%s%s,URI=\"subs_%s.m3u8\"\n",
+			displayName, def, autosel, st.name))
+	}
+
+	// Video variant entries
 	for _, v := range variants {
-		sb.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s,mp4a.40.2\"\n",
-			v.bandwidth, v.width, v.height, v.codecTag))
+		codecs := v.codecTag
+		if muxedAudio || hasAudio {
+			codecs += ",mp4a.40.2"
+		}
+		attrs := fmt.Sprintf("BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"", v.bandwidth, v.width, v.height, codecs)
+		if hasAudio {
+			attrs += ",AUDIO=\"audio\""
+		}
+		if hasSubs {
+			attrs += ",SUBTITLES=\"subs\""
+		}
+		sb.WriteString("#EXT-X-STREAM-INF:" + attrs + "\n")
 		sb.WriteString("stream_" + v.label + ".m3u8\n")
 	}
+
+	// Audio-only mode: if no video variants, add an audio-only STREAM-INF
+	// pointing to the first (default) audio track. This makes it a valid
+	// master playlist that players can consume.
+	if len(variants) == 0 && hasAudio {
+		sb.WriteString("#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS=\"mp4a.40.2\",AUDIO=\"audio\"\n")
+		sb.WriteString("audio_" + audioTracks[0].name + ".m3u8\n")
+	}
+
 	return sb.String()
+}
+
+// serverSubtitleTrack holds per-track state for WebVTT subtitles (EXT-X-MEDIA TYPE=SUBTITLES).
+// Uses subtitleSegmenter (text-based) instead of hlsSegmenter (binary).
+type serverSubtitleTrack struct {
+	name         string
+	seg          *subtitleSegmenter
+	segDurationI int
+}
+
+// generateSubtitleSegment generates a WebVTT segment for this track.
+func (st *serverSubtitleTrack) generateSubtitleSegment() {
+	vtt := generateSubtitleVTT(st.name, st.seg.seqNum, st.segDurationI, time.Now())
+	st.seg.pushSegment(vtt, float64(st.segDurationI))
 }
 
 // serverDocsState is shared between the main goroutine (writer) and HTTP handlers

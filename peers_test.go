@@ -381,7 +381,7 @@ func TestRelayPeersEndpoint_WithExternalPeers(t *testing.T) {
 	peerReg := newPeerRegistry()
 	peerReg.Update("TVfriend", "Friend", []string{"friend.tv:443"})
 
-	srv := newRelayServer(r, newClient(false), nil, peerReg)
+	srv := newRelayServer(r, newClient(false), nil, peerReg, nil)
 
 	req := httptest.NewRequest("GET", "/tltv/v1/peers", nil)
 	w := httptest.NewRecorder()

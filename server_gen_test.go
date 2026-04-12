@@ -870,6 +870,49 @@ func TestServerViewerCoexistence(t *testing.T) {
 	}
 }
 
+func TestServerPrivateViewer_RequiresAuthAndDoesNotLeakToken(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "Private Test", "", priv, nil, "token", false, nil)
+	docs := &serverDocs{channelID: channelID, channelName: "Private Test", metadata: metadata, guide: guide}
+
+	mux := http.NewServeMux()
+	viewerEmbedRoutes(mux, func(_ string) map[string]interface{} {
+		return serverViewerInfo(docs, "viewer.example.com:443")
+	}, nil, viewerRouteOptions{authToken: "secret123", private: true})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	if w.Code != 403 {
+		t.Fatalf("GET /api/info without token status = %d, want 403", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "secret123") {
+		t.Fatal("unauthenticated /api/info should not leak the private token")
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/?token=secret123", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET / with token status = %d, want 200", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info?token=secret123", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET /api/info with token status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "secret123") || strings.Contains(body, "?token=") {
+		t.Fatalf("authenticated /api/info should not emit raw token, got %q", body)
+	}
+	if !strings.Contains(body, `"stream_src":"/tltv/v1/channels/`+channelID+`/stream.m3u8"`) {
+		t.Fatalf("/api/info missing token-free stream_src: %q", body)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "private, no-store" {
+		t.Fatalf("Cache-Control = %q, want private, no-store", cc)
+	}
+}
+
 func TestServerCache_NilCacheNoHeaders(t *testing.T) {
 	// With cache=nil, no Cache-Status headers should appear.
 	_, priv, _ := ed25519.GenerateKey(nil)
@@ -976,6 +1019,9 @@ func TestServerPrivateChannel_StreamTokenRequired(t *testing.T) {
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/stream.m3u8?token=secret123", nil))
 	if w.Code != 200 {
 		t.Errorf("correct token: status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "seg0.ts?token=secret123") {
+		t.Fatalf("manifest should propagate token to segments, got %q", w.Body.String())
 	}
 }
 
@@ -1450,7 +1496,7 @@ func TestMasterPlaylist(t *testing.T) {
 		{label: "1080p", width: 1920, height: 1080, bandwidth: 5000000, codecTag: "avc1.42c028"},
 		{label: "720p", width: 1280, height: 720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
 	}
-	m := masterPlaylist(variants)
+	m := masterPlaylist(variants, nil, nil, true)
 	if !strings.Contains(m, "#EXTM3U") {
 		t.Error("missing #EXTM3U")
 	}
@@ -1462,6 +1508,17 @@ func TestMasterPlaylist(t *testing.T) {
 	}
 	if !strings.Contains(m, "stream_720p.m3u8") {
 		t.Error("missing variant URI")
+	}
+}
+
+func TestMasterPlaylist_VideoOnlyCodecs(t *testing.T) {
+	variants := []serverVariant{{label: "720p", width: 1280, height: 720, bandwidth: 2000000, codecTag: "avc1.42c01f"}}
+	m := masterPlaylist(variants, nil, nil, false)
+	if strings.Contains(m, "mp4a.40.2") {
+		t.Fatalf("video-only master playlist should not advertise AAC codec:\n%s", m)
+	}
+	if !strings.Contains(m, "CODECS=\"avc1.42c01f\"") {
+		t.Fatalf("video-only master playlist should advertise video codec only:\n%s", m)
 	}
 }
 
@@ -1574,6 +1631,59 @@ func TestServerMultiRendition_TokenRequired(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("with token master: status = %d, want 200", w.Code)
 	}
+	if !strings.Contains(w.Body.String(), "stream_720p.m3u8?token=secret") {
+		t.Fatalf("master playlist should propagate token to variant URI, got %q", w.Body.String())
+	}
+}
+
+func TestServerPrivateMasterAndChildPlaylists_PropagateToken(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "token", false, nil)
+
+	videoSeg := newHLSSegmenter(5, 2)
+	videoSeg.segPrefix = "720p_"
+	videoSeg.pushSegment([]byte("video"), 2.0)
+
+	audioSeg := newHLSSegmenter(5, 2)
+	audioSeg.segPrefix = "audio_rock_"
+	audioSeg.pushSegment([]byte("audio"), 2.0)
+
+	subSeg := newSubtitleSegmenter(5, 2)
+	subSeg.segPrefix = "subs_clock_"
+	subSeg.pushSegment("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nhello\n", 2.0)
+
+	ch := &serverChannel{
+		channelID: chID,
+		privKey:   priv,
+		seg:       videoSeg,
+		variants:  []serverVariant{{label: "720p", width: 1280, height: 720, seg: videoSeg, bandwidth: 2000000, codecTag: "avc1.42c01f"}},
+		audioTracks: []serverAudioTrack{{name: "rock", seg: audioSeg}},
+		subtitleTracks: []serverSubtitleTrack{{name: "clock", seg: subSeg}},
+	}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "secret", true, nil, "")
+
+	checkPlaylist := func(path, want string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", path+"?token=secret", nil))
+		if w.Code != 200 {
+			t.Fatalf("GET %s status = %d, want 200", path, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("GET %s body %q missing %q", path, w.Body.String(), want)
+		}
+	}
+
+	checkPlaylist("/tltv/v1/channels/"+chID+"/stream.m3u8", "audio_rock.m3u8?token=secret")
+	checkPlaylist("/tltv/v1/channels/"+chID+"/stream.m3u8", "subs_clock.m3u8?token=secret")
+	checkPlaylist("/tltv/v1/channels/"+chID+"/stream.m3u8", "stream_720p.m3u8?token=secret")
+	checkPlaylist("/tltv/v1/channels/"+chID+"/stream_720p.m3u8", "720p_seg0.ts?token=secret")
+	checkPlaylist("/tltv/v1/channels/"+chID+"/audio_rock.m3u8", "audio_rock_seg0.ts?token=secret")
+	checkPlaylist("/tltv/v1/channels/"+chID+"/subs_clock.m3u8", "subs_clock_seg0.vtt?token=secret")
 }
 
 func TestServerMultiChannel_WithVariants(t *testing.T) {
@@ -1657,6 +1767,256 @@ func TestServerNoVariants_SinglePlaylist(t *testing.T) {
 	}
 }
 
+// ---------- Audio Tracks ----------
+
+func TestParseAudioTracks_Valid(t *testing.T) {
+	tracks, err := parseAudioTracks("rock:440,jazz:880,classical:1200")
+	if err != nil {
+		t.Fatalf("parseAudioTracks: %v", err)
+	}
+	if len(tracks) != 3 {
+		t.Fatalf("tracks = %d, want 3", len(tracks))
+	}
+	if tracks[0].name != "rock" {
+		t.Errorf("track 0 name = %q, want rock", tracks[0].name)
+	}
+	if tracks[2].name != "classical" {
+		t.Errorf("track 2 name = %q, want classical", tracks[2].name)
+	}
+}
+
+func TestParseAudioTracks_NoFreq(t *testing.T) {
+	tracks, err := parseAudioTracks("main,alt")
+	if err != nil {
+		t.Fatalf("parseAudioTracks: %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("tracks = %d, want 2", len(tracks))
+	}
+	if tracks[0].name != "main" || tracks[1].name != "alt" {
+		t.Errorf("tracks = %v %v, want main,alt", tracks[0].name, tracks[1].name)
+	}
+}
+
+func TestParseAudioTracks_Empty(t *testing.T) {
+	tracks, err := parseAudioTracks("")
+	if err != nil || tracks != nil {
+		t.Errorf("empty = %v, %v; want nil, nil", tracks, err)
+	}
+}
+
+func TestParseAudioTracks_Dedup(t *testing.T) {
+	tracks, err := parseAudioTracks("rock,Rock,jazz")
+	if err != nil {
+		t.Fatalf("parseAudioTracks: %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Errorf("dedup: tracks = %d, want 2", len(tracks))
+	}
+}
+
+func TestMasterPlaylist_WithAudioTracks(t *testing.T) {
+	variants := []serverVariant{
+		{label: "720p", width: 1280, height: 720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+	}
+	audioTracks := []serverAudioTrack{
+		{name: "rock", seg: newHLSSegmenter(5, 2)},
+		{name: "jazz", seg: newHLSSegmenter(5, 2)},
+	}
+	m := masterPlaylist(variants, audioTracks, nil, false)
+
+	if !strings.Contains(m, "#EXT-X-INDEPENDENT-SEGMENTS") {
+		t.Error("missing EXT-X-INDEPENDENT-SEGMENTS")
+	}
+	if !strings.Contains(m, "#EXT-X-MEDIA:TYPE=AUDIO") {
+		t.Error("missing EXT-X-MEDIA TYPE=AUDIO")
+	}
+	if !strings.Contains(m, "GROUP-ID=\"audio\"") {
+		t.Error("missing GROUP-ID audio")
+	}
+	if !strings.Contains(m, "NAME=\"Rock\"") {
+		t.Error("missing Rock track name")
+	}
+	if !strings.Contains(m, "NAME=\"Jazz\"") {
+		t.Error("missing Jazz track name")
+	}
+	if !strings.Contains(m, "DEFAULT=YES") {
+		t.Error("first track should be DEFAULT=YES")
+	}
+	if !strings.Contains(m, "AUTOSELECT=YES") {
+		t.Error("first track should have AUTOSELECT=YES")
+	}
+	if !strings.Contains(m, "URI=\"audio_rock.m3u8\"") {
+		t.Error("missing audio_rock.m3u8 URI")
+	}
+	if !strings.Contains(m, "AUDIO=\"audio\"") {
+		t.Error("missing AUDIO group reference on STREAM-INF")
+	}
+	t.Logf("Master playlist with audio tracks:\n%s", m)
+}
+
+func TestPMTAudioOnly(t *testing.T) {
+	m := &tsMuxer{}
+	var buf [tsPacketSize]byte
+	m.writePMTAudioOnly(buf[:])
+
+	pmt := buf[5:]
+
+	// section_length should be 18 (5+4+5+4, audio only)
+	secLen := int(pmt[1]&0x0F)<<8 | int(pmt[2])
+	if secLen != 18 {
+		t.Errorf("PMT audio-only section_length = %d, want 18", secLen)
+	}
+
+	// Stream entry: AAC audio at offset 12
+	if pmt[12] != tsStreamTypeAAC {
+		t.Errorf("stream type = 0x%02X, want 0x%02X (AAC)", pmt[12], tsStreamTypeAAC)
+	}
+	audPID := (uint16(pmt[13]&0x1F) << 8) | uint16(pmt[14])
+	if audPID != tsPIDAudio {
+		t.Errorf("audio PID = 0x%04X, want 0x%04X", audPID, tsPIDAudio)
+	}
+
+	// PCR PID should be audio PID for audio-only
+	pcrPID := (uint16(pmt[8]&0x1F) << 8) | uint16(pmt[9])
+	if pcrPID != tsPIDAudio {
+		t.Errorf("PCR PID = 0x%04X, want 0x%04X (audio PID for audio-only)", pcrPID, tsPIDAudio)
+	}
+
+	t.Logf("PMT audio-only: section_length=%d, audio PID=0x%04X, PCR PID=0x%04X", secLen, audPID, pcrPID)
+}
+
+func TestAudioTrack_GenerateSegment(t *testing.T) {
+	at := &serverAudioTrack{
+		name:         "test",
+		seg:          newHLSSegmenter(5, 2),
+		muxer:        &tsMuxer{},
+		segDurationI: 2,
+		ptsPerFrame:  3000,
+		framesPerSeg: 60,
+	}
+
+	at.generateAudioSegment()
+
+	if at.seg.seqNum < 1 {
+		t.Fatal("no segment generated")
+	}
+
+	// Verify segment has audio packets and no video packets
+	data := at.seg.getSegment(0)
+	if data == nil {
+		t.Fatal("segment data is nil")
+	}
+
+	audioPkts := 0
+	videoPkts := 0
+	for i := 0; i+tsPacketSize <= len(data); i += tsPacketSize {
+		if data[i] != tsSyncByte {
+			t.Fatalf("lost TS sync at offset %d", i)
+		}
+		pid := (uint16(data[i+1]&0x1F) << 8) | uint16(data[i+2])
+		switch pid {
+		case tsPIDVideo:
+			videoPkts++
+		case tsPIDAudio:
+			audioPkts++
+		}
+	}
+
+	if videoPkts != 0 {
+		t.Errorf("audio-only segment should have 0 video packets, got %d", videoPkts)
+	}
+	if audioPkts == 0 {
+		t.Error("audio-only segment should have audio packets")
+	}
+	t.Logf("Audio segment: %d bytes, %d audio packets, %d video packets", len(data), audioPkts, videoPkts)
+}
+
+func TestServerMultiRendition_AudioTrackEndpoints(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "public", false, nil)
+
+	// Create channel with 1 variant + 2 audio tracks
+	seg720 := newHLSSegmenter(5, 2)
+	seg720.segPrefix = "720p_"
+	seg720.pushSegment([]byte("720p-data"), 2.0)
+
+	atRock := serverAudioTrack{
+		name:         "rock",
+		seg:          newHLSSegmenter(5, 2),
+		muxer:        &tsMuxer{},
+		segDurationI: 2,
+	}
+	atRock.seg.segPrefix = "audio_rock_"
+	atRock.generateAudioSegment()
+
+	atJazz := serverAudioTrack{
+		name:         "jazz",
+		seg:          newHLSSegmenter(5, 2),
+		muxer:        &tsMuxer{},
+		segDurationI: 2,
+	}
+	atJazz.seg.segPrefix = "audio_jazz_"
+	atJazz.generateAudioSegment()
+
+	ch := &serverChannel{
+		channelID:   chID,
+		channelName: "Test",
+		privKey:     priv,
+		seg:         seg720,
+		variants: []serverVariant{
+			{label: "720p", width: 1280, height: 720, seg: seg720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+		},
+		audioTracks: []serverAudioTrack{atRock, atJazz},
+	}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "", false, nil, "")
+
+	// Master playlist should reference audio tracks
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("master playlist: status = %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "audio_rock.m3u8") {
+		t.Error("master playlist missing audio_rock.m3u8")
+	}
+	if !strings.Contains(body, "audio_jazz.m3u8") {
+		t.Error("master playlist missing audio_jazz.m3u8")
+	}
+
+	// Audio track media playlist
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/audio_rock.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("audio_rock.m3u8: status = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "audio_rock_seg") {
+		t.Error("audio rock playlist should reference audio_rock_ segments")
+	}
+
+	// Audio track segment
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/audio_rock_seg0.ts", nil))
+	if w.Code != 200 {
+		t.Fatalf("audio_rock_seg0.ts: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if len(w.Body.Bytes()) == 0 {
+		t.Error("audio segment should have data")
+	}
+
+	// Unknown audio track → 404
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/audio_bogus.m3u8", nil))
+	if w.Code != 404 {
+		t.Errorf("unknown audio track: status = %d, want 404", w.Code)
+	}
+}
+
 func TestServerMetadataOpts_Nil(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	channelID := makeChannelID(pub)
@@ -1670,5 +2030,597 @@ func TestServerMetadataOpts_Nil(t *testing.T) {
 	}
 	if _, ok := doc["tags"]; ok {
 		t.Error("nil opts should not produce tags field")
+	}
+}
+
+// ---------- Video-Only (--no-audio) ----------
+
+func TestPMTVideoOnly(t *testing.T) {
+	m := &tsMuxer{}
+	var buf [tsPacketSize]byte
+	m.writePMTVideoOnly(buf[:])
+
+	pmt := buf[5:]
+
+	// section_length should be 18 (5+4+5+4, no audio stream entry)
+	secLen := int(pmt[1]&0x0F)<<8 | int(pmt[2])
+	if secLen != 18 {
+		t.Errorf("PMT video-only section_length = %d, want 18", secLen)
+	}
+
+	// Stream entry 1: H.264 video at offset 12
+	if pmt[12] != tsStreamTypeH264 {
+		t.Errorf("stream 1 type = 0x%02X, want 0x%02X (H.264)", pmt[12], tsStreamTypeH264)
+	}
+	vidPID := (uint16(pmt[13]&0x1F) << 8) | uint16(pmt[14])
+	if vidPID != tsPIDVideo {
+		t.Errorf("video PID = 0x%04X, want 0x%04X", vidPID, tsPIDVideo)
+	}
+
+	// No audio stream entry at offset 17 — should be CRC bytes, not AAC type
+	if pmt[17] == tsStreamTypeAAC {
+		t.Error("video-only PMT should not contain audio stream entry")
+	}
+
+	t.Logf("PMT video-only: section_length=%d, video PID=0x%04X", secLen, vidPID)
+}
+
+func TestNoAudio_SegmentHasNoAudioPackets(t *testing.T) {
+	h264 := &h264Settings{width: 320, height: 240, fps: 30, qp: 26}
+	state := &serverState{
+		seg:          newHLSSegmenter(3, 2),
+		muxer:        &tsMuxer{},
+		sps:          encodeSPS(h264),
+		pps:          encodePPS(h264),
+		aud:          encodeAUD(),
+		frame:        newFrame(320, 240),
+		h264:         h264,
+		channelName:  "TEST",
+		showUptime:   false,
+		fontScale:    0,
+		startTime:    time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC),
+		location:     time.UTC,
+		framesPerSeg: 60,
+		ptsPerFrame:  3000,
+		segDuration:  2.0,
+		segDurationI: 2,
+		noAudio:      true,
+	}
+
+	state.generateSegment()
+
+	seg := state.seg
+	if seg.seqNum < 1 {
+		t.Fatal("no segment generated")
+	}
+
+	// Check that no audio PID packets exist
+	idx := (seg.head - 1 + seg.ringSize) % seg.ringSize
+	data := seg.ring[idx].data
+	videoPkts := 0
+	audioPkts := 0
+	for i := 0; i+tsPacketSize <= len(data); i += tsPacketSize {
+		if data[i] != tsSyncByte {
+			t.Fatalf("lost TS sync at offset %d", i)
+		}
+		pid := (uint16(data[i+1]&0x1F) << 8) | uint16(data[i+2])
+		switch pid {
+		case tsPIDVideo:
+			videoPkts++
+		case tsPIDAudio:
+			audioPkts++
+		}
+	}
+
+	if videoPkts == 0 {
+		t.Error("no video TS packets found")
+	}
+	if audioPkts != 0 {
+		t.Errorf("video-only segment should have 0 audio packets, got %d", audioPkts)
+	}
+
+	// Verify PMT in the segment is video-only (section_length=18)
+	// PMT is the second TS packet (offset 188)
+	if len(data) >= 2*tsPacketSize {
+		pmtPkt := data[tsPacketSize : 2*tsPacketSize]
+		pmtSection := pmtPkt[5:]
+		secLen := int(pmtSection[1]&0x0F)<<8 | int(pmtSection[2])
+		if secLen != 18 {
+			t.Errorf("segment PMT section_length = %d, want 18 (video-only)", secLen)
+		}
+	}
+
+	t.Logf("Video-only segment: %d bytes, %d video packets, %d audio packets", len(data), videoPkts, audioPkts)
+}
+
+// ---------- EXT-X-PROGRAM-DATE-TIME ----------
+
+func TestProgramDateTime_InManifest(t *testing.T) {
+	seg := newHLSSegmenter(5, 2)
+	seg.programDateTime = true
+	seg.pushSegment([]byte("data-0"), 2.0)
+	time.Sleep(10 * time.Millisecond) // ensure different timestamps
+	seg.pushSegment([]byte("data-1"), 2.0)
+
+	manifest := seg.getManifest()
+
+	if !strings.Contains(manifest, "#EXT-X-PROGRAM-DATE-TIME:") {
+		t.Error("manifest should contain EXT-X-PROGRAM-DATE-TIME tag")
+	}
+
+	// Count occurrences — should have one per segment
+	count := strings.Count(manifest, "#EXT-X-PROGRAM-DATE-TIME:")
+	if count != 2 {
+		t.Errorf("expected 2 EXT-X-PROGRAM-DATE-TIME tags, got %d", count)
+	}
+
+	// Verify format: YYYY-MM-DDTHH:MM:SS.sssZ
+	for _, line := range strings.Split(manifest, "\n") {
+		if strings.HasPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:") {
+			ts := strings.TrimPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:")
+			if _, err := time.Parse("2006-01-02T15:04:05.000Z", ts); err != nil {
+				t.Errorf("invalid timestamp format %q: %v", ts, err)
+			}
+		}
+	}
+
+	t.Logf("Manifest with program-date-time:\n%s", manifest)
+}
+
+// ---------- Subtitle Tracks ----------
+
+func TestParseSubtitleTracks_Valid(t *testing.T) {
+	tracks, err := parseSubtitleTracks("clock,counter,lorem")
+	if err != nil {
+		t.Fatalf("parseSubtitleTracks: %v", err)
+	}
+	if len(tracks) != 3 {
+		t.Fatalf("tracks = %d, want 3", len(tracks))
+	}
+	if tracks[0].name != "clock" {
+		t.Errorf("track 0 = %q, want clock", tracks[0].name)
+	}
+}
+
+func TestParseSubtitleTracks_Empty(t *testing.T) {
+	tracks, err := parseSubtitleTracks("")
+	if err != nil || tracks != nil {
+		t.Errorf("empty = %v, %v; want nil, nil", tracks, err)
+	}
+}
+
+func TestGenerateSubtitleVTT_Clock(t *testing.T) {
+	now := time.Date(2026, 4, 11, 15, 30, 0, 0, time.UTC)
+	vtt := generateSubtitleVTT("clock", 0, 2, now)
+
+	if !strings.Contains(vtt, "WEBVTT") {
+		t.Error("missing WEBVTT header")
+	}
+	if !strings.Contains(vtt, "X-TIMESTAMP-MAP=") {
+		t.Error("missing X-TIMESTAMP-MAP")
+	}
+	if !strings.Contains(vtt, "15:30:00 UTC") {
+		t.Error("missing clock text")
+	}
+	t.Logf("Clock VTT:\n%s", vtt)
+}
+
+func TestGenerateSubtitleVTT_Counter(t *testing.T) {
+	vtt := generateSubtitleVTT("counter", 42, 2, time.Now())
+
+	if !strings.Contains(vtt, "Segment #42") {
+		t.Error("missing counter text")
+	}
+}
+
+func TestGenerateSubtitleVTT_Lorem(t *testing.T) {
+	vtt := generateSubtitleVTT("lorem", 0, 2, time.Now())
+
+	if !strings.Contains(vtt, "Lorem ipsum") {
+		t.Error("missing lorem text")
+	}
+}
+
+func TestGenerateSubtitleVTT_Empty(t *testing.T) {
+	vtt := generateSubtitleVTT("empty", 0, 2, time.Now())
+
+	if !strings.Contains(vtt, "WEBVTT") {
+		t.Error("missing WEBVTT header")
+	}
+	// Empty track produces valid VTT with empty cue text
+	if !strings.Contains(vtt, "-->") {
+		t.Error("missing time range even for empty track")
+	}
+}
+
+func TestSubtitleSegmenter(t *testing.T) {
+	seg := newSubtitleSegmenter(5, 2)
+	seg.segPrefix = "subs_clock_"
+	seg.pushSegment("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello\n", 2.0)
+
+	manifest := seg.getManifest()
+	if !strings.Contains(manifest, "#EXTM3U") {
+		t.Error("missing EXTM3U in manifest")
+	}
+	if !strings.Contains(manifest, "subs_clock_seg0.vtt") {
+		t.Error("missing VTT segment reference")
+	}
+
+	vtt := seg.getSegment(0)
+	if !strings.Contains(vtt, "Hello") {
+		t.Error("missing segment content")
+	}
+}
+
+func TestMasterPlaylist_WithSubtitles(t *testing.T) {
+	variants := []serverVariant{
+		{label: "720p", width: 1280, height: 720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+	}
+	subs := []serverSubtitleTrack{
+		{name: "clock", seg: newSubtitleSegmenter(5, 2)},
+		{name: "counter", seg: newSubtitleSegmenter(5, 2)},
+	}
+	m := masterPlaylist(variants, nil, subs, true)
+
+	if !strings.Contains(m, "#EXT-X-MEDIA:TYPE=SUBTITLES") {
+		t.Error("missing EXT-X-MEDIA TYPE=SUBTITLES")
+	}
+	if !strings.Contains(m, "GROUP-ID=\"subs\"") {
+		t.Error("missing GROUP-ID subs")
+	}
+	if !strings.Contains(m, "URI=\"subs_clock.m3u8\"") {
+		t.Error("missing subs_clock.m3u8 URI")
+	}
+	if !strings.Contains(m, "SUBTITLES=\"subs\"") {
+		t.Error("missing SUBTITLES group reference on STREAM-INF")
+	}
+	t.Logf("Master playlist with subtitles:\n%s", m)
+}
+
+func TestMasterPlaylist_WithAudioAndSubtitles(t *testing.T) {
+	variants := []serverVariant{
+		{label: "720p", width: 1280, height: 720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+	}
+	audio := []serverAudioTrack{
+		{name: "main", seg: newHLSSegmenter(5, 2)},
+	}
+	subs := []serverSubtitleTrack{
+		{name: "clock", seg: newSubtitleSegmenter(5, 2)},
+	}
+	m := masterPlaylist(variants, audio, subs, false)
+
+	if !strings.Contains(m, "#EXT-X-MEDIA:TYPE=AUDIO") {
+		t.Error("missing audio media")
+	}
+	if !strings.Contains(m, "#EXT-X-MEDIA:TYPE=SUBTITLES") {
+		t.Error("missing subtitle media")
+	}
+	if !strings.Contains(m, "AUDIO=\"audio\"") {
+		t.Error("missing AUDIO reference")
+	}
+	if !strings.Contains(m, "SUBTITLES=\"subs\"") {
+		t.Error("missing SUBTITLES reference")
+	}
+	t.Logf("Master playlist with both:\n%s", m)
+}
+
+func TestServerSubtitleEndpoints(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "public", false, nil)
+
+	seg720 := newHLSSegmenter(5, 2)
+	seg720.segPrefix = "720p_"
+	seg720.pushSegment([]byte("720p-data"), 2.0)
+
+	stClock := serverSubtitleTrack{
+		name:         "clock",
+		seg:          newSubtitleSegmenter(5, 2),
+		segDurationI: 2,
+	}
+	stClock.seg.segPrefix = "subs_clock_"
+	stClock.generateSubtitleSegment()
+
+	ch := &serverChannel{
+		channelID:   chID,
+		channelName: "Test",
+		privKey:     priv,
+		seg:         seg720,
+		variants: []serverVariant{
+			{label: "720p", width: 1280, height: 720, seg: seg720, bandwidth: 2000000, codecTag: "avc1.42c01f"},
+		},
+		subtitleTracks: []serverSubtitleTrack{stClock},
+	}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "", false, nil, "")
+
+	// Master playlist should reference subtitles
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("master playlist: status = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "subs_clock.m3u8") {
+		t.Error("master playlist missing subs_clock.m3u8")
+	}
+
+	// Subtitle media playlist
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_clock.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("subs_clock.m3u8: status = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "subs_clock_seg") {
+		t.Error("subtitle playlist should reference subs_clock_ segments")
+	}
+
+	// Subtitle VTT segment
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_clock_seg0.vtt", nil))
+	if w.Code != 200 {
+		t.Fatalf("subs_clock_seg0.vtt: status = %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/vtt") {
+		t.Errorf("Content-Type = %q, want text/vtt", ct)
+	}
+	if !strings.Contains(w.Body.String(), "WEBVTT") {
+		t.Error("VTT segment missing WEBVTT header")
+	}
+	if !strings.Contains(w.Body.String(), "X-TIMESTAMP-MAP") {
+		t.Error("VTT segment missing X-TIMESTAMP-MAP")
+	}
+
+	// Unknown subtitle track → 404
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_bogus.m3u8", nil))
+	if w.Code != 404 {
+		t.Errorf("unknown subtitle track: status = %d, want 404", w.Code)
+	}
+}
+
+func TestProgramDateTime_DisabledByDefault(t *testing.T) {
+	seg := newHLSSegmenter(5, 2)
+	seg.pushSegment([]byte("data"), 2.0)
+
+	manifest := seg.getManifest()
+
+	if strings.Contains(manifest, "#EXT-X-PROGRAM-DATE-TIME:") {
+		t.Error("manifest should NOT contain EXT-X-PROGRAM-DATE-TIME when disabled")
+	}
+}
+
+// ---------- Audio-Only Channel ----------
+
+func TestAudioOnly_MasterPlaylist(t *testing.T) {
+	// An audio-only channel (no video variants) should produce a master
+	// playlist with an audio-only STREAM-INF pointing to the default track.
+	audioTracks := []serverAudioTrack{
+		{name: "main", seg: newHLSSegmenter(5, 2)},
+	}
+	m := masterPlaylist(nil, audioTracks, nil, false)
+
+	if !strings.Contains(m, "#EXT-X-MEDIA:TYPE=AUDIO") {
+		t.Error("missing EXT-X-MEDIA TYPE=AUDIO")
+	}
+	if !strings.Contains(m, "#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS=\"mp4a.40.2\"") {
+		t.Error("missing audio-only STREAM-INF")
+	}
+	if strings.Contains(m, "RESOLUTION=") {
+		t.Error("audio-only STREAM-INF should NOT have RESOLUTION")
+	}
+	if !strings.Contains(m, "audio_main.m3u8") {
+		t.Error("audio-only STREAM-INF should point to audio_main.m3u8")
+	}
+	t.Logf("Audio-only master playlist:\n%s", m)
+}
+
+func TestAudioOnly_MultiTrack(t *testing.T) {
+	// Multiple audio tracks in audio-only mode.
+	audioTracks := []serverAudioTrack{
+		{name: "rock", seg: newHLSSegmenter(5, 2)},
+		{name: "jazz", seg: newHLSSegmenter(5, 2)},
+	}
+	m := masterPlaylist(nil, audioTracks, nil, false)
+
+	// Should have 2 EXT-X-MEDIA declarations
+	count := strings.Count(m, "#EXT-X-MEDIA:TYPE=AUDIO")
+	if count != 2 {
+		t.Errorf("expected 2 EXT-X-MEDIA, got %d", count)
+	}
+	// Audio-only STREAM-INF points to first (default) track
+	if !strings.Contains(m, "audio_rock.m3u8") {
+		t.Error("audio-only STREAM-INF should point to first track")
+	}
+}
+
+func TestAudioOnly_ServerEndpoint(t *testing.T) {
+	// A serverChannel with audioTracks but no variants/seg should serve
+	// a master playlist at stream.m3u8.
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Radio", "", priv, nil, "public", false, nil)
+
+	atMain := serverAudioTrack{
+		name:         "main",
+		seg:          newHLSSegmenter(5, 2),
+		muxer:        &tsMuxer{},
+		segDurationI: 2,
+	}
+	atMain.seg.segPrefix = "audio_main_"
+	atMain.generateAudioSegment()
+
+	ch := &serverChannel{
+		channelID:   chID,
+		channelName: "Radio",
+		privKey:     priv,
+		// No seg, no variants — audio-only
+		audioTracks: []serverAudioTrack{atMain},
+	}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Radio", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "", false, nil, "")
+
+	// stream.m3u8 → master playlist with audio-only STREAM-INF
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/stream.m3u8", nil))
+	if w.Code != 200 {
+		t.Fatalf("stream.m3u8: status = %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "mp4a.40.2") {
+		t.Error("master playlist missing audio codec")
+	}
+	if strings.Contains(body, "RESOLUTION=") {
+		t.Error("audio-only should not have RESOLUTION")
+	}
+
+	// Audio segments should be served
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/audio_main_seg0.ts", nil))
+	if w.Code != 200 {
+		t.Fatalf("audio segment: status = %d", w.Code)
+	}
+}
+
+func TestServerUseLegacyHTTP(t *testing.T) {
+	if !serverUseLegacyHTTP(&serverChannel{seg: newHLSSegmenter(5, 2)}) {
+		t.Fatal("basic single-channel stream should use legacy HTTP handler")
+	}
+	if serverUseLegacyHTTP(&serverChannel{audioTracks: []serverAudioTrack{{name: "main"}}}) {
+		t.Fatal("audio-only channel must use multi-channel HTTP handler")
+	}
+	if serverUseLegacyHTTP(&serverChannel{seg: newHLSSegmenter(5, 2), subtitleTracks: []serverSubtitleTrack{{name: "clock"}}}) {
+		t.Fatal("channels with subtitle tracks must use multi-channel HTTP handler")
+	}
+}
+
+// ---------- Mutual Exclusion ----------
+
+func TestParseAudioTracks_MutualExclusion(t *testing.T) {
+	// --audio-tracks and --no-audio can't both be set.
+	// This is enforced at the CLI level, but we test the parsing functions
+	// don't themselves conflict.
+	tracks, err := parseAudioTracks("rock,jazz")
+	if err != nil {
+		t.Fatalf("parseAudioTracks: %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("tracks = %d, want 2", len(tracks))
+	}
+	// The actual mutual exclusion check is in cmdServerTest:
+	// if len(audioTracks) > 0 && *noAudio { fatal(...) }
+}
+
+// ---------- Token on Audio/Subtitle Endpoints ----------
+
+func TestAudioTrack_TokenRequired(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "token", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.segPrefix = "720p_"
+	seg.pushSegment([]byte("data"), 2.0)
+
+	at := serverAudioTrack{
+		name:         "rock",
+		seg:          newHLSSegmenter(5, 2),
+		muxer:        &tsMuxer{},
+		segDurationI: 2,
+	}
+	at.seg.segPrefix = "audio_rock_"
+	at.generateAudioSegment()
+
+	ch := &serverChannel{
+		channelID:   chID,
+		privKey:     priv,
+		seg:         seg,
+		variants:    []serverVariant{{label: "720p", width: 1280, height: 720, seg: seg, bandwidth: 2000000, codecTag: "avc1.42c01f"}},
+		audioTracks: []serverAudioTrack{at},
+	}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "secret", true, nil, "")
+
+	// Audio playlist without token → 403
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/audio_rock.m3u8", nil))
+	if w.Code != 403 {
+		t.Errorf("no token audio playlist: status = %d, want 403", w.Code)
+	}
+
+	// Audio segment without token → 403
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/audio_rock_seg0.ts", nil))
+	if w.Code != 403 {
+		t.Errorf("no token audio segment: status = %d, want 403", w.Code)
+	}
+
+	// With token → 200
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/audio_rock.m3u8?token=secret", nil))
+	if w.Code != 200 {
+		t.Errorf("with token audio playlist: status = %d, want 200", w.Code)
+	}
+}
+
+func TestSubtitleTrack_TokenRequired(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(chID, "Test", "", priv, nil, "token", false, nil)
+
+	seg := newHLSSegmenter(5, 2)
+	seg.segPrefix = "720p_"
+	seg.pushSegment([]byte("data"), 2.0)
+
+	st := serverSubtitleTrack{
+		name:         "clock",
+		seg:          newSubtitleSegmenter(5, 2),
+		segDurationI: 2,
+	}
+	st.seg.segPrefix = "subs_clock_"
+	st.generateSubtitleSegment()
+
+	ch := &serverChannel{
+		channelID:      chID,
+		privKey:        priv,
+		seg:            seg,
+		variants:       []serverVariant{{label: "720p", width: 1280, height: 720, seg: seg, bandwidth: 2000000, codecTag: "avc1.42c01f"}},
+		subtitleTracks: []serverSubtitleTrack{st},
+	}
+	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
+
+	mux := http.NewServeMux()
+	serverMultiHTTP(mux, []*serverChannel{ch}, nil, nil, nil, "secret", true, nil, "")
+
+	// Subtitle playlist without token → 403
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_clock.m3u8", nil))
+	if w.Code != 403 {
+		t.Errorf("no token subtitle playlist: status = %d, want 403", w.Code)
+	}
+
+	// Subtitle VTT without token → 403
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_clock_seg0.vtt", nil))
+	if w.Code != 403 {
+		t.Errorf("no token subtitle VTT: status = %d, want 403", w.Code)
+	}
+
+	// With token → 200
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_clock.m3u8?token=secret", nil))
+	if w.Code != 200 {
+		t.Errorf("with token subtitle playlist: status = %d, want 200", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_clock_seg0.vtt?token=secret", nil))
+	if w.Code != 200 {
+		t.Errorf("with token subtitle VTT: status = %d, want 200", w.Code)
 	}
 }

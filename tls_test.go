@@ -868,3 +868,238 @@ func generateSelfSignedCert(t *testing.T) (certPath, keyPath string) {
 
 	return certPath, keyPath
 }
+
+// generateSelfSignedTLSCert creates an in-memory self-signed *tls.Certificate
+// for testing certStore operations without filesystem.
+func generateSelfSignedTLSCert(t *testing.T, hostname string) *tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: hostname},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		DNSNames:     []string{hostname},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leaf, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return &tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  key,
+		Leaf:        leaf,
+	}
+}
+
+// ---------- certStore ----------
+
+func TestCertStore_NewDefaults(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+	if cs.dataDir != "./certs" {
+		t.Errorf("dataDir = %q, want %q", cs.dataDir, "./certs")
+	}
+	if cs.directoryURL != acmeProductionDirectory {
+		t.Errorf("directoryURL = %q, want production", cs.directoryURL)
+	}
+}
+
+func TestCertStore_NewStaging(t *testing.T) {
+	cs := newCertStore("", "", "", true)
+	if cs.directoryURL != acmeStagingDirectory {
+		t.Errorf("directoryURL = %q, want staging", cs.directoryURL)
+	}
+}
+
+func TestCertStore_GetCertificate_NoSNI(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+
+	_, err := cs.GetCertificate(&tls.ClientHelloInfo{ServerName: ""})
+	if err == nil {
+		t.Error("expected error for empty ServerName")
+	}
+	if !strings.Contains(err.Error(), "no SNI") {
+		t.Errorf("error = %q, want mention of SNI", err.Error())
+	}
+}
+
+func TestCertStore_GetCertificate_Unknown(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+
+	_, err := cs.GetCertificate(&tls.ClientHelloInfo{ServerName: "unknown.tv"})
+	if err == nil {
+		t.Error("expected error for unknown hostname")
+	}
+	if !strings.Contains(err.Error(), "unknown.tv") {
+		t.Errorf("error = %q, want hostname in message", err.Error())
+	}
+}
+
+func TestCertStore_AddManualCert(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+
+	cert := generateSelfSignedTLSCert(t, "demo.tv")
+	cs.AddManualCert("demo.tv", cert)
+
+	got, err := cs.GetCertificate(&tls.ClientHelloInfo{ServerName: "demo.tv"})
+	if err != nil {
+		t.Fatalf("GetCertificate failed: %v", err)
+	}
+	if got != cert {
+		t.Error("returned certificate does not match the one added")
+	}
+}
+
+func TestCertStore_AddManualCert_Multiple(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+
+	hostnames := []string{"alpha.tv", "beta.tv", "gamma.tv"}
+	certs := make(map[string]*tls.Certificate)
+	for _, h := range hostnames {
+		cert := generateSelfSignedTLSCert(t, h)
+		certs[h] = cert
+		cs.AddManualCert(h, cert)
+	}
+
+	for _, h := range hostnames {
+		got, err := cs.GetCertificate(&tls.ClientHelloInfo{ServerName: h})
+		if err != nil {
+			t.Fatalf("GetCertificate(%q): %v", h, err)
+		}
+		if got != certs[h] {
+			t.Errorf("GetCertificate(%q) returned wrong cert", h)
+		}
+	}
+}
+
+func TestCertStore_Hostnames(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+
+	hostnames := []string{"alpha.tv", "beta.tv", "gamma.tv"}
+	for _, h := range hostnames {
+		cert := generateSelfSignedTLSCert(t, h)
+		cs.AddManualCert(h, cert)
+	}
+
+	got := cs.Hostnames()
+	if len(got) != 3 {
+		t.Fatalf("Hostnames() returned %d entries, want 3", len(got))
+	}
+
+	// Verify all expected hostnames are present (order is unspecified).
+	seen := make(map[string]bool)
+	for _, h := range got {
+		seen[h] = true
+	}
+	for _, h := range hostnames {
+		if !seen[h] {
+			t.Errorf("Hostnames() missing %q", h)
+		}
+	}
+}
+
+func TestCertStore_TLSConfig(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+
+	cfg := cs.TLSConfig()
+	if cfg == nil {
+		t.Fatal("TLSConfig() returned nil")
+	}
+	if cfg.GetCertificate == nil {
+		t.Error("TLSConfig().GetCertificate is nil")
+	}
+	if cfg.MinVersion != tls.VersionTLS12 {
+		t.Errorf("MinVersion = %d, want TLS 1.2 (%d)", cfg.MinVersion, tls.VersionTLS12)
+	}
+}
+
+func TestCertStore_HTTPHandler_Challenge(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+
+	// Create a manager for a hostname and provision a challenge.
+	mgr := cs.getOrCreateManager("demo.tv")
+	mgr.challengeMu.Lock()
+	mgr.challenges["store-test-token"] = "store-test-token.thumbprint456"
+	mgr.challengeMu.Unlock()
+
+	handler := cs.HTTPHandler()
+
+	req := httptest.NewRequest("GET", "/.well-known/acme-challenge/store-test-token", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if w.Body.String() != "store-test-token.thumbprint456" {
+		t.Errorf("body = %q", w.Body.String())
+	}
+}
+
+func TestCertStore_HTTPHandler_Redirect(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+	handler := cs.HTTPHandler()
+
+	req := httptest.NewRequest("GET", "/some/page?q=1", nil)
+	req.Host = "demo.tv"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMovedPermanently {
+		t.Errorf("status = %d, want 301", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if loc != "https://demo.tv/some/page?q=1" {
+		t.Errorf("redirect Location = %q, want %q", loc, "https://demo.tv/some/page?q=1")
+	}
+}
+
+func TestCertStore_HTTPHandler_RedirectPreservesHost(t *testing.T) {
+	cs := newCertStore("", "", "", false)
+	handler := cs.HTTPHandler()
+
+	// First request with Host: alpha.tv
+	req1 := httptest.NewRequest("GET", "/path", nil)
+	req1.Host = "alpha.tv"
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", w1.Code)
+	}
+	loc1 := w1.Header().Get("Location")
+	if loc1 != "https://alpha.tv/path" {
+		t.Errorf("redirect for alpha.tv = %q", loc1)
+	}
+
+	// Second request with Host: beta.tv
+	req2 := httptest.NewRequest("GET", "/path", nil)
+	req2.Host = "beta.tv"
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", w2.Code)
+	}
+	loc2 := w2.Header().Get("Location")
+	if loc2 != "https://beta.tv/path" {
+		t.Errorf("redirect for beta.tv = %q", loc2)
+	}
+
+	// Verify they're different (the key multi-domain behavior).
+	if loc1 == loc2 {
+		t.Error("both redirects produced the same URL — Host header not used for redirect")
+	}
+}

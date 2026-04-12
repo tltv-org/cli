@@ -48,6 +48,13 @@ func cmdRelay(args []string) {
 	// Cache flags
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
+	// Buffer flags
+	bufferStr := fs.String("buffer", os.Getenv("BUFFER"), "proactive buffer duration (e.g. 2h, 30m)")
+	fs.StringVar(bufferStr, "b", os.Getenv("BUFFER"), "alias for --buffer")
+	delayStr := fs.String("delay", os.Getenv("DELAY"), "serve with time delay (e.g. 30m, requires --buffer)")
+	bufferMaxMemStr := fs.String("buffer-max-memory", os.Getenv("BUFFER_MAX_MEMORY"), "max total buffer memory (default: 1g)")
+	fs.StringVar(bufferMaxMemStr, "B", os.Getenv("BUFFER_MAX_MEMORY"), "alias for --buffer-max-memory")
+
 	// Viewer (parsed manually before fs.Parse)
 	var viewer viewerConfig
 
@@ -115,6 +122,10 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --cache              enable in-memory HLS stream cache\n")
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries  max cached items (default: 100)\n")
 		fmt.Fprintf(os.Stderr, "      --cache-stats N      log cache stats every N seconds (0 = off)\n\n")
+		fmt.Fprintf(os.Stderr, "Buffer:\n")
+		fmt.Fprintf(os.Stderr, "  -b, --buffer DUR         proactive buffer duration (e.g. 2h, 30m)\n")
+		fmt.Fprintf(os.Stderr, "      --delay DUR          serve stream with time delay (requires --buffer)\n")
+		fmt.Fprintf(os.Stderr, "  -B, --buffer-max-memory  max total buffer memory (default: 1g)\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                enable TLS (autocert via Let's Encrypt if no cert/key)\n")
 		fmt.Fprintf(os.Stderr, "      --tls-cert FILE      TLS certificate file (PEM)\n")
@@ -135,7 +146,7 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: CHANNELS, NODE, CONFIG, LISTEN, HOSTNAME,\n")
-		fmt.Fprintf(os.Stderr, "PEERS, GOSSIP=1,\n")
+		fmt.Fprintf(os.Stderr, "PEERS, GOSSIP=1, BUFFER, DELAY, BUFFER_MAX_MEMORY,\n")
 		fmt.Fprintf(os.Stderr, "TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
 		fmt.Fprintf(os.Stderr, "META_POLL, GUIDE_POLL, PEER_POLL, MAX_PEERS, STALE_DAYS,\n")
@@ -173,6 +184,37 @@ func cmdRelay(args []string) {
 	peerPoll, err := time.ParseDuration(*peerPollStr)
 	if err != nil {
 		fatal("invalid --peer-poll: %v", err)
+	}
+
+	// Parse buffer/delay durations
+	var bufferDur, delayDur time.Duration
+	if *bufferStr != "" {
+		bufferDur, err = time.ParseDuration(*bufferStr)
+		if err != nil {
+			fatal("invalid --buffer: %v", err)
+		}
+		if bufferDur < time.Second {
+			fatal("--buffer must be at least 1s")
+		}
+	}
+	if *delayStr != "" {
+		delayDur, err = time.ParseDuration(*delayStr)
+		if err != nil {
+			fatal("invalid --delay: %v", err)
+		}
+		if bufferDur == 0 {
+			fatal("--delay requires --buffer")
+		}
+		if delayDur >= bufferDur {
+			fatal("--delay must be less than --buffer")
+		}
+	}
+	var bufferMaxMem int64 = 1 << 30 // default 1 GB
+	if *bufferMaxMemStr != "" {
+		bufferMaxMem, err = parseMemorySize(*bufferMaxMemStr)
+		if err != nil {
+			fatal("invalid --buffer-max-memory: %v", err)
+		}
 	}
 
 	// Parse --peers (tltv:// URIs for external peer exchange)
@@ -238,6 +280,15 @@ func cmdRelay(args []string) {
 		}
 		if *cacheEnabled {
 			cfg["cache"] = true
+		}
+		if *bufferStr != "" {
+			cfg["buffer"] = *bufferStr
+		}
+		if *delayStr != "" {
+			cfg["delay"] = *delayStr
+		}
+		if *bufferMaxMemStr != "" {
+			cfg["buffer_max_memory"] = *bufferMaxMemStr
 		}
 		if viewer.enabled {
 			if viewer.selector != "" {
@@ -355,7 +406,7 @@ func cmdRelay(args []string) {
 			continue
 		}
 
-		registry.UpdateChannel(t.ChannelID, res.Raw, res.Doc, t.Hints)
+		registry.UpdateChannel(t.ChannelID, res.Raw, res.Doc, t.Hints, res.Hint)
 		relayTargets = append(relayTargets, t)
 
 		name := getString(res.Doc, "name")
@@ -373,9 +424,7 @@ func cmdRelay(args []string) {
 			logErrorf("guide %s: %v", t.ChannelID, err)
 			continue
 		}
-		if raw != nil {
-			registry.UpdateGuide(t.ChannelID, raw, entries)
-		}
+		registry.UpdateGuide(t.ChannelID, raw, entries)
 	}
 
 	logInfof("%d channels relaying", len(relayTargets))
@@ -387,6 +436,26 @@ func cmdRelay(args []string) {
 		logInfof("HLS cache enabled (max %d entries)", *cacheMaxEntries)
 	}
 
+	// Set up buffer manager (--buffer)
+	var bufMgr *relayBufferManager
+	if bufferDur > 0 {
+		bufMgr = newRelayBufferManager(bufferMaxMem, delayDur)
+		bufMgr.bufferDuration = bufferDur
+		// Estimate max segments per channel: buffer duration / segment target duration.
+		// Use 6s as default segment duration estimate (adjusted per channel once manifest is fetched).
+		estMaxSegs := int(bufferDur.Seconds() / 6)
+		if estMaxSegs < 10 {
+			estMaxSegs = 10
+		}
+		for _, t := range relayTargets {
+			bufMgr.AddBuffer(t.ChannelID, estMaxSegs)
+		}
+		logInfof("buffer enabled: %s per channel, max %d MB total", bufferDur, bufferMaxMem>>20)
+		if delayDur > 0 {
+			logInfof("delay: %s", delayDur)
+		}
+	}
+
 	// Set up external peer registry (--peers)
 	var peerReg *peerRegistry
 	if len(extPeerTargets) > 0 {
@@ -395,7 +464,7 @@ func cmdRelay(args []string) {
 	}
 
 	// Start HTTP server
-	server := newRelayServer(registry, client, cache, peerReg)
+	server := newRelayServer(registry, client, cache, peerReg, bufMgr)
 
 	// Embed viewer
 	var viewerChannelName string
@@ -515,7 +584,7 @@ func cmdRelay(args []string) {
 	}
 
 	if metaPoll > 0 {
-		go relayMetadataPollLoop(ctx, metaPoll, client, registry)
+		go relayMetadataPollLoop(ctx, metaPoll, client, registry, bufMgr)
 	}
 	if guidePoll > 0 {
 		go relayGuidePollLoop(ctx, guidePoll, client, registry)
@@ -532,11 +601,18 @@ func cmdRelay(args []string) {
 		go peerPollLoop(ctx, client, extPeerTargets, peerReg, 5*time.Minute)
 	}
 
+	// Start buffer fetch goroutines (one per buffered channel)
+	if bufMgr != nil {
+		for _, t := range relayTargets {
+			bufMgr.StartBuffering(ctx, t.ChannelID, registry, client.http)
+		}
+	}
+
 	// Config watcher — periodically check for config changes.
 	// Reloadable: channels, node (re-discover and sync with registry).
 	if *configPath != "" {
 		go configReloadLoop(ctx, newConfigWatcher(*configPath), func(cfg map[string]interface{}) {
-			relayReloadConfig(cfg, client, registry)
+			relayReloadConfig(ctx, cfg, client, registry, bufMgr)
 		})
 	}
 
@@ -558,7 +634,7 @@ func cmdRelay(args []string) {
 // relayMetadataPollLoop periodically re-fetches and verifies metadata.
 // Iterates registry.ListChannels() each cycle so dynamically-added channels
 // (from config hot-reload) are automatically included.
-func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *Client, registry *relayRegistry) {
+func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *Client, registry *relayRegistry, bufMgr *relayBufferManager) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -572,15 +648,32 @@ func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *
 					continue
 				}
 
-				res, err := fetchAndVerifyMetadata(client, ch.ChannelID, ch.Hints)
+				currentHints := ch.Hints
+				res, err := fetchAndVerifyMetadata(client, ch.ChannelID, currentHints)
 				if err != nil {
-					logErrorf("meta poll %s: %v", ch.ChannelID, err)
-					continue
+					// Try failover: enrich hints from cached metadata origins.
+					enriched := relayEnrichHints(ch)
+					if len(enriched) > len(ch.Hints) {
+						logInfof("meta poll %s: primary hints failed, trying %d origin(s)", ch.ChannelID, len(enriched)-len(ch.Hints))
+						res, err = fetchAndVerifyMetadata(client, ch.ChannelID, enriched)
+						if err == nil {
+							currentHints = enriched
+						}
+					}
+					if err != nil {
+						logErrorf("meta poll %s: %v", ch.ChannelID, err)
+						continue
+					}
+					// Failover succeeded — update stored hints to include origins.
+					logInfof("meta poll %s: failover to origin succeeded", ch.ChannelID)
 				}
 
 				if res.IsMigration {
 					logInfof("channel %s has migrated to %s, stopping relay", ch.ChannelID, res.MigratedTo)
 					registry.StoreMigration(ch.ChannelID, res.Raw)
+					if bufMgr != nil {
+						bufMgr.RemoveBuffer(ch.ChannelID)
+					}
 					continue
 				}
 
@@ -588,18 +681,35 @@ func relayMetadataPollLoop(ctx context.Context, interval time.Duration, client *
 				if err := checkChannelAccess(res.Doc); err != nil {
 					logInfof("channel %s now %s, stopping relay", ch.ChannelID, err)
 					registry.RemoveChannel(ch.ChannelID)
+					if bufMgr != nil {
+						bufMgr.RemoveBuffer(ch.ChannelID)
+					}
 					continue
 				}
 
-				registry.UpdateChannel(ch.ChannelID, res.Raw, res.Doc, ch.Hints)
+				// Enrich stored hints with origins from metadata for future failover.
+				updatedHints := relayMergeOriginHints(currentHints, res.Doc)
+				registry.UpdateChannel(ch.ChannelID, res.Raw, res.Doc, updatedHints, res.Hint)
 			}
 		}
 	}
 }
 
+func relayHintsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // relayReloadConfig applies a reloaded config to a running relay.
 // Reloadable: channels, node — re-discovers targets and syncs the registry.
-func relayReloadConfig(cfg map[string]interface{}, client *Client, registry *relayRegistry) {
+func relayReloadConfig(ctx context.Context, cfg map[string]interface{}, client *Client, registry *relayRegistry, bufMgr *relayBufferManager) {
 	var channels, nodes []string
 	if ch, ok := configGetStringSlice(cfg, "channels"); ok {
 		channels = ch
@@ -626,11 +736,13 @@ func relayReloadConfig(cfg map[string]interface{}, client *Client, registry *rel
 		newIDs[t.ChannelID] = true
 	}
 
-	// Add new channels
+	// Add new channels and refresh hints for existing ones.
 	added := 0
+	updated := 0
 	for _, t := range targets {
-		if registry.GetChannel(t.ChannelID) != nil {
-			continue // already relaying
+		existing := registry.GetChannel(t.ChannelID)
+		if existing != nil && relayHintsEqual(existing.Hints, t.Hints) {
+			continue
 		}
 		res, err := fetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
 		if err != nil {
@@ -644,10 +756,19 @@ func relayReloadConfig(cfg map[string]interface{}, client *Client, registry *rel
 			logErrorf("config reload: skip %s: %v", t.ChannelID, err)
 			continue
 		}
-		registry.UpdateChannel(t.ChannelID, res.Raw, res.Doc, t.Hints)
+		registry.UpdateChannel(t.ChannelID, res.Raw, res.Doc, t.Hints, res.Hint)
+		if existing == nil && bufMgr != nil {
+			bufMgr.AddBuffer(t.ChannelID, 0)
+			bufMgr.StartBuffering(ctx, t.ChannelID, registry, client.http)
+		}
 		name := getString(res.Doc, "name")
-		logInfof("config reload: added %s %s", t.ChannelID, name)
-		added++
+		if existing == nil {
+			logInfof("config reload: added %s %s", t.ChannelID, name)
+			added++
+		} else {
+			logInfof("config reload: updated hints for %s %s", t.ChannelID, name)
+			updated++
+		}
 	}
 
 	// Remove channels no longer in config
@@ -658,13 +779,16 @@ func relayReloadConfig(cfg map[string]interface{}, client *Client, registry *rel
 		}
 		if !newIDs[ch.ChannelID] {
 			registry.RemoveChannel(ch.ChannelID)
+			if bufMgr != nil {
+				bufMgr.RemoveBuffer(ch.ChannelID)
+			}
 			logInfof("config reload: removed %s", ch.ChannelID)
 			removed++
 		}
 	}
 
-	if added > 0 || removed > 0 {
-		logInfof("config reloaded: %d added, %d removed, %d total", added, removed, registry.ChannelCount())
+	if added > 0 || updated > 0 || removed > 0 {
+		logInfof("config reloaded: %d added, %d updated, %d removed, %d total", added, updated, removed, registry.ChannelCount())
 	}
 }
 
@@ -687,12 +811,8 @@ func relayGuidePollLoop(ctx context.Context, interval time.Duration, client *Cli
 					logErrorf("guide poll %s: %v", ch.ChannelID, err)
 					continue
 				}
-				if raw != nil {
-					registry.UpdateGuide(ch.ChannelID, raw, entries)
-				}
+				registry.UpdateGuide(ch.ChannelID, raw, entries)
 			}
 		}
 	}
 }
-
-

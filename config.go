@@ -45,19 +45,17 @@ func configKeyToFlag(key string) string {
 // Returns the list of applied config keys.
 func applyConfigToFlags(fs *flag.FlagSet, cfg map[string]interface{}) []string {
 	// Build set of explicitly-set flags (including aliases).
-	// When a user sets -k, Visit includes only "-k" but not "--key".
-	// We detect aliases by marking all flags that share the same default
-	// AND current value as any explicitly-set flag.
+	// Aliases are multiple flag names bound to the same underlying Value.
+	aliasGroups := make(map[flag.Value][]string)
+	fs.VisitAll(func(f *flag.Flag) {
+		aliasGroups[f.Value] = append(aliasGroups[f.Value], f.Name)
+	})
+
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
-		explicit[f.Name] = true
-		val := f.Value.String()
-		def := f.DefValue
-		fs.VisitAll(func(af *flag.Flag) {
-			if af.DefValue == def && af.Value.String() == val {
-				explicit[af.Name] = true
-			}
-		})
+		for _, name := range aliasGroups[f.Value] {
+			explicit[name] = true
+		}
 	})
 
 	var applied []string

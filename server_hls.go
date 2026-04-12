@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // HLS live segmenter with sliding-window playlist (RFC 8216).
@@ -11,9 +12,10 @@ import (
 
 // hlsSegment holds one MPEG-TS segment in memory.
 type hlsSegment struct {
-	seqNum   uint64
-	data     []byte
-	duration float64
+	seqNum    uint64
+	data      []byte
+	duration  float64
+	startTime time.Time // wall-clock time when segment was generated (for EXT-X-PROGRAM-DATE-TIME)
 }
 
 // hlsSegmenter manages a ring buffer of HLS segments and generates m3u8 playlists.
@@ -22,11 +24,12 @@ type hlsSegmenter struct {
 	ring           []hlsSegment
 	ringSize       int
 	targetDuration int
-	head           int    // next write position in ring
-	seqNum         uint64 // next sequence number to assign
-	count          int    // segments currently in ring (0 to ringSize)
-	manifest       string // cached manifest string
-	segPrefix      string // segment filename prefix (e.g. "720p_" for variant segments)
+	head            int    // next write position in ring
+	seqNum          uint64 // next sequence number to assign
+	count           int    // segments currently in ring (0 to ringSize)
+	manifest        string // cached manifest string
+	segPrefix       string // segment filename prefix (e.g. "720p_" for variant segments)
+	programDateTime bool   // include EXT-X-PROGRAM-DATE-TIME tags in manifest
 }
 
 func newHLSSegmenter(ringSize, targetDuration int) *hlsSegmenter {
@@ -43,9 +46,10 @@ func (s *hlsSegmenter) pushSegment(data []byte, duration float64) {
 	defer s.mu.Unlock()
 
 	seg := hlsSegment{
-		seqNum:   s.seqNum,
-		data:     data,
-		duration: duration,
+		seqNum:    s.seqNum,
+		data:      data,
+		duration:  duration,
+		startTime: time.Now().UTC(),
 	}
 	s.ring[s.head] = seg
 	s.head = (s.head + 1) % s.ringSize
@@ -75,6 +79,9 @@ func (s *hlsSegmenter) rebuildManifest() {
 	for i := 0; i < s.count; i++ {
 		idx := (s.head - s.count + i + s.ringSize) % s.ringSize
 		seg := &s.ring[idx]
+		if s.programDateTime && !seg.startTime.IsZero() {
+			fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:%s\n", seg.startTime.Format("2006-01-02T15:04:05.000Z"))
+		}
 		fmt.Fprintf(&b, "#EXTINF:%.6f,\n", seg.duration)
 		fmt.Fprintf(&b, "%sseg%d.ts\n", s.segPrefix, seg.seqNum)
 	}

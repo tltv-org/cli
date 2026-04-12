@@ -104,13 +104,19 @@ or M3U attribute. The token is never included in signed metadata — only the
 | `--stream` | `STREAM` | | Channel source: HLS URL, M3U, JSON, or directory |
 | `--guide` | `GUIDE` | | Guide source: XMLTV or JSON |
 | `-n`, `--name` | `NAME` | | Channel name (single-stream mode only) |
+| `--description` | `DESCRIPTION` | | Channel description (CLI default, source overrides) |
+| `--tags` | `TAGS` | | Comma-separated tags, max 5 (CLI default, source overrides) |
+| `--language` | `LANGUAGE` | | ISO 639-1 language code (CLI default, source overrides) |
+| `--timezone` | `TIMEZONE` | | IANA timezone name for metadata |
+| `--icon` | `ICON` | *(TLTV logo)* | Icon file (PNG, JPEG, SVG). Default: built-in TLTV logo. |
 | `--on-demand` | `ON_DEMAND=1` | off | Mark all channels as on-demand |
 | `--poll` | `POLL` | `60s` | Source re-poll interval |
 | `-l`, `--listen` | `LISTEN` | `:8000` | Listen address (`:443` with `--tls`) |
 | `-k`, `--keys-dir` | `KEYS_DIR` | `/data/keys` | Key storage directory |
-| `-H`, `--hostname` | `HOSTNAME` | | Public `host:port` for origins field |
+| `-H`, `--hostname` | `HOSTNAME` | | Public `host:port` for origins field. Omit to create a private origin that relays cannot discover. |
 | `-P`, `--peers` | `PEERS` | | `tltv://` URIs to advertise in peer exchange |
 | `-g`, `--gossip` | `GOSSIP=1` | off | Re-advertise gossip-discovered channels |
+| `--proxy` | `PROXY` | | Proxy URL (`socks5://`, `http://`, `https://`) for upstream connections |
 | `--config` | `CONFIG` | | Config file path (JSON) |
 | `--dump-config` | | | Print resolved config as JSON and exit |
 | `--cache` | `CACHE=1` | off | Enable in-memory response cache |
@@ -178,6 +184,9 @@ volumes:
 
 - **Set `HOSTNAME` explicitly in Docker.** Docker sets `HOSTNAME` to the container
   ID by default, which would be published in the origins field of signed metadata.
+- **Private origins.** Omit `--hostname` to run a private origin. Without a
+  hostname, signed metadata contains no `origins` field, so relays and peers
+  cannot discover the bridge's address. Viewers must be given the address directly.
 - **Mount `/data/keys`** to persist channel keypairs across container restarts.
   Without a volume, channels get new identities on every restart.
 - **Keys are per-upstream-ID.** The bridge maps each source channel's ID to a

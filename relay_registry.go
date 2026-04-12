@@ -156,16 +156,18 @@ func (r *relayRegistry) ListGossipPeers() []peerEntry {
 
 // UpdateChannel adds or updates a relayed channel with verified metadata.
 // The raw bytes are served verbatim; the doc is used for field extraction only.
-func (r *relayRegistry) UpdateChannel(channelID string, raw []byte, doc map[string]interface{}, hints []string) {
+func (r *relayRegistry) UpdateChannel(channelID string, raw []byte, doc map[string]interface{}, hints []string, streamHint ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	name := getString(doc, "name")
 
-	// Pick best stream hint (first available)
-	streamHint := ""
-	if len(hints) > 0 {
-		streamHint = hints[0]
+	selectedStreamHint := ""
+	if len(streamHint) > 0 {
+		selectedStreamHint = streamHint[0]
+	}
+	if selectedStreamHint == "" && len(hints) > 0 {
+		selectedStreamHint = hints[0]
 	}
 
 	// Preserve existing guide if we have one
@@ -174,16 +176,21 @@ func (r *relayRegistry) UpdateChannel(channelID string, raw []byte, doc map[stri
 	if old, ok := r.channels[channelID]; ok {
 		guide = old.Guide
 		guideEntries = old.GuideEntries
+		if selectedStreamHint == "" {
+			selectedStreamHint = old.StreamHint
+		}
 	}
+
+	hintsCopy := append([]string(nil), hints...)
 
 	r.channels[channelID] = &relayRegisteredChannel{
 		ChannelID:    channelID,
 		Name:         name,
-		Hints:        hints,
+		Hints:        hintsCopy,
 		Metadata:     raw,
 		Guide:        guide,
 		GuideEntries: guideEntries,
-		StreamHint:   streamHint,
+		StreamHint:   selectedStreamHint,
 		LastVerified: time.Now(),
 	}
 }
@@ -202,7 +209,7 @@ func (r *relayRegistry) UpdateGuide(channelID string, raw []byte, entries []guid
 	updated := &relayRegisteredChannel{
 		ChannelID:    old.ChannelID,
 		Name:         old.Name,
-		Hints:        old.Hints,
+		Hints:        append([]string(nil), old.Hints...),
 		Metadata:     old.Metadata,
 		Guide:        raw,
 		GuideEntries: entries,

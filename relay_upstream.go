@@ -10,6 +10,7 @@ import (
 type fetchResult struct {
 	Raw         []byte                 // exact bytes from upstream (served verbatim)
 	Doc         map[string]interface{} // parsed document (for field extraction)
+	Hint        string                 // upstream hint that succeeded
 	IsMigration bool
 	MigratedTo  string // only if IsMigration
 }
@@ -49,6 +50,7 @@ func fetchAndVerifyMetadata(client *Client, channelID string, hints []string) (*
 			return &fetchResult{
 				Raw:         body,
 				Doc:         doc,
+				Hint:        hint,
 				IsMigration: true,
 				MigratedTo:  to,
 			}, nil
@@ -60,7 +62,7 @@ func fetchAndVerifyMetadata(client *Client, channelID string, hints []string) (*
 			continue
 		}
 
-		return &fetchResult{Raw: body, Doc: doc}, nil
+		return &fetchResult{Raw: body, Doc: doc, Hint: hint}, nil
 	}
 
 	if lastErr != nil {
@@ -268,4 +270,63 @@ func appendUnique(slice []string, s string) []string {
 		}
 	}
 	return append(slice, s)
+}
+
+// relayEnrichHints builds an enriched hint list from a channel's cached metadata
+// by extracting the origins field. Returns the original hints + any new origins.
+// Used for upstream failover when primary hints are unreachable.
+func relayEnrichHints(ch *relayRegisteredChannel) []string {
+	if len(ch.Metadata) == 0 {
+		return ch.Hints
+	}
+
+	doc, err := readDocumentFromString(string(ch.Metadata))
+	if err != nil {
+		return ch.Hints
+	}
+
+	origins := extractOrigins(doc)
+	if len(origins) == 0 {
+		return ch.Hints
+	}
+
+	// Build enriched list: original hints first, then new origins.
+	enriched := make([]string, len(ch.Hints))
+	copy(enriched, ch.Hints)
+	seen := make(map[string]bool, len(enriched))
+	for _, h := range enriched {
+		seen[normalizeOriginHost(h)] = true
+	}
+	for _, o := range origins {
+		norm := normalizeOriginHost(o)
+		if !seen[norm] {
+			enriched = append(enriched, norm)
+			seen[norm] = true
+		}
+	}
+	return enriched
+}
+
+// relayMergeOriginHints merges origins from metadata into existing hints.
+// Called on every successful metadata poll to keep hints enriched for failover.
+func relayMergeOriginHints(hints []string, doc map[string]interface{}) []string {
+	origins := extractOrigins(doc)
+	if len(origins) == 0 {
+		return hints
+	}
+
+	merged := make([]string, len(hints))
+	copy(merged, hints)
+	seen := make(map[string]bool, len(merged))
+	for _, h := range merged {
+		seen[normalizeOriginHost(h)] = true
+	}
+	for _, o := range origins {
+		norm := normalizeOriginHost(o)
+		if !seen[norm] {
+			merged = append(merged, norm)
+			seen[norm] = true
+		}
+	}
+	return merged
 }

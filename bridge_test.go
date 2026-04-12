@@ -1580,6 +1580,60 @@ func TestBridgeUpdateGuide(t *testing.T) {
 	}
 }
 
+func TestBridgeUpdateGuide_ClearsMissingChannels(t *testing.T) {
+	dir := t.TempDir()
+	r := newBridgeRegistry(dir, "")
+	if err := r.UpdateChannels([]bridgeChannel{{ID: "src1", Name: "Test Channel", Stream: "http://example.com/stream.m3u8"}}); err != nil {
+		t.Fatalf("UpdateChannels: %v", err)
+	}
+
+	r.UpdateGuide(map[string][]guideEntry{
+		"src1": {{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "Show A"}},
+	})
+	if got := len(r.ListChannels()[0].Guide); got != 1 {
+		t.Fatalf("initial guide entries = %d, want 1", got)
+	}
+
+	r.UpdateGuide(map[string][]guideEntry{})
+	ch := r.ListChannels()[0]
+	if got := len(ch.Guide); got != 0 {
+		t.Fatalf("guide entries after clear = %d, want 0", got)
+	}
+	if strings.Contains(string(ch.guideDoc), "Show A") {
+		t.Fatalf("cleared guide should not preserve stale entry, got %q", string(ch.guideDoc))
+	}
+}
+
+func TestBridgeUpdateGuide_PreservesTimezoneAndIcon(t *testing.T) {
+	dir := t.TempDir()
+	r := newBridgeRegistry(dir, "")
+	r.iconFileName = "icon.svg"
+	if err := r.UpdateChannels([]bridgeChannel{{
+		ID:       "src1",
+		Name:     "Test Channel",
+		Stream:   "http://example.com/stream.m3u8",
+		Timezone: "America/New_York",
+	}}); err != nil {
+		t.Fatalf("UpdateChannels: %v", err)
+	}
+
+	r.UpdateGuide(map[string][]guideEntry{
+		"src1": {{Start: "2026-03-15T12:00:00Z", End: "2026-03-15T13:00:00Z", Title: "Show A"}},
+	})
+
+	ch := r.ListChannels()[0]
+	var meta map[string]interface{}
+	if err := json.Unmarshal(ch.metadata, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got, _ := meta["timezone"].(string); got != "America/New_York" {
+		t.Fatalf("timezone = %q, want America/New_York", got)
+	}
+	if got, _ := meta["icon"].(string); got != "/tltv/v1/channels/"+ch.ChannelID+"/icon.svg" {
+		t.Fatalf("icon = %q, want channel icon path", got)
+	}
+}
+
 // ---------- Bridge Cache Tests ----------
 
 func TestBridgeCache_UpstreamCacheStatus(t *testing.T) {

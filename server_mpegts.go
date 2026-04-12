@@ -68,6 +68,98 @@ func (m *tsMuxer) writePAT(buf []byte) {
 	}
 }
 
+// writePMTAudioOnly writes a single TS packet containing a PMT with only the audio stream.
+// Used for demuxed audio track segments (EXT-X-MEDIA TYPE=AUDIO).
+func (m *tsMuxer) writePMTAudioOnly(buf []byte) {
+	clear188(buf)
+	buf[0] = tsSyncByte
+	buf[1] = 0x40 | 0x10 // PUSI + PID high
+	buf[2] = 0x00         // PID low
+	buf[3] = 0x10 | (m.pmtCC & 0x0F)
+	m.pmtCC = (m.pmtCC + 1) & 0x0F
+
+	buf[4] = 0x00 // pointer field
+
+	pmt := buf[5:]
+	pmt[0] = 0x02 // table_id = PMT
+	// section_syntax=1, '0', reserved=11, section_length=18
+	pmt[1] = 0xB0
+	pmt[2] = 0x12 // 5 header + 4 PCR/info + 5 audio + 4 CRC = 18
+	pmt[3] = 0x00 // program_number high = 1
+	pmt[4] = 0x01
+	pmt[5] = 0xC1 // reserved=11, version=0, current_next=1
+	pmt[6] = 0x00 // section_number
+	pmt[7] = 0x00 // last_section_number
+	// reserved=111, PCR_PID = audio PID (0x0101) — PCR on audio for audio-only
+	pmt[8] = 0xE0 | 0x01
+	pmt[9] = 0x01
+	// reserved=1111, program_info_length=0
+	pmt[10] = 0xF0
+	pmt[11] = 0x00
+	// Stream entry 1: AAC audio (PID 0x0101)
+	pmt[12] = tsStreamTypeAAC // stream_type = 0x0F
+	pmt[13] = 0xE0 | 0x01    // reserved + elementary PID high
+	pmt[14] = 0x01            // elementary PID low
+	pmt[15] = 0xF0            // reserved=1111, ES_info_length=0
+	pmt[16] = 0x00
+	// CRC32
+	crc := mpegCRC32(pmt[0:17])
+	pmt[17] = uint8(crc >> 24)
+	pmt[18] = uint8(crc >> 16)
+	pmt[19] = uint8(crc >> 8)
+	pmt[20] = uint8(crc)
+
+	for i := 5 + 21; i < tsPacketSize; i++ {
+		buf[i] = 0xFF
+	}
+}
+
+// writePMTVideoOnly writes a single TS packet containing a PMT with only the video stream.
+// Used when --no-audio is set to produce video-only MPEG-TS segments.
+func (m *tsMuxer) writePMTVideoOnly(buf []byte) {
+	clear188(buf)
+	buf[0] = tsSyncByte
+	buf[1] = 0x40 | 0x10 // PUSI + PID high
+	buf[2] = 0x00         // PID low
+	buf[3] = 0x10 | (m.pmtCC & 0x0F)
+	m.pmtCC = (m.pmtCC + 1) & 0x0F
+
+	buf[4] = 0x00 // pointer field
+
+	pmt := buf[5:]
+	pmt[0] = 0x02 // table_id = PMT
+	// section_syntax=1, '0', reserved=11, section_length=18
+	pmt[1] = 0xB0
+	pmt[2] = 0x12 // 5 header + 4 PCR/info + 5 video + 4 CRC = 18
+	pmt[3] = 0x00 // program_number high = 1
+	pmt[4] = 0x01
+	pmt[5] = 0xC1 // reserved=11, version=0, current_next=1
+	pmt[6] = 0x00 // section_number
+	pmt[7] = 0x00 // last_section_number
+	// reserved=111, PCR_PID = video PID (0x0100)
+	pmt[8] = 0xE0 | 0x01
+	pmt[9] = 0x00
+	// reserved=1111, program_info_length=0
+	pmt[10] = 0xF0
+	pmt[11] = 0x00
+	// Stream entry 1: H.264 video (PID 0x0100)
+	pmt[12] = tsStreamTypeH264 // stream_type = 0x1B
+	pmt[13] = 0xE0 | 0x01     // reserved + elementary PID high
+	pmt[14] = 0x00             // elementary PID low
+	pmt[15] = 0xF0             // reserved=1111, ES_info_length=0
+	pmt[16] = 0x00
+	// CRC32
+	crc := mpegCRC32(pmt[0:17])
+	pmt[17] = uint8(crc >> 24)
+	pmt[18] = uint8(crc >> 16)
+	pmt[19] = uint8(crc >> 8)
+	pmt[20] = uint8(crc)
+
+	for i := 5 + 21; i < tsPacketSize; i++ {
+		buf[i] = 0xFF
+	}
+}
+
 // writePMT writes a single TS packet containing the PMT with video and audio streams.
 func (m *tsMuxer) writePMT(buf []byte) {
 	clear188(buf)

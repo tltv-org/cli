@@ -400,6 +400,11 @@ type Receiver struct {
 	// stats/record). 3 is the HLS-recommended value for live playback (--pipe).
 	LiveEdge int
 
+	// Failover is the node failover pool (nil = no failover).
+	// When set, the receiver attempts to reconnect to alternate hosts after
+	// consecutive manifest fetch failures.
+	Failover *failoverPool
+
 	// stopped is set when the receiver should stop.
 	stopped atomic.Bool
 }
@@ -460,6 +465,8 @@ func (recv *Receiver) Run(ctx context.Context) error {
 	// Main receiver loop
 	var lastSeq uint64
 	var firstPoll bool = true
+	var consecutiveManifestFailures int
+	const failoverThreshold = 3 // consecutive manifest failures before attempting failover
 	var metaVerifyTimer *time.Ticker
 	if recv.VerifyMetadata && channelID != "" {
 		metaVerifyTimer = time.NewTicker(5 * time.Minute)
@@ -488,6 +495,46 @@ func (recv *Receiver) Run(ctx context.Context) error {
 			if recv.OnManifest != nil {
 				recv.OnManifest(mr)
 			}
+
+			consecutiveManifestFailures++
+
+			// Attempt failover after N consecutive manifest failures.
+			if recv.Failover != nil && consecutiveManifestFailures >= failoverThreshold {
+				logInfof("node unreachable (%d consecutive failures), attempting failover...", consecutiveManifestFailures)
+				failedOver := false
+				for {
+					candidate, ok := recv.Failover.NextHost(false)
+					if !ok {
+						break
+					}
+					candidateURL := recv.replaceManifestHost(manifestURL, candidate)
+					logDebugf("trying failover candidate %s", candidate)
+					probeBody, probeErr := recv.fetchWithRetry(ctx, client, candidateURL)
+					if probeErr != nil {
+						logDebugf("failover candidate %s failed: %v", candidate, probeErr)
+						continue
+					}
+					// Verify we got a valid manifest (or master playlist).
+					if _, parseErr := parseHLSManifest(probeBody); parseErr != nil {
+						if parseMasterPlaylist(probeBody) == nil {
+							logDebugf("failover candidate %s returned invalid manifest: %v", candidate, parseErr)
+							continue
+						}
+					}
+					// Success — switch to this host.
+					recv.Failover.SwitchTo(candidate)
+					manifestURL = candidateURL
+					consecutiveManifestFailures = 0
+					failedOver = true
+					logInfof("failover successful: now connected to %s", candidate)
+					break
+				}
+				if !failedOver {
+					logErrorf("failover exhausted: all candidates tried, continuing with retry")
+					recv.Failover.Reset()
+				}
+			}
+
 			// Wait before retry
 			select {
 			case <-ctx.Done():
@@ -496,6 +543,9 @@ func (recv *Receiver) Run(ctx context.Context) error {
 			}
 			continue
 		}
+
+		// Manifest fetched successfully — reset consecutive failure counter.
+		consecutiveManifestFailures = 0
 
 		manifest, err := parseHLSManifest(body)
 		if err != nil {
@@ -596,6 +646,9 @@ func (recv *Receiver) Run(ctx context.Context) error {
 			case <-metaVerifyTimer.C:
 				if err := recv.verifyChannelMetadata(client, channelID); err != nil {
 					logDebugf("metadata re-verification failed: %v", err)
+				} else if recv.Failover != nil {
+					// Refresh the failover pool from the latest verified metadata.
+					recv.refreshFailoverPool(client, channelID)
 				}
 			default:
 			}
@@ -655,6 +708,17 @@ func (recv *Receiver) resolveStreamURL(client *Client) (manifestURL, channelID s
 	return manifestURL, id, nil
 }
 
+// replaceManifestHost replaces the host:port in a manifest URL with newHost.
+// Preserves the scheme, path, and query string.
+func (recv *Receiver) replaceManifestHost(manifestURL, newHost string) string {
+	parsed, err := url.Parse(manifestURL)
+	if err != nil {
+		return manifestURL // fallback: return unchanged
+	}
+	parsed.Host = newHost
+	return parsed.String()
+}
+
 // verifyChannelMetadata fetches and verifies the channel's signed metadata.
 // Also checks for unknown access modes per spec §5.2.
 func (recv *Receiver) verifyChannelMetadata(client *Client, channelID string) error {
@@ -678,6 +742,28 @@ func (recv *Receiver) verifyChannelMetadata(client *Client, channelID string) er
 	}
 
 	return nil
+}
+
+// refreshFailoverPool updates the failover pool from the current host's
+// metadata and peers. Called periodically after successful metadata verification.
+func (recv *Receiver) refreshFailoverPool(client *Client, channelID string) {
+	if recv.Failover == nil {
+		return
+	}
+	host := recv.Failover.CurrentHost()
+	token := recv.Failover.Token()
+
+	// Update from signed metadata (origins).
+	doc, err := client.FetchMetadata(host, channelID, token)
+	if err == nil {
+		recv.Failover.UpdateFromMetadata(doc)
+	}
+
+	// Update from peers.
+	peerExchange, err := client.FetchPeers(host)
+	if err == nil {
+		recv.Failover.UpdateFromPeers(peerExchange.Peers)
+	}
 }
 
 // fetchWithRetry performs an HTTP GET with exponential backoff retries.
@@ -910,6 +996,12 @@ func cmdReceiver(args []string) {
 		recv.LiveEdge = 3
 	}
 
+	// Build failover pool from target (tltv:// URI or compact format).
+	// Only when we have a resolvable target (not --url direct mode).
+	if target != "" && *directURL == "" {
+		recv.Failover = buildReceiverFailoverPool(target, recv.Client)
+	}
+
 	// Monitor mode: connect, check stream, exit
 	if *monitor {
 		ctx, cancel := context.WithTimeout(context.Background(), timeoutDur)
@@ -1088,6 +1180,54 @@ func receiverPrintJSON(snap *ReceiverStats) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	enc.Encode(result)
+}
+
+// ---------- Failover Pool Setup ----------
+
+// buildReceiverFailoverPool builds a failover pool from a target string.
+// Seeds with URI hints, then tries to fetch metadata and peers to populate
+// origins and relays. Returns nil if the target cannot be parsed.
+func buildReceiverFailoverPool(target string, client *Client) *failoverPool {
+	var channelID, host, token string
+	var uriHints []string
+
+	if strings.HasPrefix(target, tltvScheme) {
+		uri, err := parseTLTVUri(target)
+		if err != nil || uri.ChannelID == "" || len(uri.Hints) == 0 {
+			return nil
+		}
+		channelID = uri.ChannelID
+		host = uri.Hints[0]
+		token = uri.Token
+		if len(uri.Hints) > 1 {
+			uriHints = uri.Hints[1:]
+		}
+	} else {
+		// Compact format: ID@host:port
+		id, h, err := parseTarget(target)
+		if err != nil {
+			return nil
+		}
+		channelID = id
+		host = h
+		token = ""
+	}
+
+	pool := newFailoverPool(channelID, host, token, uriHints)
+
+	// Try to seed from signed metadata (origins).
+	doc, err := client.FetchMetadata(host, channelID, token)
+	if err == nil {
+		pool.UpdateFromMetadata(doc)
+	}
+
+	// Try to seed from peers.
+	peerExchange, err := client.FetchPeers(host)
+	if err == nil {
+		pool.UpdateFromPeers(peerExchange.Peers)
+	}
+
+	return pool
 }
 
 // ---------- Helpers ----------

@@ -53,6 +53,17 @@ Config keys use underscores; flags use dashes. Examples:
 | `tls` | `--tls` | bool |
 | `tls_cert` | `--tls-cert` | string |
 | `tls_key` | `--tls-key` | string |
+| `description` | `--description` | string |
+| `tags` | `--tags` | string (comma-separated) |
+| `language` | `--language` | string |
+| `timezone` | `--timezone` | string |
+| `icon` | `--icon` | string |
+| `channels` | `--channels` | int (server only) |
+| `variants` | `--variants` | string (server only) |
+| `proxy` | `--proxy` | string |
+| `access` | `--access` | string |
+| `token` | `--token` | string |
+| `on_demand` | `--on-demand` | bool |
 | `log_level` | `--log-level` | string |
 | `log_format` | `--log-format` | string |
 | `log_file` | `--log-file` | string |
@@ -113,7 +124,8 @@ error and keeps the current config running.
 | `relay` | `channels`, `node` | `listen`, `hostname` |
 
 When the relay reloads `channels` or `node`, it re-discovers targets, adds new
-channels, and removes channels no longer in the config — all without restart.
+channels, removes channels no longer in the config, and refreshes hints for
+existing channel IDs — all without restart.
 
 ## --dump-config
 

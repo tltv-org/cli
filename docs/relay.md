@@ -116,6 +116,7 @@ item size: 50 MB. Only HTTP 200 responses are cached.
 | `--viewer` | `VIEWER=1` | off | Embed web viewer on `GET /` |
 | `--peers`, `-P` | `PEERS` | | `tltv://` URIs to advertise in peer exchange |
 | `--gossip`, `-g` | `GOSSIP=1` | off | Include validated gossip peers in responses |
+| `--proxy` | `PROXY` | | Proxy URL (`socks5://`, `http://`, `https://`) for upstream connections |
 | `--tls` | `TLS=1` | off | Enable automatic Let's Encrypt TLS |
 | `--tls-cert` | `TLS_CERT` | | Path to manual TLS certificate |
 | `--tls-key` | `TLS_KEY` | | Path to manual TLS private key |
@@ -158,9 +159,9 @@ The `--config` flag accepts a JSON file. Fields map 1:1 to CLI flags
 ```
 
 **Hot-reload.** The config file is checked every 30 seconds. Reloadable fields:
-`channels`, `node` (the relay re-discovers targets, adds new channels, and
-removes old ones dynamically). Non-reloadable fields (listen, hostname, TLS
-settings) require a restart.
+`channels`, `node` (the relay re-discovers targets, adds new channels, removes
+old ones dynamically, and refreshes hints for existing channel IDs). Non-
+reloadable fields (listen, hostname, TLS settings) require a restart.
 
 ## Docker
 

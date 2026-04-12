@@ -71,10 +71,15 @@ tltv viewer demo.timelooptv.org
 | `server test` | Test signal generator (`--channels N`, `--variants 1080p,720p`) ([docs](docs/server.md)) |
 | `bridge` | Bridge origin server ([docs](docs/bridge.md)) |
 | `relay` | Caching relay with signature verification ([docs](docs/relay.md)) |
+| `router` | SNI routing reverse proxy with built-in ACME TLS |
 
 > **Private origins:** Run a server or bridge without `--hostname` to create a
 > private origin. Without a hostname, signed metadata contains no `origins` field,
 > so relays cannot discover the server's address.
+>
+> **Private embedded viewer:** On a private `server test` origin with `--viewer`,
+> open `/?token=...`. The embedded viewer routes are token-gated and `/api/info`
+> does not echo the secret back to the browser.
 
 ### Clients
 
@@ -140,7 +145,7 @@ Global flags work before or after the subcommand: `tltv --json channel ...` and 
 
 ## Protocol Conformance
 
-Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 370 tests. Run `make test` to verify.
+Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 569 tests. Run `make test` to verify.
 
 ## Links
 

@@ -207,6 +207,22 @@ func applyViewerConfig(vc *viewerConfig, cfg map[string]interface{}) {
 	}
 }
 
+type viewerRouteOptions struct {
+	authToken string
+	private   bool
+}
+
+func (o viewerRouteOptions) authenticate(w http.ResponseWriter, r *http.Request) bool {
+	if o.private {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "private, no-store")
+	}
+	if o.authToken == "" {
+		return true
+	}
+	return checkRequestToken(w, r, o.authToken)
+}
+
 // viewerEmbedRoutes registers the viewer HTML, static assets, and /api/info
 // on an existing mux. infoFn is called per-request to get current channel state.
 //
@@ -219,8 +235,16 @@ func applyViewerConfig(vc *viewerConfig, cfg map[string]interface{}) {
 //
 // Protocol endpoints (/.well-known/tltv, /tltv/v1/...) registered separately
 // by the daemon take routing priority over the "/" subtree pattern.
-func viewerEmbedRoutes(mux *http.ServeMux, infoFn func(channelID string) map[string]interface{}, channelsFn func() []ChannelRef) {
+func viewerEmbedRoutes(mux *http.ServeMux, infoFn func(channelID string) map[string]interface{}, channelsFn func() []ChannelRef, opts ...viewerRouteOptions) {
+	var opt viewerRouteOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		if !opt.authenticate(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(viewerHTML))
 	})
@@ -238,6 +262,9 @@ func viewerEmbedRoutes(mux *http.ServeMux, infoFn func(channelID string) map[str
 	})
 
 	mux.HandleFunc("GET /api/info", func(w http.ResponseWriter, r *http.Request) {
+		if !opt.authenticate(w, r) {
+			return
+		}
 		chID := r.URL.Query().Get("channel")
 		info := infoFn(chID)
 		if channelsFn != nil {
@@ -701,7 +728,13 @@ function kv(p,k,v,isUrl){
   p.appendChild(d);
 }
 
-var infoUrl='/api/info'+window.location.search;
+var viewerToken=(new URLSearchParams(window.location.search)).get('token')||'';
+function withToken(u){
+  if(!viewerToken||!u||u.indexOf('token=')!==-1) return u;
+  return u+(u.indexOf('?')!==-1?'&':'?')+'token='+encodeURIComponent(viewerToken);
+}
+
+  var infoUrl='/api/info'+window.location.search;
 fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
   inf=d;
   var base=d.base_url||window.location.origin;
@@ -775,8 +808,8 @@ fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
   var gd=document.getElementById('gd');
   if(d.guide){
     kv(gdd,'verified',d.verified?'\u2713 Signature valid':'? Unknown',false);
-    if(m.guide) kv(gdd,'url',base+m.guide,true);
-    if(m.guide) kv(gdd,'xmltv',base+m.guide.replace('guide.json','guide.xml'),true);
+    if(m.guide) kv(gdd,'url',withToken(base+m.guide),true);
+    if(m.guide) kv(gdd,'xmltv',withToken(base+m.guide.replace('guide.json','guide.xml')),true);
     if(d.guide.from) kv(gdd,'from',d.guide.from,false);
     if(d.guide.until) kv(gdd,'until',d.guide.until,false);
     var entries=d.guide.entries||[];
@@ -814,11 +847,15 @@ fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
       if(ch.id===d.channel_id) opt.selected=true;
       sel.appendChild(opt);
     });
-    sel.onchange=function(){window.location.search='?channel='+sel.value};
+    sel.onchange=function(){
+      var params=new URLSearchParams(window.location.search);
+      params.set('channel',sel.value);
+      window.location.search='?'+params.toString();
+    };
     document.getElementById('cn').parentNode.appendChild(sel);
   }
 
-  initPlayer(d.stream_src);
+  initPlayer(withToken(d.stream_src));
 
   // === 4. Node section (uses signed origins to verify origin claims) ===
   fetch(base+'/.well-known/tltv').then(function(r){return r.json()}).then(function(n){
@@ -936,6 +973,54 @@ function initPlayer(src){
         qs.onchange=function(){hls.currentLevel=parseInt(qs.value)};
         var ctrl=document.getElementById('cn').parentNode;
         ctrl.appendChild(qs);
+      }
+    });
+
+    // Audio track selector (demuxed audio via EXT-X-MEDIA TYPE=AUDIO)
+    hls.on(Hls.Events.AUDIO_TRACKS_UPDATED,function(){
+      if(hls.audioTracks&&hls.audioTracks.length>1){
+        var as=document.getElementById('_ats');
+        if(as) as.remove();
+        as=document.createElement('select');
+        as.id='_ats';
+        as.className='cb';
+        as.style.cssText='margin-left:8px;appearance:none;-webkit-appearance:none;padding:2px 8px';
+        hls.audioTracks.forEach(function(tk,i){
+          var opt=document.createElement('option');
+          opt.value=String(i);
+          opt.textContent='\u266b '+tk.name;
+          if(i===hls.audioTrack) opt.selected=true;
+          as.appendChild(opt);
+        });
+        as.onchange=function(){hls.audioTrack=parseInt(as.value)};
+        document.getElementById('cn').parentNode.appendChild(as);
+      }
+    });
+
+    // Subtitle track selector (WebVTT via EXT-X-MEDIA TYPE=SUBTITLES)
+    hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,function(){
+      if(hls.subtitleTracks&&hls.subtitleTracks.length>0){
+        var ss=document.getElementById('_sts');
+        if(ss) ss.remove();
+        ss=document.createElement('select');
+        ss.id='_sts';
+        ss.className='cb';
+        ss.style.cssText='margin-left:8px;appearance:none;-webkit-appearance:none;padding:2px 8px';
+        var off=document.createElement('option');
+        off.value='-1';off.textContent='CC off';off.selected=true;
+        ss.appendChild(off);
+        hls.subtitleTracks.forEach(function(tk,i){
+          var opt=document.createElement('option');
+          opt.value=String(i);
+          opt.textContent='\u2261 '+tk.name;
+          ss.appendChild(opt);
+        });
+        ss.onchange=function(){
+          var v=parseInt(ss.value);
+          hls.subtitleTrack=v;
+          hls.subtitleDisplay=(v>=0);
+        };
+        document.getElementById('cn').parentNode.appendChild(ss);
       }
     });
 
