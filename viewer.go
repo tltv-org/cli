@@ -631,6 +631,7 @@ func pageNav(label string) string {
 
 const baseCSS = `*{margin:0;padding:0;box-sizing:border-box;scrollbar-width:none}
 ::-webkit-scrollbar{width:0;height:0}
+html{background:#000;min-height:100%}
 body{background:#000;color:#fff;font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;font-size:14px;line-height:1.6}
 .c{max-width:72rem;width:100%;margin:0 auto}
 .hd{display:flex;align-items:center;gap:1.5rem;padding:1rem 2rem;border-bottom:1px solid #333;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}

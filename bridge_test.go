@@ -1757,3 +1757,393 @@ func TestBridgeCache_NilCacheNoHeaders(t *testing.T) {
 		t.Errorf("nil cache should not set Cache-Status, got %q", cs)
 	}
 }
+
+// ---------- TLTV Source Tests ----------
+
+func TestIsTLTVSource(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"tltv://TVabc@example.com:443", true},
+		{"tltv://TVabc@host?token=secret", true},
+		{"http://example.com/stream.m3u8", false},
+		{"/data/hls/", false},
+		{"channels.json", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isTLTVSource(tt.input); got != tt.want {
+			t.Errorf("isTLTVSource(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+// testTLTVOrigin starts a test TLTV server that serves signed metadata and an HLS stream.
+// Returns the origin server, the channel ID, and a cleanup function.
+func testTLTVOrigin(t *testing.T) (*httptest.Server, string, func()) {
+	t.Helper()
+	// Generate an Ed25519 key for the test channel
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := makeChannelID(pub)
+
+	// Build signed metadata document
+	metaDoc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number("1000"),
+		"id":      channelID,
+		"name":    "Upstream Test",
+		"stream":  "/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		"access":  "public",
+		"status":  "active",
+		"updated": "2026-04-01T00:00:00Z",
+		"guide":   "/tltv/v1/channels/" + channelID + "/guide.json",
+	}
+	signedMeta, err := signDocument(metaDoc, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaBytes, _ := json.Marshal(signedMeta)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/.well-known/tltv":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"protocol": "tltv",
+				"versions": []int{1},
+				"channels": []map[string]interface{}{
+					{"id": channelID, "name": "Upstream Test"},
+				},
+			})
+		case r.URL.Path == "/tltv/v1/channels/"+channelID:
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(metaBytes)
+		case strings.HasSuffix(r.URL.Path, "/stream.m3u8"):
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.Write([]byte("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg0.ts\n"))
+		case strings.HasSuffix(r.URL.Path, ".ts"):
+			w.Header().Set("Content-Type", "video/mp2t")
+			w.Write([]byte("test-segment-data"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	return srv, channelID, func() { srv.Close() }
+}
+
+func TestBridgeTLTVSource_ResolveAndServe(t *testing.T) {
+	origin, channelID, cleanup := testTLTVOrigin(t)
+	defer cleanup()
+
+	// Strip scheme from origin URL for the tltv:// URI (the client prepends http://)
+	host := strings.TrimPrefix(origin.URL, "http://")
+
+	// Set up global client for TLTV source resolution
+	oldClient := bridgeTLTVSourceClient
+	bridgeTLTVSourceClient = newClient(true) // insecure for test server
+	defer func() { bridgeTLTVSourceClient = oldClient }()
+
+	source := "tltv://" + channelID + "@" + host
+	channels, guide, err := bridgePollSource(source, "My Bridge Channel", false)
+	if err != nil {
+		t.Fatalf("bridgePollSource: %v", err)
+	}
+
+	if guide != nil {
+		t.Errorf("expected nil sidecar guide for TLTV source, got %v", guide)
+	}
+	if len(channels) != 1 {
+		t.Fatalf("expected 1 channel, got %d", len(channels))
+	}
+
+	ch := channels[0]
+	if ch.Name != "My Bridge Channel" {
+		t.Errorf("Name = %q, want %q (CLI name override)", ch.Name, "My Bridge Channel")
+	}
+	if ch.SourceChannelID != channelID {
+		t.Errorf("SourceChannelID = %q, want %q", ch.SourceChannelID, channelID)
+	}
+	if !strings.Contains(ch.Stream, "/stream.m3u8") {
+		t.Errorf("Stream = %q, expected to contain /stream.m3u8", ch.Stream)
+	}
+}
+
+func TestBridgeTLTVSource_FallbackToUpstreamName(t *testing.T) {
+	origin, channelID, cleanup := testTLTVOrigin(t)
+	defer cleanup()
+
+	host := strings.TrimPrefix(origin.URL, "http://")
+	oldClient := bridgeTLTVSourceClient
+	bridgeTLTVSourceClient = newClient(true)
+	defer func() { bridgeTLTVSourceClient = oldClient }()
+
+	// No --name provided — should fall back to upstream channel name
+	source := "tltv://" + channelID + "@" + host
+	channels, _, err := bridgePollSource(source, "", false)
+	if err != nil {
+		t.Fatalf("bridgePollSource: %v", err)
+	}
+	if channels[0].Name != "Upstream Test" {
+		t.Errorf("Name = %q, want %q (upstream fallback)", channels[0].Name, "Upstream Test")
+	}
+}
+
+func TestBridgeTLTVSource_TokenPassthrough(t *testing.T) {
+	// Test that token from the URI is included in the resolved stream URL
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+
+	metaDoc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number("1000"),
+		"id":      channelID,
+		"name":    "Private Upstream",
+		"stream":  "/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		"access":  "token",
+		"status":  "active",
+		"updated": "2026-04-01T00:00:00Z",
+	}
+	signedMeta, _ := signDocument(metaDoc, priv)
+	metaBytes, _ := json.Marshal(signedMeta)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/.well-known/tltv":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"protocol": "tltv",
+				"versions": []int{1},
+				"channels": []map[string]interface{}{
+					{"id": channelID, "name": "Private Upstream"},
+				},
+			})
+		case r.URL.Path == "/tltv/v1/channels/"+channelID:
+			// Require token for metadata
+			if r.URL.Query().Get("token") != "mysecret" {
+				http.Error(w, `{"error":"access_denied"}`, 403)
+				return
+			}
+			w.Write(metaBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	oldClient := bridgeTLTVSourceClient
+	bridgeTLTVSourceClient = newClient(true)
+	defer func() { bridgeTLTVSourceClient = oldClient }()
+
+	source := "tltv://" + channelID + "@" + host + "?token=mysecret"
+	channels, _, err := bridgePollSource(source, "Private Bridge", false)
+	if err != nil {
+		t.Fatalf("bridgePollSource: %v", err)
+	}
+	if !strings.Contains(channels[0].Stream, "token=mysecret") {
+		t.Errorf("Stream URL should contain token, got %q", channels[0].Stream)
+	}
+}
+
+func TestBridgeTLTVSource_AutoRelayFrom(t *testing.T) {
+	// When a TLTV source is used and no explicit guide is provided,
+	// the default guide entry should have relay_from set automatically.
+	origin, channelID, cleanup := testTLTVOrigin(t)
+	defer cleanup()
+
+	host := strings.TrimPrefix(origin.URL, "http://")
+	oldClient := bridgeTLTVSourceClient
+	bridgeTLTVSourceClient = newClient(true)
+	defer func() { bridgeTLTVSourceClient = oldClient }()
+
+	source := "tltv://" + channelID + "@" + host
+	channels, _, err := bridgePollSource(source, "Affiliate", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Register in a bridge registry and check the signed guide
+	dir := t.TempDir()
+	reg := newBridgeRegistry(dir, "")
+	if err := reg.UpdateChannels(channels); err != nil {
+		t.Fatal(err)
+	}
+
+	// Guide was not explicitly set — the registry uses default ephemeral guide
+	// with automatic relay_from attribution
+	for _, ch := range reg.ListChannels() {
+		// Verify the signed guide document contains relay_from
+		doc, err := readDocumentFromString(string(ch.guideDoc))
+		if err != nil {
+			t.Fatalf("reading guide doc: %v", err)
+		}
+		entries, ok := doc["entries"].([]interface{})
+		if !ok || len(entries) == 0 {
+			t.Fatal("guide has no entries")
+		}
+		entry := entries[0].(map[string]interface{})
+		rf, _ := entry["relay_from"].(string)
+		if rf != channelID {
+			t.Errorf("relay_from = %q, want %q", rf, channelID)
+		}
+	}
+}
+
+func TestBridgeTLTVSource_ExplicitGuideNoAutoRelayFrom(t *testing.T) {
+	// When an explicit guide is provided, relay_from should NOT be auto-set
+	origin, channelID, cleanup := testTLTVOrigin(t)
+	defer cleanup()
+
+	host := strings.TrimPrefix(origin.URL, "http://")
+	oldClient := bridgeTLTVSourceClient
+	bridgeTLTVSourceClient = newClient(true)
+	defer func() { bridgeTLTVSourceClient = oldClient }()
+
+	source := "tltv://" + channelID + "@" + host
+	channels, _, err := bridgePollSource(source, "Affiliate", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	reg := newBridgeRegistry(dir, "")
+	if err := reg.UpdateChannels(channels); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set an explicit guide WITHOUT relay_from
+	guide := map[string][]guideEntry{
+		channels[0].ID: {{
+			Start: "2026-04-01T00:00:00Z",
+			End:   "2026-04-02T00:00:00Z",
+			Title: "My Custom Show",
+		}},
+	}
+	reg.UpdateGuide(guide)
+
+	for _, ch := range reg.ListChannels() {
+		doc, err := readDocumentFromString(string(ch.guideDoc))
+		if err != nil {
+			t.Fatalf("reading guide doc: %v", err)
+		}
+		entries, ok := doc["entries"].([]interface{})
+		if !ok || len(entries) == 0 {
+			t.Fatal("guide has no entries")
+		}
+		entry := entries[0].(map[string]interface{})
+		if _, hasRF := entry["relay_from"]; hasRF {
+			t.Errorf("explicit guide entry should not have auto relay_from, got %v", entry["relay_from"])
+		}
+	}
+}
+
+func TestBridgeSingleKeyMode(t *testing.T) {
+	// --key should use the specified key file instead of auto-generating
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "test.key")
+
+	// Generate a key file
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	if err := writeSeed(keyPath, priv.Seed()); err != nil {
+		t.Fatal(err)
+	}
+	expectedID := makeChannelID(pub)
+
+	reg := newBridgeRegistry(dir, "")
+	reg.singleKeyPath = keyPath
+
+	channels := []bridgeChannel{
+		{ID: "ch1", Name: "Single Key Channel", Stream: "http://example.com/stream.m3u8"},
+	}
+	if err := reg.UpdateChannels(channels); err != nil {
+		t.Fatal(err)
+	}
+
+	registered := reg.ListChannels()
+	if len(registered) != 1 {
+		t.Fatalf("expected 1 channel, got %d", len(registered))
+	}
+	if registered[0].ChannelID != expectedID {
+		t.Errorf("ChannelID = %q, want %q (from key file)", registered[0].ChannelID, expectedID)
+	}
+}
+
+func TestBridgeSingleKeyMode_MissingKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	reg := newBridgeRegistry(dir, "")
+	reg.singleKeyPath = filepath.Join(dir, "nonexistent.key")
+
+	channels := []bridgeChannel{
+		{ID: "ch1", Name: "Test", Stream: "http://example.com/stream.m3u8"},
+	}
+	err := reg.UpdateChannels(channels)
+	if err == nil {
+		t.Fatal("expected error for missing key file")
+	}
+	if !strings.Contains(err.Error(), "reading key") {
+		t.Errorf("error = %q, expected to mention reading key", err.Error())
+	}
+}
+
+func TestBridgeTLTVSource_BadURI(t *testing.T) {
+	oldClient := bridgeTLTVSourceClient
+	bridgeTLTVSourceClient = newClient(true)
+	defer func() { bridgeTLTVSourceClient = oldClient }()
+
+	// URI with no host hint
+	_, _, err := bridgePollSource("tltv://TVfakeId", "Test", false)
+	if err == nil {
+		t.Fatal("expected error for URI with no host")
+	}
+	if !strings.Contains(err.Error(), "no host hint") {
+		t.Errorf("error = %q, expected 'no host hint'", err.Error())
+	}
+}
+
+func TestBridgeTLTVSource_NonTLTVUnchanged(t *testing.T) {
+	// Non-TLTV sources should work unchanged (backward compat)
+	channels, _, err := bridgePollSource("http://example.com/stream.m3u8", "Test", false)
+	if err != nil {
+		// This will fail trying to fetch, but shouldn't try TLTV resolution
+		if strings.Contains(err.Error(), "TLTV source") {
+			t.Errorf("non-TLTV source should not go through TLTV resolution: %v", err)
+		}
+	}
+	_ = channels // may be nil due to fetch error, that's fine
+}
+
+func TestBridgeUpdateStreamURL(t *testing.T) {
+	dir := t.TempDir()
+	reg := newBridgeRegistry(dir, "")
+	reg.UpdateChannels([]bridgeChannel{
+		{ID: "ch1", Name: "Test", Stream: "http://old.example.com/stream.m3u8"},
+	})
+
+	// Get the channel ID
+	id := testBridgeChannelID(t, reg)
+	ch := reg.GetChannel(id)
+	if ch.StreamURL != "http://old.example.com/stream.m3u8" {
+		t.Fatalf("initial StreamURL = %q", ch.StreamURL)
+	}
+
+	// Update stream URL
+	reg.UpdateStreamURL("ch1", "http://new.example.com/stream.m3u8")
+
+	ch = reg.GetChannel(id)
+	if ch.StreamURL != "http://new.example.com/stream.m3u8" {
+		t.Errorf("after update StreamURL = %q, want http://new.example.com/stream.m3u8", ch.StreamURL)
+	}
+
+	// Verify metadata was re-signed (seq should be fresh)
+	doc, err := readDocumentFromString(string(ch.metadata))
+	if err != nil {
+		t.Fatalf("reading metadata: %v", err)
+	}
+	if err := verifyDocument(doc, id); err != nil {
+		t.Errorf("re-signed metadata verification failed: %v", err)
+	}
+}

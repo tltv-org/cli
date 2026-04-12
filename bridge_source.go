@@ -18,17 +18,18 @@ import (
 
 // bridgeChannel represents a discovered channel from a stream source.
 type bridgeChannel struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Stream      string   `json:"stream"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Language    string   `json:"language,omitempty"`
-	Timezone    string   `json:"timezone,omitempty"`
-	Logo        string   `json:"logo,omitempty"`
-	Access      string   `json:"access,omitempty"`
-	Token       string   `json:"token,omitempty"`
-	OnDemand    bool     `json:"on_demand,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Stream          string   `json:"stream"`
+	Description     string   `json:"description,omitempty"`
+	Tags            []string `json:"tags,omitempty"`
+	Language        string   `json:"language,omitempty"`
+	Timezone        string   `json:"timezone,omitempty"`
+	Logo            string   `json:"logo,omitempty"`
+	Access          string   `json:"access,omitempty"`
+	Token           string   `json:"token,omitempty"`
+	OnDemand        bool     `json:"on_demand,omitempty"`
+	SourceChannelID string   `json:"-"` // upstream TLTV channel ID (for automatic relay_from)
 }
 
 // guideEntry represents a programme in a channel guide.
@@ -61,9 +62,26 @@ var bridgeSourceClient = &http.Client{Timeout: 30 * time.Second}
 
 // ---------- Source Polling ----------
 
+// isTLTVSource checks whether a source string is a tltv:// URI.
+func isTLTVSource(source string) bool {
+	return strings.HasPrefix(source, tltvScheme)
+}
+
 // bridgePollSource discovers channels from the --stream source.
 // Returns channels and any embedded guide data (from sidecar JSON in directory mode).
 func bridgePollSource(source, name string, onDemand bool) ([]bridgeChannel, map[string][]guideEntry, error) {
+	// Check for tltv:// URI source (affiliate rebroadcast)
+	if isTLTVSource(source) {
+		ch, err := bridgeResolveTLTV(source, name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("TLTV source: %w", err)
+		}
+		if onDemand {
+			ch.OnDemand = true
+		}
+		return []bridgeChannel{ch}, nil, nil
+	}
+
 	// Check if source is a local directory
 	info, err := os.Stat(source)
 	if err == nil && info.IsDir() {
@@ -471,4 +489,168 @@ var bridgeSanitizeRegex = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 // bridgeSanitizeFilename replaces non-alphanumeric characters with underscores.
 func bridgeSanitizeFilename(s string) string {
 	return bridgeSanitizeRegex.ReplaceAllString(s, "_")
+}
+
+// ---------- TLTV Source Resolution ----------
+
+// bridgeTLTVSourceClient is used for TLTV source resolution during bridgePollSource.
+// Set by cmdBridge at startup when --proxy is configured; otherwise uses the default.
+var bridgeTLTVSourceClient *Client
+
+// bridgeResolveTLTV resolves a tltv:// URI into a bridgeChannel by fetching and
+// verifying the upstream channel's metadata via the protocol stack.
+// The resolved HLS stream URL feeds into the existing bridge stream machinery.
+// The upstream channel ID is stored as the bridgeChannel.SourceChannelID for
+// automatic relay_from attribution.
+func bridgeResolveTLTV(source, name string) (bridgeChannel, error) {
+	uri, err := parseTLTVUri(source)
+	if err != nil {
+		return bridgeChannel{}, fmt.Errorf("parsing URI: %w", err)
+	}
+	if len(uri.Hints) == 0 {
+		return bridgeChannel{}, fmt.Errorf("tltv:// URI has no host hint: %s", source)
+	}
+
+	client := bridgeTLTVSourceClient
+	if client == nil {
+		client = newClient(flagInsecure)
+	}
+
+	// Discover and verify the upstream channel
+	hint := uri.Hints[0]
+	info, err := client.FetchNodeInfo(hint)
+	if err != nil {
+		return bridgeChannel{}, fmt.Errorf("discovery on %s: %w", hint, err)
+	}
+	if err := checkV1Support(info); err != nil {
+		return bridgeChannel{}, fmt.Errorf("%s: %w", hint, err)
+	}
+
+	// Verify the channel is listed on this node
+	if !nodeServesChannel(info, uri.ChannelID) {
+		return bridgeChannel{}, fmt.Errorf("channel %s not found on %s", uri.ChannelID, hint)
+	}
+
+	// Fetch and verify metadata
+	token := uri.Token
+	doc, err := client.FetchMetadata(hint, uri.ChannelID, token)
+	if err != nil {
+		return bridgeChannel{}, fmt.Errorf("metadata fetch: %w", err)
+	}
+
+	// Verify signature
+	if err := verifyDocument(doc, uri.ChannelID); err != nil {
+		return bridgeChannel{}, fmt.Errorf("metadata verification: %w", err)
+	}
+
+	// Check access — the bridge is consuming the channel, not relaying it,
+	// so we check as a client (token auth is fine)
+	access, _ := doc["access"].(string)
+	if access == "token" && token == "" {
+		return bridgeChannel{}, fmt.Errorf("upstream channel requires a token (embed in URI: tltv://ID@host?token=SECRET)")
+	}
+	if err := checkAccessMode(doc); err != nil {
+		return bridgeChannel{}, err
+	}
+
+	// Check status
+	status, _ := doc["status"].(string)
+	if status == "retired" {
+		return bridgeChannel{}, fmt.Errorf("upstream channel is retired")
+	}
+
+	// Extract stream URL from verified metadata
+	streamPath, _ := doc["stream"].(string)
+	if streamPath == "" {
+		return bridgeChannel{}, fmt.Errorf("upstream metadata has no stream path")
+	}
+	streamURL := client.baseURL(hint) + streamPath
+	if token != "" {
+		streamURL += "?token=" + token
+	}
+
+	// Extract upstream name for fallback
+	upstreamName, _ := doc["name"].(string)
+	channelName := name
+	if channelName == "" {
+		channelName = upstreamName
+	}
+	if channelName == "" {
+		channelName = uri.ChannelID
+	}
+
+	// Use a stable ID derived from the TLTV source URI (not the upstream channel ID,
+	// which is the upstream's identity — the bridge has its own)
+	stableID := "tltv_" + bridgeSanitizeFilename(uri.ChannelID)
+
+	ch := bridgeChannel{
+		ID:              stableID,
+		Name:            channelName,
+		Stream:          streamURL,
+		SourceChannelID: uri.ChannelID,
+	}
+
+	logInfof("tltv source: %s (%s) via %s", uri.ChannelID, upstreamName, hint)
+	return ch, nil
+}
+
+// bridgeReResolveTLTV re-checks upstream metadata for TLTV sources to detect
+// stream path changes, access/status transitions. Called during each poll cycle.
+func bridgeReResolveTLTV(source string, registry *bridgeRegistry, client *Client) {
+	uri, err := parseTLTVUri(source)
+	if err != nil {
+		logErrorf("tltv re-resolve: %v", err)
+		return
+	}
+	if len(uri.Hints) == 0 {
+		return
+	}
+
+	hint := uri.Hints[0]
+	token := uri.Token
+
+	// Fetch and verify metadata
+	doc, err := client.FetchMetadata(hint, uri.ChannelID, token)
+	if err != nil {
+		logErrorf("tltv re-resolve: metadata fetch from %s: %v", hint, err)
+		return
+	}
+	if err := verifyDocument(doc, uri.ChannelID); err != nil {
+		logErrorf("tltv re-resolve: metadata verification: %v", err)
+		return
+	}
+
+	// Check if upstream has become inaccessible
+	status, _ := doc["status"].(string)
+	if status == "retired" {
+		logErrorf("tltv re-resolve: upstream channel %s is now retired", uri.ChannelID)
+		return
+	}
+
+	// Check for stream path change
+	streamPath, _ := doc["stream"].(string)
+	if streamPath == "" {
+		return
+	}
+	newStreamURL := client.baseURL(hint) + streamPath
+	if token != "" {
+		newStreamURL += "?token=" + token
+	}
+
+	// Find the bridge channel that corresponds to this TLTV source
+	stableID := "tltv_" + bridgeSanitizeFilename(uri.ChannelID)
+	registry.mu.RLock()
+	tltvID, ok := registry.byUpstream[stableID]
+	if !ok {
+		registry.mu.RUnlock()
+		return
+	}
+	ch := registry.channels[tltvID]
+	registry.mu.RUnlock()
+
+	if ch != nil && ch.StreamURL != newStreamURL {
+		logInfof("tltv source: stream path changed for %s: %s", uri.ChannelID, streamPath)
+		// Trigger an update via the normal channel update path
+		registry.UpdateStreamURL(stableID, newStreamURL)
+	}
 }

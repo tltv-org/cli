@@ -34,8 +34,14 @@ tltv sign -k <channel-id>.key --auto-seq < meta.json > signed.json
 # Bridge external streams as TLTV channels
 tltv bridge --stream http://provider.com/channels.m3u --guide http://provider.com/guide.xml
 
+# Rebroadcast another TLTV channel under your own identity
+tltv bridge --stream "tltv://TVAlice@alice.tv" -k my.key --name "My Channel"
+
 # Relay channels from another node
 tltv relay --node origin.example.com:443
+
+# Mirror an origin (same key, auto-failover)
+tltv mirror --source "tltv://TVabc@primary.tv" --key channel.key --hostname mirror.tv --buffer 2h
 
 # Generate a test signal
 tltv server test --name "My Channel" -k channel.key
@@ -71,6 +77,7 @@ tltv viewer demo.timelooptv.org
 | `server test` | Test signal generator (`--channels N`, `--variants 1080p,720p`) ([docs](docs/server.md)) |
 | `bridge` | Bridge origin server ([docs](docs/bridge.md)) |
 | `relay` | Caching relay with signature verification ([docs](docs/relay.md)) |
+| `mirror` | Mirror origin — same-key replication with auto-promotion ([docs](docs/mirror.md)) |
 | `router` | SNI routing reverse proxy with built-in ACME TLS |
 
 > **Private origins:** Run a server or bridge without `--hostname` to create a
@@ -138,6 +145,7 @@ Global flags work before or after the subcommand: `tltv --json channel ...` and 
 - [docs/server.md](docs/server.md) — test signal generator
 - [docs/bridge.md](docs/bridge.md) — bridge setup and operation
 - [docs/relay.md](docs/relay.md) — relay deployment
+- [docs/mirror.md](docs/mirror.md) — mirror origin (same-key replication)
 - [docs/config.md](docs/config.md) — config files, hot-reload, `--dump-config`
 - [docs/peer-exchange.md](docs/peer-exchange.md) — peer exchange and gossip
 - [docs/tls.md](docs/tls.md) — TLS, ACME, Let's Encrypt
@@ -145,7 +153,7 @@ Global flags work before or after the subcommand: `tltv --json channel ...` and 
 
 ## Protocol Conformance
 
-Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 569 tests. Run `make test` to verify.
+Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 596 tests. Run `make test` to verify.
 
 ## Links
 

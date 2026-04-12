@@ -23,21 +23,22 @@ type bridgeRegisteredChannel struct {
 	PrivateKey ed25519.PrivateKey
 	UpstreamID string
 
-	Name        string
-	Description string
-	Language    string
-	Timezone     string
-	IconFileName string
-	Logo         string
-	StreamURL   string
-	Access      string
-	Token       string
-	Tags        []string
-	OnDemand    bool
+	Name            string
+	Description     string
+	Language        string
+	Timezone        string
+	IconFileName    string
+	Logo            string
+	StreamURL       string
+	Access          string
+	Token           string
+	Tags            []string
+	OnDemand        bool
+	SourceChannelID string // upstream TLTV channel ID (for automatic relay_from)
 
 	Guide    []guideEntry // source guide entries (may be empty)
-	metadata []byte             // cached signed metadata JSON
-	guideDoc []byte             // cached signed guide JSON
+	metadata []byte       // cached signed metadata JSON
+	guideDoc []byte       // cached signed guide JSON
 }
 
 // IsPrivate returns true if the channel requires token authentication.
@@ -48,12 +49,13 @@ func (ch *bridgeRegisteredChannel) IsPrivate() bool {
 // bridgeRegistry manages channel identities and signed documents.
 // Thread-safe via sync.RWMutex with immutable replacement pattern.
 type bridgeRegistry struct {
-	mu           sync.RWMutex
-	channels     map[string]*bridgeRegisteredChannel // TLTV channel ID -> channel
-	byUpstream   map[string]string                   // upstream ID -> TLTV channel ID
-	keysDir      string
-	hostname     string
-	iconFileName string // icon file name for all channels (e.g. "icon.svg")
+	mu            sync.RWMutex
+	channels      map[string]*bridgeRegisteredChannel // TLTV channel ID -> channel
+	byUpstream    map[string]string                   // upstream ID -> TLTV channel ID
+	keysDir       string
+	hostname      string
+	iconFileName  string // icon file name for all channels (e.g. "icon.svg")
+	singleKeyPath string // --key file for single-channel mode (overrides keysDir)
 }
 
 // ---------- Constructor ----------
@@ -118,22 +120,23 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 			// Update existing channel -- build new immutable struct
 			old := r.channels[tltvID]
 			updated := &bridgeRegisteredChannel{
-				ChannelID:    old.ChannelID,
-				PublicKey:    old.PublicKey,
-				PrivateKey:   old.PrivateKey,
-				UpstreamID:   old.UpstreamID,
-				Name:         ch.Name,
-				Description:  ch.Description,
-				Tags:         ch.Tags,
-				Language:     ch.Language,
-				Timezone:     ch.Timezone,
-				IconFileName: r.iconFileName,
-				Logo:         ch.Logo,
-				StreamURL:    ch.Stream,
-				Access:       ch.Access,
-				Token:        ch.Token,
-				OnDemand:     ch.OnDemand,
-				Guide:        old.Guide, // preserve existing guide
+				ChannelID:       old.ChannelID,
+				PublicKey:       old.PublicKey,
+				PrivateKey:      old.PrivateKey,
+				UpstreamID:      old.UpstreamID,
+				Name:            ch.Name,
+				Description:     ch.Description,
+				Tags:            ch.Tags,
+				Language:        ch.Language,
+				Timezone:        ch.Timezone,
+				IconFileName:    r.iconFileName,
+				Logo:            ch.Logo,
+				StreamURL:       ch.Stream,
+				Access:          ch.Access,
+				Token:           ch.Token,
+				OnDemand:        ch.OnDemand,
+				SourceChannelID: ch.SourceChannelID,
+				Guide:           old.Guide, // preserve existing guide
 			}
 			if err := r.signChannel(updated); err != nil {
 				return fmt.Errorf("signing channel %s: %w", ch.Name, err)
@@ -148,21 +151,22 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 			channelID := makeChannelID(pub)
 
 			registered := &bridgeRegisteredChannel{
-				ChannelID:    channelID,
-				PublicKey:    pub,
-				PrivateKey:   priv,
-				UpstreamID:   ch.ID,
-				Name:         ch.Name,
-				Description:  ch.Description,
-				Tags:         ch.Tags,
-				Language:     ch.Language,
-				Timezone:     ch.Timezone,
-				IconFileName: r.iconFileName,
-				Logo:         ch.Logo,
-				StreamURL:    ch.Stream,
-				Access:       ch.Access,
-				Token:        ch.Token,
-				OnDemand:     ch.OnDemand,
+				ChannelID:       channelID,
+				PublicKey:       pub,
+				PrivateKey:      priv,
+				UpstreamID:      ch.ID,
+				Name:            ch.Name,
+				Description:     ch.Description,
+				Tags:            ch.Tags,
+				Language:        ch.Language,
+				Timezone:        ch.Timezone,
+				IconFileName:    r.iconFileName,
+				Logo:            ch.Logo,
+				StreamURL:       ch.Stream,
+				Access:          ch.Access,
+				Token:           ch.Token,
+				OnDemand:        ch.OnDemand,
+				SourceChannelID: ch.SourceChannelID,
 			}
 			if err := r.signChannel(registered); err != nil {
 				return fmt.Errorf("signing channel %s: %w", ch.Name, err)
@@ -183,6 +187,47 @@ func (r *bridgeRegistry) UpdateChannels(channels []bridgeChannel) error {
 	return nil
 }
 
+// UpdateStreamURL updates the stream URL for a channel identified by upstream ID.
+// Used when TLTV source re-resolution detects a stream path change.
+func (r *bridgeRegistry) UpdateStreamURL(upstreamID, newStreamURL string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	tltvID, ok := r.byUpstream[upstreamID]
+	if !ok {
+		return
+	}
+	old := r.channels[tltvID]
+	if old.StreamURL == newStreamURL {
+		return
+	}
+
+	updated := &bridgeRegisteredChannel{
+		ChannelID:       old.ChannelID,
+		PublicKey:       old.PublicKey,
+		PrivateKey:      old.PrivateKey,
+		UpstreamID:      old.UpstreamID,
+		Name:            old.Name,
+		Description:     old.Description,
+		Tags:            old.Tags,
+		Language:        old.Language,
+		Timezone:        old.Timezone,
+		IconFileName:    old.IconFileName,
+		Logo:            old.Logo,
+		StreamURL:       newStreamURL,
+		Access:          old.Access,
+		Token:           old.Token,
+		OnDemand:        old.OnDemand,
+		SourceChannelID: old.SourceChannelID,
+		Guide:           old.Guide,
+	}
+	if err := r.signChannel(updated); err != nil {
+		logErrorf("re-sign after stream URL change for %s: %v", upstreamID, err)
+		return
+	}
+	r.channels[tltvID] = updated
+}
+
 // UpdateGuide replaces guide entries for all registered channels.
 // Keys are upstream channel IDs. Any registered channel missing from the map has
 // its guide cleared and falls back to the default ephemeral guide on re-sign.
@@ -196,22 +241,23 @@ func (r *bridgeRegistry) UpdateGuide(guide map[string][]guideEntry) {
 
 		// Build new immutable struct with updated guide
 		updated := &bridgeRegisteredChannel{
-			ChannelID:    old.ChannelID,
-			PublicKey:    old.PublicKey,
-			PrivateKey:   old.PrivateKey,
-			UpstreamID:   old.UpstreamID,
-			Name:         old.Name,
-			Description:  old.Description,
-			Tags:         old.Tags,
-			Language:     old.Language,
-			Timezone:     old.Timezone,
-			IconFileName: old.IconFileName,
-			Logo:         old.Logo,
-			StreamURL:    old.StreamURL,
-			Access:       old.Access,
-			Token:        old.Token,
-			OnDemand:     old.OnDemand,
-			Guide:        entries,
+			ChannelID:       old.ChannelID,
+			PublicKey:       old.PublicKey,
+			PrivateKey:      old.PrivateKey,
+			UpstreamID:      old.UpstreamID,
+			Name:            old.Name,
+			Description:     old.Description,
+			Tags:            old.Tags,
+			Language:        old.Language,
+			Timezone:        old.Timezone,
+			IconFileName:    old.IconFileName,
+			Logo:            old.Logo,
+			StreamURL:       old.StreamURL,
+			Access:          old.Access,
+			Token:           old.Token,
+			OnDemand:        old.OnDemand,
+			SourceChannelID: old.SourceChannelID,
+			Guide:           entries,
 		}
 		// Re-sign guide and metadata
 		if err := r.signChannel(updated); err != nil {
@@ -225,7 +271,19 @@ func (r *bridgeRegistry) UpdateGuide(guide map[string][]guideEntry) {
 // ---------- Key Management ----------
 
 // loadOrCreateKey loads an existing key or generates a new one for a channel.
+// When singleKeyPath is set, uses that file for the first (only) channel
+// instead of auto-generating into keysDir.
 func (r *bridgeRegistry) loadOrCreateKey(upstreamID string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
+	// Single-key mode: use explicit key file (for single-channel sources)
+	if r.singleKeyPath != "" {
+		seed, err := readSeed(r.singleKeyPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading key %s: %w", r.singleKeyPath, err)
+		}
+		priv, pub := keyFromSeed(seed)
+		return priv, pub, nil
+	}
+
 	filename := bridgeSanitizeFilename(upstreamID) + ".key"
 	keyPath := filepath.Join(r.keysDir, filename)
 
@@ -347,8 +405,21 @@ func bridgeSignGuide(ch *bridgeRegisteredChannel) ([]byte, error) {
 	now := time.Now().UTC()
 
 	guideEntries := ch.Guide
-	if len(guideEntries) == 0 {
+	isDefaultGuide := len(guideEntries) == 0
+	if isDefaultGuide {
 		guideEntries = defaultGuideEntries(ch.Name)
+		// Automatic relay_from attribution for TLTV sources:
+		// When using the default ephemeral guide and the channel was sourced from
+		// a TLTV URI, set relay_from on each entry to attribute the content.
+		// Explicit guide entries (from config, sidecar, or external guide) are
+		// never modified — their relay_from values (or lack thereof) take precedence.
+		if ch.SourceChannelID != "" {
+			for i := range guideEntries {
+				if guideEntries[i].RelayFrom == "" {
+					guideEntries[i].RelayFrom = ch.SourceChannelID
+				}
+			}
+		}
 	}
 
 	// Spec section 6.3: entries MUST be ordered by start time

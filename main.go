@@ -80,6 +80,7 @@ func usage() {
 	fmt.Fprintf(w, "  server test            SMPTE test signal generator\n")
 	fmt.Fprintf(w, "  bridge                 Bridge origin server\n")
 	fmt.Fprintf(w, "  relay                  Relay node\n")
+	fmt.Fprintf(w, "  mirror                 Mirror origin (same-key replication)\n")
 	fmt.Fprintf(w, "  router                 SNI routing reverse proxy\n\n")
 	fmt.Fprintf(w, "Clients:\n")
 	fmt.Fprintf(w, "  viewer <target>        Open a local web viewer\n")
@@ -196,6 +197,8 @@ dispatch:
 		cmdBridge(cmdArgs)
 	case "relay":
 		cmdRelay(cmdArgs)
+	case "mirror":
+		cmdMirror(cmdArgs)
 	case "router":
 		cmdRouter(cmdArgs)
 	case "receiver":

@@ -54,12 +54,15 @@ func cmdBridge(args []string) {
 	listenAddr := fs.String("listen", defaultListen, "listen address")
 	fs.StringVar(listenAddr, "l", defaultListen, "alias for --listen")
 
+	keyArg := fs.String("key", os.Getenv("KEY"), "key file for single-channel mode (overrides --keys-dir)")
+	fs.StringVar(keyArg, "k", os.Getenv("KEY"), "alias for --key")
+
 	defaultKeysDir := "/data/keys"
 	if v := os.Getenv("KEYS_DIR"); v != "" {
 		defaultKeysDir = v
 	}
 	keysDir := fs.String("keys-dir", defaultKeysDir, "key storage directory")
-	fs.StringVar(keysDir, "k", defaultKeysDir, "alias for --keys-dir")
+	fs.StringVar(keysDir, "K", defaultKeysDir, "alias for --keys-dir")
 
 	hostnameArg := fs.String("hostname", os.Getenv("HOSTNAME"), "public host:port for origins field (omit for private origin)")
 	fs.StringVar(hostnameArg, "H", os.Getenv("HOSTNAME"), "alias for --hostname")
@@ -89,7 +92,7 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "Bridges external streaming sources (HLS, M3U, directories) as\n")
 		fmt.Fprintf(os.Stderr, "first-class TLTV channels with Ed25519 identities and signed metadata.\n\n")
 		fmt.Fprintf(os.Stderr, "Source:\n")
-		fmt.Fprintf(os.Stderr, "  -s, --stream URL/PATH    channel source: HLS URL, M3U playlist, JSON file, or directory\n")
+		fmt.Fprintf(os.Stderr, "  -s, --stream URL/PATH    channel source: HLS URL, M3U playlist, JSON file, directory, or tltv:// URI\n")
 		fmt.Fprintf(os.Stderr, "  -G, --guide URL/PATH     guide source: XMLTV or JSON (optional)\n\n")
 		fmt.Fprintf(os.Stderr, "Channel defaults:\n")
 		fmt.Fprintf(os.Stderr, "  -n, --name STRING        channel name (single-stream mode only)\n")
@@ -102,7 +105,8 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  -p, --poll DURATION      re-poll interval (default: 60s)\n\n")
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR        listen address (default: :8000, :443 with --tls)\n")
-		fmt.Fprintf(os.Stderr, "  -k, --keys-dir PATH      key storage directory (default: /data/keys)\n")
+		fmt.Fprintf(os.Stderr, "  -k, --key FILE           key file for single-channel mode (overrides --keys-dir)\n")
+		fmt.Fprintf(os.Stderr, "  -K, --keys-dir PATH      key storage directory (default: /data/keys)\n")
 		fmt.Fprintf(os.Stderr, "  -H, --hostname HOST      public host:port for origins (omit for private origin)\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
@@ -128,7 +132,7 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT  log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH      log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: STREAM, GUIDE, NAME, ON_DEMAND=1, POLL,\n")
-		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, HOSTNAME, PEERS, GOSSIP=1, CONFIG,\n")
+		fmt.Fprintf(os.Stderr, "LISTEN, KEYS_DIR, KEY, HOSTNAME, PEERS, GOSSIP=1, CONFIG,\n")
 		fmt.Fprintf(os.Stderr, "TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
 		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
@@ -138,6 +142,7 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://source.tv/live.m3u8 --tls --hostname mychannel.tv\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://provider.com/channels.m3u --guide http://provider.com/guide.xml\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream /media/hls\n")
+		fmt.Fprintf(os.Stderr, "  tltv bridge --stream \"tltv://TVAlice@alice.tv\" --key my.key --name \"My Channel\"\n")
 		fmt.Fprintf(os.Stderr, "  tltv bridge --stream http://tunarr:8000/api/channels.m3u --guide http://tunarr:8000/api/xmltv.xml --on-demand\n")
 	}
 	args, viewer = parseViewerArg(args)
@@ -196,6 +201,9 @@ func cmdBridge(args []string) {
 		}
 		if *hostnameArg != "" {
 			cfg["hostname"] = *hostnameArg
+		}
+		if *keyArg != "" {
+			cfg["key"] = *keyArg
 		}
 		if *cacheEnabled {
 			cfg["cache"] = true
@@ -268,9 +276,14 @@ func cmdBridge(args []string) {
 		os.Exit(1)
 	}
 
-	// Ensure keys directory exists
-	if err := os.MkdirAll(*keysDir, 0700); err != nil {
-		fatal("could not create keys directory %s: %v", *keysDir, err)
+	// Validate --key vs --keys-dir
+	if *keyArg != "" {
+		// --key is for single-channel mode only; validated after source poll
+	} else {
+		// Ensure keys directory exists
+		if err := os.MkdirAll(*keysDir, 0700); err != nil {
+			fatal("could not create keys directory %s: %v", *keysDir, err)
+		}
 	}
 
 	// Parse tags
@@ -305,6 +318,19 @@ func cmdBridge(args []string) {
 	// Create registry
 	registry := newBridgeRegistry(*keysDir, *hostnameArg)
 	registry.iconFileName = iconFileName
+	if *keyArg != "" {
+		registry.singleKeyPath = *keyArg
+	}
+
+	// Create protocol client for TLTV source resolution (used if --stream is tltv://)
+	var bridgeTLTVClient *Client
+	if proxyURL != nil {
+		bridgeTLTVClient = newClientWithProxy(flagInsecure, proxyURL)
+	} else {
+		bridgeTLTVClient = newClient(flagInsecure)
+	}
+	// Set the package-level client for use by bridgeResolveTLTV during source polling
+	bridgeTLTVSourceClient = bridgeTLTVClient
 
 	// Initial source poll
 	logInfof("discovering channels from %s", *streamArg)
@@ -315,6 +341,12 @@ func cmdBridge(args []string) {
 	if len(channels) == 0 {
 		fatal("no channels discovered from %s", *streamArg)
 	}
+
+	// Validate --key: only valid for single-channel sources
+	if *keyArg != "" && len(channels) > 1 {
+		fatal("--key is only valid for single-channel sources (%d channels discovered); use --keys-dir instead", len(channels))
+	}
+
 	// Apply CLI defaults to channels (source fields override CLI)
 	bridgeApplyDefaults(channels, *descriptionArg, defaultTags, *languageArg, *timezoneArg)
 
@@ -525,7 +557,7 @@ func cmdBridge(args []string) {
 
 	if pollDur > 0 {
 		go bridgePollLoop(ctx, pollDur, &bridgeLiveConfig, *onDemand, registry,
-			*descriptionArg, defaultTags, *languageArg, *timezoneArg)
+			*descriptionArg, defaultTags, *languageArg, *timezoneArg, bridgeTLTVClient)
 	}
 
 	// Wait for shutdown signal
@@ -564,7 +596,7 @@ func bridgeApplyDefaults(channels []bridgeChannel, description string, tags []st
 // Reads current config from the atomic pointer each cycle.
 func bridgePollLoop(ctx context.Context, interval time.Duration,
 	liveConfig *atomic.Pointer[bridgeReloadableConfig], onDemand bool, registry *bridgeRegistry,
-	defaultDesc string, defaultTags []string, defaultLang, defaultTZ string) {
+	defaultDesc string, defaultTags []string, defaultLang, defaultTZ string, tltvClient *Client) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -575,14 +607,14 @@ func bridgePollLoop(ctx context.Context, interval time.Duration,
 		case <-ticker.C:
 			cfg := liveConfig.Load()
 			bridgeDoPoll(cfg.stream, cfg.guide, cfg.name, onDemand, registry,
-				defaultDesc, defaultTags, defaultLang, defaultTZ)
+				defaultDesc, defaultTags, defaultLang, defaultTZ, tltvClient)
 		}
 	}
 }
 
 // bridgeDoPoll performs a single poll cycle. Errors are logged, not fatal.
 func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *bridgeRegistry,
-	defaultDesc string, defaultTags []string, defaultLang, defaultTZ string) {
+	defaultDesc string, defaultTags []string, defaultLang, defaultTZ string, tltvClient *Client) {
 	channels, sidecarGuide, err := bridgePollSource(streamArg, nameArg, onDemand)
 	if err != nil {
 		logErrorf("poll error: %v", err)
@@ -612,6 +644,11 @@ func bridgeDoPoll(streamArg, guideArg, nameArg string, onDemand bool, registry *
 		}
 	}
 	registry.UpdateGuide(guide)
+
+	// Re-resolve TLTV sources (metadata re-check for stream path changes)
+	if isTLTVSource(streamArg) && tltvClient != nil {
+		bridgeReResolveTLTV(streamArg, registry, tltvClient)
+	}
 
 	logDebugf("poll: %d channels", len(channels))
 }

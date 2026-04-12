@@ -1,11 +1,11 @@
 # tltv bridge
 
-The bridge takes external streaming sources — HLS streams, M3U playlists, JSON
-channel lists, or local directories — and publishes them as first-class TLTV
-channels with Ed25519 identities, signed metadata, and full protocol endpoints.
-Each source channel gets a persistent keypair (stored in `--keys-dir`) and is
-served over the standard TLTV protocol at `/.well-known/tltv`,
-`/tltv/v1/channels/{id}/metadata.json`, etc.
+The bridge takes external streaming sources — TLTV channels, HLS streams, M3U
+playlists, JSON channel lists, or local directories — and publishes them as
+first-class TLTV channels with Ed25519 identities, signed metadata, and full
+protocol endpoints. Each source channel gets a persistent keypair (stored in
+`--keys-dir`, or a single key via `--key`) and is served over the standard TLTV
+protocol at `/.well-known/tltv`, `/tltv/v1/channels/{id}/metadata.json`, etc.
 
 ## Usage
 
@@ -25,6 +25,12 @@ tltv bridge --stream /media/hls
 # With TLS and hostname
 tltv bridge --stream http://source.tv/live.m3u8 --tls --hostname mychannel.tv
 
+# Rebroadcast a TLTV channel (affiliate rebroadcast)
+tltv bridge --stream "tltv://TVAlice@alice.tv" -k my.key --name "My Channel"
+
+# Private TLTV source (token embedded in URI)
+tltv bridge --stream "tltv://TVAlice@alice.tv?token=secret" -k my.key --name "My Channel"
+
 # Tunarr integration
 tltv bridge --stream http://tunarr:8000/api/channels.m3u \
             --guide http://tunarr:8000/api/xmltv.xml --on-demand
@@ -36,6 +42,7 @@ The `--stream` source format is auto-detected from content:
 
 | Format | Detection | Notes |
 |---|---|---|
+| **TLTV URI** | Starts with `tltv://` | Single-channel. Resolves via protocol: fetches metadata, verifies signatures, extracts stream path. Token from URI passed through. Automatic `relay_from` attribution. |
 | **M3U playlist** | Has `#EXTINF:` but NOT `#EXT-X-TARGETDURATION`, `#EXT-X-MEDIA-SEQUENCE`, or `#EXT-X-STREAM-INF` | Multi-channel. Parses `tvg-id`, `tvg-name`, `tvg-logo`, `group-title` attributes. |
 | **JSON** | Starts with `[` or `{` | Array of channel objects or single object. Fields: `id`, `name`, `stream`, `description`, `tags`, `language`, `logo`, `access`, `token`, `on_demand`. |
 | **Directory** | `os.Stat` succeeds and is a directory | Scans for `*.m3u8` files. Optional `{name}.json` sidecar per channel (see below). |
@@ -101,8 +108,8 @@ or M3U attribute. The token is never included in signed metadata — only the
 
 | Flag | Env Var | Default | Description |
 |---|---|---|---|
-| `--stream` | `STREAM` | | Channel source: HLS URL, M3U, JSON, or directory |
-| `--guide` | `GUIDE` | | Guide source: XMLTV or JSON |
+| `-s`, `--stream` | `STREAM` | | Channel source: TLTV URI, HLS URL, M3U, JSON, or directory |
+| `-G`, `--guide` | `GUIDE` | | Guide source: XMLTV or JSON |
 | `-n`, `--name` | `NAME` | | Channel name (single-stream mode only) |
 | `--description` | `DESCRIPTION` | | Channel description (CLI default, source overrides) |
 | `--tags` | `TAGS` | | Comma-separated tags, max 5 (CLI default, source overrides) |
@@ -112,7 +119,8 @@ or M3U attribute. The token is never included in signed metadata — only the
 | `--on-demand` | `ON_DEMAND=1` | off | Mark all channels as on-demand |
 | `--poll` | `POLL` | `60s` | Source re-poll interval |
 | `-l`, `--listen` | `LISTEN` | `:8000` | Listen address (`:443` with `--tls`) |
-| `-k`, `--keys-dir` | `KEYS_DIR` | `/data/keys` | Key storage directory |
+| `-k`, `--key` | `KEY` | | Key file for single-channel mode (overrides `--keys-dir`) |
+| `-K`, `--keys-dir` | `KEYS_DIR` | `/data/keys` | Key storage directory |
 | `-H`, `--hostname` | `HOSTNAME` | | Public `host:port` for origins field. Omit to create a private origin that relays cannot discover. |
 | `-P`, `--peers` | `PEERS` | | `tltv://` URIs to advertise in peer exchange |
 | `-g`, `--gossip` | `GOSSIP=1` | off | Re-advertise gossip-discovered channels |
@@ -206,3 +214,15 @@ volumes:
 - **Config hot-reload** re-reads the config file each poll cycle. Only `stream`,
   `name`, and `guide` are reloadable — changes to `listen`, `keys-dir`,
   `hostname`, or TLS settings require a restart.
+- **TLTV source resolution.** When `--stream` is a `tltv://` URI, the bridge
+  resolves it through the protocol stack: fetches `/.well-known/tltv`, verifies
+  signed metadata, and extracts the stream path. The resolved HLS URL feeds into
+  the existing bridge stream machinery. Re-resolution every poll cycle tracks
+  upstream stream path changes.
+- **Automatic `relay_from`.** When sourcing from a TLTV channel, the bridge
+  automatically sets `relay_from` on the default ephemeral guide entry to the
+  source channel ID. Explicit guide data (from `--guide`, config, or sidecar)
+  is never modified — only the auto-generated default guide gets attribution.
+- **`--key` for single-channel mode.** Use `-k`/`--key` to pin the bridge's
+  identity to an explicit key file. Invalid when the source resolves to more
+  than one channel. `-K`/`--keys-dir` remains for multi-channel sources.
