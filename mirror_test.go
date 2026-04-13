@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -821,5 +822,166 @@ func TestMirrorServer_MethodNotAllowed(t *testing.T) {
 
 	if w.Code != 400 {
 		t.Errorf("POST to protocol path: status = %d, want 400", w.Code)
+	}
+}
+
+// ---------- /api/info Normalization ----------
+
+func TestMirror_APIInfo_Passive(t *testing.T) {
+	setupLogging("error", "", "", "test")
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+
+	// Build signed metadata + guide with known fields.
+	metaDoc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number("100"),
+		"id":      channelID,
+		"name":    "Test Mirror",
+		"stream":  "/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		"updated": time.Now().UTC().Add(-1 * time.Minute).Format(timestampFormat),
+	}
+	signedMeta, _ := signDocument(metaDoc, priv)
+	metaBytes, _ := json.Marshal(signedMeta)
+
+	guideDoc := map[string]interface{}{
+		"v":  json.Number("1"),
+		"id": channelID,
+		"entries": []map[string]interface{}{
+			{
+				"start": time.Now().Truncate(24 * time.Hour).Format(timestampFormat),
+				"end":   time.Now().Truncate(24*time.Hour).Add(24 * time.Hour).Format(timestampFormat),
+				"title": "Mirror Programming",
+			},
+		},
+	}
+	signedGuide, _ := signDocument(guideDoc, priv)
+	guideBytes, _ := json.Marshal(signedGuide)
+
+	registry := &mirrorRegistry{}
+	registry.SetChannel(&mirrorChannel{
+		ChannelID: channelID,
+		Name:      "Test Mirror",
+		Metadata:  metaBytes,
+		Guide:     guideBytes,
+	})
+
+	infoFn := mirrorViewerBuildInfo(registry, channelID, "mirror.example.com")
+	info := infoFn("")
+
+	// Check fields from viewerBuildInfo (channel_name, verified, guide).
+	if info["channel_id"] != channelID {
+		t.Errorf("channel_id = %v, want %s", info["channel_id"], channelID)
+	}
+	if info["channel_name"] != "Test Mirror" {
+		t.Errorf("channel_name = %v, want Test Mirror", info["channel_name"])
+	}
+	if info["verified"] != true {
+		t.Errorf("verified = %v, want true", info["verified"])
+	}
+	if info["guide"] == nil {
+		t.Error("guide should be present")
+	}
+	if info["metadata"] == nil {
+		t.Error("metadata should be present")
+	}
+
+	// Check mirror-specific fields.
+	if info["stream_src"] == nil {
+		t.Error("stream_src should be present")
+	}
+	if info["xmltv_url"] == nil {
+		t.Error("xmltv_url should be present")
+	}
+	if info["tltv_uri"] == nil {
+		t.Error("tltv_uri should be present")
+	}
+	uri, _ := info["tltv_uri"].(string)
+	if !strings.Contains(uri, channelID) || !strings.Contains(uri, "mirror.example.com") {
+		t.Errorf("tltv_uri = %q, expected to contain channel ID and hostname", uri)
+	}
+
+	// Channels list.
+	chs, ok := info["channels"].([]interface{})
+	if !ok || len(chs) != 1 {
+		t.Fatalf("channels = %v, want 1-element slice", info["channels"])
+	}
+}
+
+func TestMirror_APIInfo_Promoted(t *testing.T) {
+	setupLogging("error", "", "", "test")
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+
+	// Build upstream (passive) metadata.
+	metaDoc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number("100"),
+		"id":      channelID,
+		"name":    "Test Mirror",
+		"stream":  "/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		"updated": time.Now().UTC().Add(-10 * time.Minute).Format(timestampFormat),
+	}
+	signedMeta, _ := signDocument(metaDoc, priv)
+	metaBytes, _ := json.Marshal(signedMeta)
+
+	// Build promoted metadata (different seq).
+	promotedMetaDoc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number("200"),
+		"id":      channelID,
+		"name":    "Test Mirror",
+		"stream":  "/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		"updated": time.Now().UTC().Add(-1 * time.Minute).Format(timestampFormat),
+	}
+	signedPromoted, _ := signDocument(promotedMetaDoc, priv)
+	promotedBytes, _ := json.Marshal(signedPromoted)
+
+	// Build promoted guide.
+	guideDoc := map[string]interface{}{
+		"v":       json.Number("1"),
+		"id":      channelID,
+		"entries": []map[string]interface{}{},
+	}
+	signedGuide, _ := signDocument(guideDoc, priv)
+	guideBytes, _ := json.Marshal(signedGuide)
+
+	registry := &mirrorRegistry{}
+	registry.SetChannel(&mirrorChannel{
+		ChannelID:     channelID,
+		Name:          "Test Mirror",
+		Metadata:      metaBytes,
+		PromotedMeta:  promotedBytes,
+		PromotedGuide: guideBytes,
+	})
+
+	infoFn := mirrorViewerBuildInfo(registry, channelID, "mirror.example.com")
+	info := infoFn("")
+
+	// In promoted mode, should use promoted metadata.
+	meta, ok := info["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatal("metadata not a map")
+	}
+	// Promoted metadata should have seq=200.
+	if seq, ok := meta["seq"]; ok {
+		seqStr := fmt.Sprintf("%v", seq)
+		if seqStr != "200" {
+			t.Errorf("promoted metadata seq = %v, want 200", seq)
+		}
+	}
+}
+
+func TestMirror_APIInfo_NoChannel(t *testing.T) {
+	setupLogging("error", "", "", "test")
+	registry := &mirrorRegistry{}
+
+	infoFn := mirrorViewerBuildInfo(registry, "TVtest123", "mirror.example.com")
+	info := infoFn("")
+
+	// Should return empty channels list.
+	chs, ok := info["channels"].([]interface{})
+	if !ok || len(chs) != 0 {
+		t.Errorf("channels = %v, want empty slice", info["channels"])
 	}
 }

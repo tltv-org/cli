@@ -130,7 +130,10 @@ or M3U attribute. The token is never included in signed metadata — only the
 | `--cache` | `CACHE=1` | off | Enable in-memory response cache |
 | `--cache-max-entries` | `CACHE_MAX_ENTRIES` | `100` | Max cached items |
 | `--cache-stats` | `CACHE_STATS` | `0` | Log cache stats every N seconds |
-| `--viewer` | `VIEWER=1` | off | Serve built-in web player at `/` |
+| `--viewer` | `VIEWER=1` | off | Serve production web player at `/` |
+| `--debug-viewer` | `DEBUG_VIEWER=1` | off | Serve debug viewer at `/` (mutually exclusive with `--viewer`) |
+| `--viewer-title` | `VIEWER_TITLE` | | Nav bar label text |
+| `--no-viewer-footer` | `VIEWER_FOOTER=0` | on | Hide footer links |
 | `--tls` | `TLS=1` | off | Enable TLS (Let's Encrypt if no cert/key) |
 | `--tls-cert` | `TLS_CERT` | | TLS certificate file (PEM) |
 | `--tls-key` | `TLS_KEY` | | TLS private key file (PEM) |

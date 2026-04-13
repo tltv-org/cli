@@ -826,7 +826,7 @@ func TestServerViewerCoexistence(t *testing.T) {
 
 	mux := http.NewServeMux()
 	// Register viewer BEFORE server routes — same order as production code
-	viewerEmbedRoutes(mux, func(_ string) map[string]interface{} {
+	debugViewerRoutes(mux, func(_ string) map[string]interface{} {
 		return map[string]interface{}{"channel_name": "TEST"}
 	}, nil)
 	serverHTTP(mux, seg, channelID, "TEST", metadata, guide, nil, nil, nil, "", false, nil, "")
@@ -877,7 +877,7 @@ func TestServerPrivateViewer_RequiresAuthAndDoesNotLeakToken(t *testing.T) {
 	docs := &serverDocs{channelID: channelID, channelName: "Private Test", metadata: metadata, guide: guide}
 
 	mux := http.NewServeMux()
-	viewerEmbedRoutes(mux, func(_ string) map[string]interface{} {
+	debugViewerRoutes(mux, func(_ string) map[string]interface{} {
 		return serverViewerInfo(docs, "viewer.example.com:443")
 	}, nil, viewerRouteOptions{authToken: "secret123", private: true})
 
@@ -1654,11 +1654,11 @@ func TestServerPrivateMasterAndChildPlaylists_PropagateToken(t *testing.T) {
 	subSeg.pushSegment("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nhello\n", 2.0)
 
 	ch := &serverChannel{
-		channelID: chID,
-		privKey:   priv,
-		seg:       videoSeg,
-		variants:  []serverVariant{{label: "720p", width: 1280, height: 720, seg: videoSeg, bandwidth: 2000000, codecTag: "avc1.42c01f"}},
-		audioTracks: []serverAudioTrack{{name: "rock", seg: audioSeg}},
+		channelID:      chID,
+		privKey:        priv,
+		seg:            videoSeg,
+		variants:       []serverVariant{{label: "720p", width: 1280, height: 720, seg: videoSeg, bandwidth: 2000000, codecTag: "avc1.42c01f"}},
+		audioTracks:    []serverAudioTrack{{name: "rock", seg: audioSeg}},
 		subtitleTracks: []serverSubtitleTrack{{name: "clock", seg: subSeg}},
 	}
 	ch.docs.Store(&serverDocs{channelID: chID, channelName: "Test", metadata: metadata, guide: guide})
@@ -2622,5 +2622,365 @@ func TestSubtitleTrack_TokenRequired(t *testing.T) {
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+chID+"/subs_clock_seg0.vtt?token=secret", nil))
 	if w.Code != 200 {
 		t.Errorf("with token subtitle VTT: status = %d, want 200", w.Code)
+	}
+}
+
+// TestProductionViewerPrivateAuth verifies the production viewer on a private
+// daemon: root HTML and /api/info require ?token=, and the response does not
+// leak the raw token in any URL fields.
+func TestProductionViewerPrivateAuth(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	channelID := makeChannelID(pub)
+	metadata, guide := serverSignDocs(channelID, "Private Prod", "", priv, nil, "token", false, nil)
+	docs := &serverDocs{channelID: channelID, channelName: "Private Prod", metadata: metadata, guide: guide}
+
+	mux := http.NewServeMux()
+	productionViewerRoutes(mux, func(reqChID string) map[string]interface{} {
+		return serverViewerInfo(docs, "example.com:443")
+	}, func() []viewerChannelRef {
+		return []viewerChannelRef{{ID: channelID, Name: "Private Prod", Guide: guide, IconPath: "/tltv/v1/channels/" + channelID + "/icon.svg"}}
+	}, viewerRouteOptions{authToken: "secret456", private: true})
+
+	// Root without token → 403
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != 403 {
+		t.Fatalf("GET / without token: status = %d, want 403", w.Code)
+	}
+
+	// Root with token → 200 HTML
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/?token=secret456", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET / with token: status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("GET / content-type = %q, want text/html", ct)
+	}
+
+	// /api/info without token → 403
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	if w.Code != 403 {
+		t.Fatalf("GET /api/info without token: status = %d, want 403", w.Code)
+	}
+
+	// /api/info with token → 200, no raw token in body
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info?token=secret456", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET /api/info with token: status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "secret456") {
+		t.Fatalf("/api/info should not leak token in body: %s", body)
+	}
+	if strings.Contains(body, "?token=") {
+		t.Fatalf("/api/info should not contain token query param: %s", body)
+	}
+	// Private headers
+	if cc := w.Header().Get("Cache-Control"); cc != "private, no-store" {
+		t.Errorf("Cache-Control = %q, want private, no-store", cc)
+	}
+	if rp := w.Header().Get("Referrer-Policy"); rp != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", rp)
+	}
+}
+
+// TestViewerChannelsPayloadShape verifies the /api/info channels[] array
+// includes per-channel guide entries and icon_path fields.
+func TestViewerChannelsPayloadShape(t *testing.T) {
+	pub1, priv1, _ := ed25519.GenerateKey(nil)
+	chID1 := makeChannelID(pub1)
+	meta1, guide1 := serverSignDocs(chID1, "Ch1", "", priv1, nil, "public", false, nil)
+
+	pub2, priv2, _ := ed25519.GenerateKey(nil)
+	chID2 := makeChannelID(pub2)
+	meta2, guide2 := serverSignDocs(chID2, "Ch2", "", priv2, nil, "public", false, nil)
+
+	_ = meta1
+	_ = meta2
+
+	mux := http.NewServeMux()
+	productionViewerRoutes(mux, func(reqChID string) map[string]interface{} {
+		return map[string]interface{}{
+			"channel_id":   chID1,
+			"channel_name": "Ch1",
+			"stream_src":   "/tltv/v1/channels/" + chID1 + "/stream.m3u8",
+		}
+	}, func() []viewerChannelRef {
+		return []viewerChannelRef{
+			{ID: chID1, Name: "Ch1", Guide: guide1, IconPath: "/tltv/v1/channels/" + chID1 + "/icon.svg"},
+			{ID: chID2, Name: "Ch2", Guide: guide2, IconPath: "/tltv/v1/channels/" + chID2 + "/icon.png"},
+		}
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var info map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+
+	channels, ok := info["channels"].([]interface{})
+	if !ok || len(channels) != 2 {
+		t.Fatalf("channels = %v, want 2-element array", info["channels"])
+	}
+
+	for i, raw := range channels {
+		ch, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("channels[%d] not an object", i)
+		}
+		if _, ok := ch["id"].(string); !ok {
+			t.Errorf("channels[%d] missing id", i)
+		}
+		if _, ok := ch["name"].(string); !ok {
+			t.Errorf("channels[%d] missing name", i)
+		}
+		if _, ok := ch["icon_path"].(string); !ok {
+			t.Errorf("channels[%d] missing icon_path", i)
+		}
+		guide, ok := ch["guide"].(map[string]interface{})
+		if !ok {
+			t.Errorf("channels[%d] missing guide object", i)
+		} else if _, ok := guide["entries"].([]interface{}); !ok {
+			t.Errorf("channels[%d] guide missing entries", i)
+		}
+	}
+}
+
+// TestViewerChannelSwitching verifies that /api/info?channel=<id> returns
+// the requested channel's data when channelsFn and infoFn support switching.
+func TestViewerChannelSwitching(t *testing.T) {
+	pub1, priv1, _ := ed25519.GenerateKey(nil)
+	chID1 := makeChannelID(pub1)
+	_, guide1 := serverSignDocs(chID1, "Alpha", "", priv1, nil, "public", false, nil)
+
+	pub2, priv2, _ := ed25519.GenerateKey(nil)
+	chID2 := makeChannelID(pub2)
+	_, guide2 := serverSignDocs(chID2, "Beta", "", priv2, nil, "public", false, nil)
+
+	infoFn := func(reqChID string) map[string]interface{} {
+		id, name := chID1, "Alpha"
+		if reqChID == chID2 {
+			id, name = chID2, "Beta"
+		}
+		return map[string]interface{}{
+			"channel_id":   id,
+			"channel_name": name,
+			"stream_src":   "/tltv/v1/channels/" + id + "/stream.m3u8",
+		}
+	}
+	channelsFn := func() []viewerChannelRef {
+		return []viewerChannelRef{
+			{ID: chID1, Name: "Alpha", Guide: guide1},
+			{ID: chID2, Name: "Beta", Guide: guide2},
+		}
+	}
+
+	mux := http.NewServeMux()
+	productionViewerRoutes(mux, infoFn, channelsFn)
+
+	// Default → first channel
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	var d1 map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &d1)
+	if d1["channel_name"] != "Alpha" {
+		t.Errorf("default channel = %v, want Alpha", d1["channel_name"])
+	}
+
+	// Switch to channel 2
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info?channel="+chID2, nil))
+	var d2 map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &d2)
+	if d2["channel_name"] != "Beta" {
+		t.Errorf("switched channel = %v, want Beta", d2["channel_name"])
+	}
+}
+
+// TestViewerDisplayConfig verifies that viewer_title and viewer_footer fields
+// appear in /api/info when configured via viewerRouteOptions.
+func TestViewerDisplayConfig(t *testing.T) {
+	mux := http.NewServeMux()
+	productionViewerRoutes(mux, func(_ string) map[string]interface{} {
+		return map[string]interface{}{"channel_id": "TVtest", "channel_name": "Test"}
+	}, nil, viewerRouteOptions{title: "My TV", noFooter: true})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	var info map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &info)
+
+	if info["viewer_title"] != "My TV" {
+		t.Errorf("viewer_title = %v, want 'My TV'", info["viewer_title"])
+	}
+	if info["viewer_footer"] != false {
+		t.Errorf("viewer_footer = %v, want false", info["viewer_footer"])
+	}
+
+	// Without display config, fields should be absent
+	mux2 := http.NewServeMux()
+	productionViewerRoutes(mux2, func(_ string) map[string]interface{} {
+		return map[string]interface{}{"channel_id": "TVtest", "channel_name": "Test"}
+	}, nil)
+	w2 := httptest.NewRecorder()
+	mux2.ServeHTTP(w2, httptest.NewRequest("GET", "/api/info", nil))
+	var info2 map[string]interface{}
+	json.Unmarshal(w2.Body.Bytes(), &info2)
+	if _, ok := info2["viewer_title"]; ok {
+		t.Errorf("viewer_title should be absent when not configured")
+	}
+	if _, ok := info2["viewer_footer"]; ok {
+		t.Errorf("viewer_footer should be absent when not configured")
+	}
+}
+
+// TestStandaloneViewerNoTokenLeak verifies that the standalone viewer's
+// infoFn does not include stream_url or xmltv_url (which could contain tokens).
+func TestStandaloneViewerNoTokenLeak(t *testing.T) {
+	// Simulate the standalone infoFn pattern — no stream_url, no xmltv_url
+	infoFn := func(_ string) map[string]interface{} {
+		return map[string]interface{}{
+			"channel_id":   "TVtest",
+			"channel_name": "Test",
+			"stream_src":   "/stream/stream.m3u8",
+			"base_url":     "https://upstream.example.com",
+			"verified":     true,
+		}
+	}
+
+	mux := http.NewServeMux()
+	productionViewerRoutes(mux, infoFn, nil)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/info", nil))
+	body := w.Body.String()
+
+	if strings.Contains(body, "stream_url") {
+		t.Errorf("/api/info should not contain stream_url: %s", body)
+	}
+	if strings.Contains(body, "xmltv_url") {
+		t.Errorf("/api/info should not contain xmltv_url: %s", body)
+	}
+	if strings.Contains(body, "?token=") {
+		t.Errorf("/api/info should not contain token query params: %s", body)
+	}
+	if !strings.Contains(body, "/stream/stream.m3u8") {
+		t.Errorf("/api/info should contain local proxy stream_src: %s", body)
+	}
+}
+
+func TestProductionViewerHTML_UsesTokenForActiveIconURL(t *testing.T) {
+	if !strings.Contains(productionViewerHTML, "icon.src=withToken(_info.icon_url)") {
+		t.Fatalf("production viewer should append the private token to active icon_url requests")
+	}
+	if !strings.Contains(productionViewerHTML, "icon.src=withToken('/tltv/v1/channels/'+_chID+'/icon.'+ext)") {
+		t.Fatalf("production viewer should append the private token to active protocol icon requests")
+	}
+}
+
+func TestPortalViewerHTML_UsesSavedChannelsAPI(t *testing.T) {
+	if !strings.Contains(portalViewerHTML, "fetch('/api/saved-channels')") {
+		t.Fatalf("portal viewer should load saved channels from /api/saved-channels when available")
+	}
+	if !strings.Contains(portalViewerHTML, "fetch('/api/saved-channels',{") {
+		t.Fatalf("portal viewer should persist saved channels back to /api/saved-channels when enabled")
+	}
+}
+
+func TestPortalViewerHTML_RefreshesDiscoveredIconData(t *testing.T) {
+	if !strings.Contains(portalViewerHTML, "if(dc.icon_data)_saved[j].icon_data=dc.icon_data;") {
+		t.Fatalf("portal viewer should refresh cached discovered channel icons from icon_data")
+	}
+}
+
+func TestProductionViewerCSS_NoGuideCellHoverStyling(t *testing.T) {
+	if strings.Contains(productionCSS, ".guide-cell:hover") {
+		t.Fatalf("production viewer CSS should not add guide-cell hover styling in this version")
+	}
+	for _, line := range strings.Split(productionCSS, "\n") {
+		if strings.Contains(line, ".guide-cell{") && strings.Contains(line, "background:") {
+			t.Fatalf("production viewer CSS should not add guide-cell background styling: %s", line)
+		}
+	}
+}
+
+func TestViewerSavedChannelRoutes(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "saved.json")
+	store, err := newViewerSavedChannelStore(path)
+	if err != nil {
+		t.Fatalf("newViewerSavedChannelStore: %v", err)
+	}
+	mux := http.NewServeMux()
+	registerViewerSavedChannelRoutes(mux, store)
+
+	uri := "tltv://TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:443?token=secret"
+	body := `{"channels":[{"name":"Demo","uri":"` + uri + `"}]}`
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/saved-channels", strings.NewReader(body)))
+	if w.Code != 200 {
+		t.Fatalf("POST /api/saved-channels status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	var resp viewerSavedChannelsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode POST response: %v", err)
+	}
+	if !resp.Enabled || len(resp.Channels) != 1 {
+		t.Fatalf("POST response = %+v", resp)
+	}
+	if strings.Contains(resp.Channels[0].URI, "token=") {
+		t.Fatalf("POST response should strip token, got %q", resp.Channels[0].URI)
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/saved-channels", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET /api/saved-channels status = %d, want 200", w.Code)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
+	if !resp.Enabled || len(resp.Channels) != 1 {
+		t.Fatalf("GET response = %+v", resp)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved file: %v", err)
+	}
+	if strings.Contains(string(data), "token=") {
+		t.Fatalf("saved file should not contain token: %s", data)
+	}
+}
+
+func TestViewerSavedChannelRoutesDisabled(t *testing.T) {
+	mux := http.NewServeMux()
+	registerViewerSavedChannelRoutes(mux, nil)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/saved-channels", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET disabled /api/saved-channels status = %d, want 200", w.Code)
+	}
+	var resp viewerSavedChannelsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode disabled GET response: %v", err)
+	}
+	if resp.Enabled {
+		t.Fatalf("disabled response should report Enabled=false")
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/saved-channels", strings.NewReader(`{"channels":[]}`)))
+	if w.Code != 404 {
+		t.Fatalf("POST disabled /api/saved-channels status = %d, want 404", w.Code)
 	}
 }

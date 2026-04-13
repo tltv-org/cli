@@ -140,9 +140,11 @@ rejecting the mirror's documents due to seq regression.
 
 ### Infrastructure
 
-All shared daemon flags are supported: `--tls`, `--cache`, `--viewer`, `--peers`,
-`--gossip`, `--proxy`, `--config`, `--dump-config`, and log flags. See
-[docs/tls.md](tls.md), [docs/config.md](config.md), [docs/peer-exchange.md](peer-exchange.md).
+All shared daemon flags are supported: `--tls`, `--cache`, `--viewer`,
+`--debug-viewer`, `--viewer-title`, `--no-viewer-footer`, `--peers`, `--gossip`,
+`--proxy`, `--config`, `--dump-config`, and log flags. See
+[docs/tls.md](tls.md), [docs/viewer.md](viewer.md), [docs/config.md](config.md),
+[docs/peer-exchange.md](peer-exchange.md).
 
 ## Mirror vs. Relay vs. Bridge
 

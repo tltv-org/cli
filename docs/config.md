@@ -50,6 +50,10 @@ Config keys use underscores; flags use dashes. Examples:
 | `cache_max_entries` | `--cache-max-entries` | int |
 | `cache_stats` | `--cache-stats` | int |
 | `viewer` | `--viewer` | bool |
+| `debug_viewer` | `--debug-viewer` | bool |
+| `viewer_title` | `--viewer-title` | string |
+| `viewer_footer` | `--no-viewer-footer` | bool (inverted: `false` = hidden) |
+| `saved_channels` | `--saved-channels` | string (file path) |
 | `tls` | `--tls` | bool |
 | `tls_cert` | `--tls-cert` | string |
 | `tls_key` | `--tls-key` | string |

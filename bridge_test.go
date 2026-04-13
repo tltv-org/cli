@@ -839,7 +839,7 @@ func TestBridgeMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// TestBridgeViewerCoexistence verifies that viewerEmbedRoutes can be
+// TestBridgeViewerCoexistence verifies that debugViewerRoutes can be
 // registered on the bridge's mux without a Go 1.22 ServeMux pattern conflict.
 // The viewer's "GET /{$}" must not conflict with the bridge's method-less
 // "/tltv/" and "/.well-known/tltv" catch-all patterns.
@@ -849,7 +849,7 @@ func TestBridgeViewerCoexistence(t *testing.T) {
 
 	// Register viewer routes on the bridge's mux — this used to panic
 	// with "GET /" vs "/tltv/" pattern conflict before the fix.
-	viewerEmbedRoutes(srv.mux, func(_ string) map[string]interface{} {
+	debugViewerRoutes(srv.mux, func(_ string) map[string]interface{} {
 		return map[string]interface{}{"channel_name": "test"}
 	}, nil)
 

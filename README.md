@@ -78,7 +78,7 @@ tltv viewer demo.timelooptv.org
 | `bridge` | Bridge origin server ([docs](docs/bridge.md)) |
 | `relay` | Caching relay with signature verification ([docs](docs/relay.md)) |
 | `mirror` | Mirror origin — same-key replication with auto-promotion ([docs](docs/mirror.md)) |
-| `router` | SNI routing reverse proxy with built-in ACME TLS |
+| `router` | SNI routing reverse proxy with built-in ACME TLS ([docs](docs/router.md)) |
 
 > **Private origins:** Run a server or bridge without `--hostname` to create a
 > private origin. Without a hostname, signed metadata contains no `origins` field,
@@ -92,7 +92,7 @@ tltv viewer demo.timelooptv.org
 
 | Command | Description |
 |---|---|
-| `viewer <target>` | Local web viewer with HLS.js player |
+| `viewer <target>` | Web viewer with HLS.js player (`--viewer` production, `--debug-viewer` diagnostic) |
 | `receiver <target>` | Headless HLS consumer (`--monitor`, `--record`, `--pipe`, `--quality`) |
 
 ### Identity
@@ -146,6 +146,8 @@ Global flags work before or after the subcommand: `tltv --json channel ...` and 
 - [docs/bridge.md](docs/bridge.md) — bridge setup and operation
 - [docs/relay.md](docs/relay.md) — relay deployment
 - [docs/mirror.md](docs/mirror.md) — mirror origin (same-key replication)
+- [docs/router.md](docs/router.md) — SNI routing reverse proxy
+- [docs/viewer.md](docs/viewer.md) — web viewer and portal
 - [docs/config.md](docs/config.md) — config files, hot-reload, `--dump-config`
 - [docs/peer-exchange.md](docs/peer-exchange.md) — peer exchange and gossip
 - [docs/tls.md](docs/tls.md) — TLS, ACME, Let's Encrypt
@@ -153,7 +155,7 @@ Global flags work before or after the subcommand: `tltv --json channel ...` and 
 
 ## Protocol Conformance
 
-Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 596 tests. Run `make test` to verify.
+Validated against all 7 test vector suites from the [protocol specification](https://github.com/tltv-org/protocol) (C1–C7: identity encoding, signing, documents, URIs, guides, invalid inputs, migration). 661 tests. Run `make test` to verify.
 
 ## Links
 

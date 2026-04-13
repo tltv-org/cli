@@ -79,6 +79,7 @@ func cmdBridge(args []string) {
 
 	// --- Viewer (parsed manually before fs.Parse) ---
 	var viewer viewerConfig
+	viewerTitle, viewerNoFooter := addViewerDisplayFlags(fs)
 
 	// --- TLS ---
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
@@ -208,11 +209,15 @@ func cmdBridge(args []string) {
 		if *cacheEnabled {
 			cfg["cache"] = true
 		}
-		if viewer.enabled {
+		if viewer.enabled() {
+			key := "viewer"
+			if viewer.mode == "debug" {
+				key = "debug_viewer"
+			}
 			if viewer.selector != "" {
-				cfg["viewer"] = viewer.selector
+				cfg[key] = viewer.selector
 			} else {
-				cfg["viewer"] = true
+				cfg[key] = true
 			}
 		}
 		if *gossipEnabled {
@@ -428,7 +433,7 @@ func cmdBridge(args []string) {
 
 	// Embed viewer
 	var viewerChannelName string
-	if viewer.enabled {
+	if viewer.enabled() {
 		viewerID, err := resolveViewerChannelID(viewer.selector)
 		if err != nil {
 			fatal("viewer: %v", err)
@@ -456,8 +461,12 @@ func cmdBridge(args []string) {
 		}
 
 		if viewerChID != "" {
-			chID := viewerChID
-			viewerEmbedRoutes(server.mux, func(_ string) map[string]interface{} {
+			defaultChID := viewerChID
+			bridgeInfoFn := func(reqChID string) map[string]interface{} {
+				chID := defaultChID
+				if reqChID != "" {
+					chID = reqChID
+				}
 				current := registry.GetChannel(chID)
 				if current == nil {
 					return map[string]interface{}{}
@@ -469,7 +478,35 @@ func cmdBridge(args []string) {
 					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
 				}
 				return info
-			}, nil)
+			}
+			bridgeChannelsFn := func() []viewerChannelRef {
+				channels := registry.ListChannels()
+				var refs []viewerChannelRef
+				for _, ch := range channels {
+					if ch.IsPrivate() {
+						continue
+					}
+					ref := viewerChannelRef{
+						ID:   ch.ChannelID,
+						Name: ch.Name,
+					}
+					if ch.guideDoc != nil {
+						ref.Guide = ch.guideDoc
+					}
+					if ch.IconFileName != "" {
+						ref.IconPath = "/tltv/v1/channels/" + ch.ChannelID + "/" + ch.IconFileName
+					}
+					refs = append(refs, ref)
+				}
+				return refs
+			}
+			bridgeViewerOpts := viewerRouteOptions{title: *viewerTitle, noFooter: *viewerNoFooter}
+			switch viewer.mode {
+			case "debug":
+				debugViewerRoutes(server.mux, bridgeInfoFn, bridgeChannelsFn, bridgeViewerOpts)
+			default:
+				productionViewerRoutes(server.mux, bridgeInfoFn, bridgeChannelsFn, bridgeViewerOpts)
+			}
 		}
 	} else {
 		statusPageRoutes(server.mux, func() *NodeInfo {
@@ -516,8 +553,8 @@ func cmdBridge(args []string) {
 	if len(channelList) == 1 {
 		logInfof("tltv URI: tltv://%s@%s", channelList[0].ChannelID, addr)
 	}
-	if viewer.enabled && viewerChannelName != "" {
-		logInfof("viewer: %s://%s (channel: %s)", scheme, addr, viewerChannelName)
+	if viewer.enabled() && viewerChannelName != "" {
+		logInfof("viewer: %s://%s (%s, channel: %s)", scheme, addr, viewer.mode, viewerChannelName)
 	}
 
 	if tlsCfg != nil {

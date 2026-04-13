@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2652,61 +2653,62 @@ func TestParseViewerArg(t *testing.T) {
 	tests := []struct {
 		name      string
 		args      []string
-		env       string
-		enabled   bool
+		env       string // VIEWER env var
+		debugEnv  string // DEBUG_VIEWER env var
+		mode      string
 		selector  string
 		remaining []string
 	}{
 		{
 			name:      "no flag",
 			args:      []string{"--channels", "foo"},
-			enabled:   false,
+			mode:      "",
 			remaining: []string{"--channels", "foo"},
 		},
 		{
 			name:      "bare --viewer",
 			args:      []string{"--channels", "foo", "--viewer"},
-			enabled:   true,
+			mode:      "viewer",
 			remaining: []string{"--channels", "foo"},
 		},
 		{
 			name:      "viewer with channel ID",
 			args:      []string{"--viewer", testChannelIDConst, "--listen", ":8000"},
-			enabled:   true,
+			mode:      "viewer",
 			selector:  testChannelIDConst,
 			remaining: []string{"--listen", ":8000"},
 		},
 		{
 			name:      "viewer with tltv URI",
 			args:      []string{"--viewer", "tltv://" + testChannelIDConst + "@host:443", "--cache"},
-			enabled:   true,
+			mode:      "viewer",
 			selector:  "tltv://" + testChannelIDConst + "@host:443",
 			remaining: []string{"--cache"},
 		},
 		{
 			name:      "viewer before flag arg",
 			args:      []string{"--viewer", "--listen", ":8000"},
-			enabled:   true,
+			mode:      "viewer",
 			selector:  "",
 			remaining: []string{"--listen", ":8000"},
 		},
 		{
 			name:      "viewer at end",
 			args:      []string{"--listen", ":8000", "--viewer"},
-			enabled:   true,
+			mode:      "viewer",
 			remaining: []string{"--listen", ":8000"},
 		},
 		{
 			name:      "viewer=value syntax",
 			args:      []string{"--viewer=" + testChannelIDConst},
-			enabled:   true,
+			mode:      "viewer",
 			selector:  testChannelIDConst,
 			remaining: []string{},
 		},
 		{
 			name:      "viewer=true",
 			args:      []string{"--viewer=true"},
-			enabled:   true,
+			mode:      "viewer",
 			selector:  "",
 			remaining: []string{},
 		},
@@ -2714,14 +2716,14 @@ func TestParseViewerArg(t *testing.T) {
 			name:      "env VIEWER=1",
 			args:      []string{"--listen", ":8000"},
 			env:       "1",
-			enabled:   true,
+			mode:      "viewer",
 			remaining: []string{"--listen", ":8000"},
 		},
 		{
 			name:      "env VIEWER=channelID",
 			args:      []string{},
 			env:       testChannelIDConst,
-			enabled:   true,
+			mode:      "viewer",
 			selector:  testChannelIDConst,
 			remaining: []string{},
 		},
@@ -2729,7 +2731,56 @@ func TestParseViewerArg(t *testing.T) {
 			name:      "cli overrides env",
 			args:      []string{"--viewer", testChannelIDConst},
 			env:       "1",
-			enabled:   true,
+			mode:      "viewer",
+			selector:  testChannelIDConst,
+			remaining: []string{},
+		},
+		// --debug-viewer tests
+		{
+			name:      "bare --debug-viewer",
+			args:      []string{"--channels", "foo", "--debug-viewer"},
+			mode:      "debug",
+			remaining: []string{"--channels", "foo"},
+		},
+		{
+			name:      "debug-viewer with channel ID",
+			args:      []string{"--debug-viewer", testChannelIDConst, "--listen", ":8000"},
+			mode:      "debug",
+			selector:  testChannelIDConst,
+			remaining: []string{"--listen", ":8000"},
+		},
+		{
+			name:      "debug-viewer=value",
+			args:      []string{"--debug-viewer=" + testChannelIDConst},
+			mode:      "debug",
+			selector:  testChannelIDConst,
+			remaining: []string{},
+		},
+		{
+			name:      "env DEBUG_VIEWER=1",
+			args:      []string{},
+			debugEnv:  "1",
+			mode:      "debug",
+			remaining: []string{},
+		},
+		// Short alias -V
+		{
+			name:      "short -V",
+			args:      []string{"-V"},
+			mode:      "viewer",
+			remaining: []string{},
+		},
+		{
+			name:      "short -V with selector",
+			args:      []string{"-V", testChannelIDConst},
+			mode:      "viewer",
+			selector:  testChannelIDConst,
+			remaining: []string{},
+		},
+		{
+			name:      "short -V=value",
+			args:      []string{"-V=" + testChannelIDConst},
+			mode:      "viewer",
 			selector:  testChannelIDConst,
 			remaining: []string{},
 		},
@@ -2742,9 +2793,14 @@ func TestParseViewerArg(t *testing.T) {
 			} else {
 				t.Setenv("VIEWER", "")
 			}
+			if tt.debugEnv != "" {
+				t.Setenv("DEBUG_VIEWER", tt.debugEnv)
+			} else {
+				t.Setenv("DEBUG_VIEWER", "")
+			}
 			remaining, vc := parseViewerArg(tt.args)
-			if vc.enabled != tt.enabled {
-				t.Errorf("enabled: got %v, want %v", vc.enabled, tt.enabled)
+			if vc.mode != tt.mode {
+				t.Errorf("mode: got %q, want %q", vc.mode, tt.mode)
 			}
 			if vc.selector != tt.selector {
 				t.Errorf("selector: got %q, want %q", vc.selector, tt.selector)
@@ -3127,6 +3183,110 @@ func TestDisplayListenAddr(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("displayListenAddr(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestViewerListenIsLoopbackOnly(t *testing.T) {
+	tests := []struct {
+		listen string
+		want   bool
+	}{
+		{"127.0.0.1:9000", true},
+		{"localhost:9000", true},
+		{"[::1]:9000", true},
+		{":9000", false},
+		{"0.0.0.0:9000", false},
+		{"[::]:9000", false},
+		{"192.168.1.5:9000", false},
+		{"viewer.example.com:9000", false},
+	}
+	for _, tt := range tests {
+		if got := viewerListenIsLoopbackOnly(tt.listen); got != tt.want {
+			t.Errorf("viewerListenIsLoopbackOnly(%q) = %v, want %v", tt.listen, got, tt.want)
+		}
+	}
+}
+
+func TestViewerResolveToken(t *testing.T) {
+	const target = "tltv://TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:443?token=embedded"
+
+	if got := viewerResolveToken(target, ""); got != "embedded" {
+		t.Fatalf("viewerResolveToken embedded = %q, want embedded", got)
+	}
+	if got := viewerResolveToken(target, "override"); got != "override" {
+		t.Fatalf("viewerResolveToken override = %q, want override", got)
+	}
+	if got := viewerResolveToken("TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:443", ""); got != "" {
+		t.Fatalf("viewerResolveToken compact target = %q, want empty", got)
+	}
+}
+
+func TestSanitizeViewerSavedChannels(t *testing.T) {
+	const uri = "tltv://TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:443?token=secret"
+	entries := make([]viewerSavedGuideEntry, 55)
+	for i := range entries {
+		entries[i] = viewerSavedGuideEntry{Title: fmt.Sprintf("Show %d", i), Start: "2026-04-13T00:00:00Z", End: "2026-04-13T00:30:00Z"}
+	}
+	got := sanitizeViewerSavedChannels([]viewerSavedChannel{{
+		Name:     " Demo ",
+		URI:      uri,
+		IconData: "data:image/svg+xml;base64,PHN2Zz4=",
+		Guide:    &viewerSavedGuide{Entries: entries},
+	}})
+	if len(got) != 1 {
+		t.Fatalf("sanitizeViewerSavedChannels len = %d, want 1", len(got))
+	}
+	if got[0].ID != "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3" {
+		t.Fatalf("derived ID = %q", got[0].ID)
+	}
+	if strings.Contains(got[0].URI, "token=") {
+		t.Fatalf("saved URI should strip token, got %q", got[0].URI)
+	}
+	if got[0].Name != "Demo" {
+		t.Fatalf("sanitized name = %q, want Demo", got[0].Name)
+	}
+	if got[0].Guide == nil || len(got[0].Guide.Entries) != 50 {
+		t.Fatalf("guide entries = %d, want 50", len(got[0].Guide.Entries))
+	}
+}
+
+func TestLoadViewerSavedChannels_StringArray(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "saved.json")
+	uri := "tltv://TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3@example.com:443?token=secret"
+	if err := os.WriteFile(path, []byte("[\n  \""+uri+"\"\n]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	channels, err := loadViewerSavedChannels(path)
+	if err != nil {
+		t.Fatalf("loadViewerSavedChannels: %v", err)
+	}
+	if len(channels) != 1 {
+		t.Fatalf("len(channels) = %d, want 1", len(channels))
+	}
+	if channels[0].ID != "TVMkVHiXF9W1NgM9KLgs7tcBMvC1YtF4Daj4yfTrJercs3" {
+		t.Fatalf("derived ID = %q", channels[0].ID)
+	}
+	if strings.Contains(channels[0].URI, "token=") {
+		t.Fatalf("saved URI should strip token, got %q", channels[0].URI)
+	}
+}
+
+func TestAddViewerDisplayFlags_Aliases(t *testing.T) {
+	t.Setenv("VIEWER_TITLE", "")
+	t.Setenv("VIEWER_FOOTER", "")
+
+	fs := flag.NewFlagSet("viewer-display", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	title, noFooter := addViewerDisplayFlags(fs)
+	if err := fs.Parse([]string{"-e", "My TV", "-Z"}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if *title != "My TV" {
+		t.Fatalf("title = %q, want My TV", *title)
+	}
+	if !*noFooter {
+		t.Fatal("noFooter = false, want true")
 	}
 }
 

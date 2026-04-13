@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -74,14 +76,68 @@ func iconExtension(contentType string) string {
 	}
 }
 
+// resolveErrorMessage converts raw Go errors from the resolve pipeline into
+// user-friendly messages suitable for display in the portal UI.
+func resolveErrorMessage(raw string) string {
+	// Connection refused
+	if strings.Contains(raw, "connection refused") {
+		return "could not connect to host"
+	}
+	// DNS resolution failure
+	if strings.Contains(raw, "no such host") || strings.Contains(raw, "Temporary failure in name resolution") || strings.Contains(raw, "server misbehaving") {
+		return "host not found"
+	}
+	// Timeout
+	if strings.Contains(raw, "context deadline exceeded") || strings.Contains(raw, "i/o timeout") {
+		return "connection timed out"
+	}
+	// Local address blocked by SSRF protection
+	if strings.Contains(raw, "blocked: local/private address") || strings.Contains(raw, "connects to local address") {
+		return "local address blocked (use --local to allow)"
+	}
+	// Non-TLTV HTTP response (HTML 404 pages, etc.)
+	if strings.Contains(raw, "invalid JSON") || strings.Contains(raw, "invalid character '<'") {
+		return "not a TLTV node"
+	}
+	// HTTP error codes
+	if strings.Contains(raw, "HTTP 404") {
+		return "no TLTV channel found at this host"
+	}
+	if strings.Contains(raw, "HTTP 403") {
+		return "access denied"
+	}
+	// TLS errors
+	if strings.Contains(raw, "certificate") || strings.Contains(raw, "tls:") {
+		return "TLS connection failed"
+	}
+	// Strip verbose Go error wrapping for remaining cases
+	msg := raw
+	// Remove "not a valid target and discovery failed on host: " prefix
+	if idx := strings.Index(msg, "discovery failed on "); idx >= 0 {
+		if colon := strings.Index(msg[idx:], ": "); colon >= 0 {
+			msg = msg[idx+colon+2:]
+		}
+	}
+	// Remove "request failed: Get "url": " wrapper
+	if idx := strings.Index(msg, "request failed: "); idx >= 0 {
+		msg = msg[idx+len("request failed: "):]
+	}
+	if idx := strings.Index(msg, "Get \""); idx >= 0 {
+		if end := strings.Index(msg[idx:], "\": "); end >= 0 {
+			msg = msg[idx+end+3:]
+		}
+	}
+	// Remove "fetch metadata: " prefix
+	msg = strings.TrimPrefix(msg, "fetch metadata: ")
+	return msg
+}
+
 // viewerServer serves the local viewer page and proxies HLS to the upstream target.
 type viewerServer struct {
 	channelID   string
 	channelName string
 	streamDir   string // upstream stream directory URL (e.g., "https://host/tltv/v1/channels/id/")
 	streamFile  string // manifest filename (e.g., "stream.m3u8")
-	streamURL   string // full upstream stream URL for display
-	xmltvURL    string // upstream XMLTV guide URL
 	baseURL     string // upstream base URL (e.g., "https://host:port")
 	token       string
 	client      *http.Client
@@ -90,30 +146,86 @@ type viewerServer struct {
 	tltvURI     string
 }
 
-// ---------- Shared Viewer Helpers ----------
-
-// viewerConfig holds the parsed --viewer flag state.
-type viewerConfig struct {
-	enabled  bool   // viewer is on
-	selector string // channel ID or tltv:// URI (empty = auto-select first)
-	fromCLI  bool   // true if --viewer appeared in CLI args (prevents config override)
+type viewerSavedGuideEntry struct {
+	Title     string `json:"title,omitempty"`
+	Start     string `json:"start,omitempty"`
+	End       string `json:"end,omitempty"`
+	RelayFrom string `json:"relay_from,omitempty"`
 }
 
-// parseViewerArg pre-processes --viewer from args before fs.Parse().
-// --viewer without a value enables auto-selection of the first channel.
-// --viewer followed by a channel ID (TV...) or tltv:// URI selects that channel.
-// Also reads the VIEWER env var: "1" enables auto-select, any other non-empty
-// value is treated as a channel selector. CLI overrides env.
+type viewerSavedGuide struct {
+	Entries []viewerSavedGuideEntry `json:"entries,omitempty"`
+}
+
+type viewerSavedChannel struct {
+	ID       string            `json:"id,omitempty"`
+	Name     string            `json:"name,omitempty"`
+	URI      string            `json:"uri,omitempty"`
+	IconData string            `json:"icon_data,omitempty"`
+	Guide    *viewerSavedGuide `json:"guide,omitempty"`
+}
+
+type viewerSavedChannelsResponse struct {
+	Enabled  bool                 `json:"enabled"`
+	Channels []viewerSavedChannel `json:"channels,omitempty"`
+}
+
+type viewerSavedChannelsRequest struct {
+	Channels []viewerSavedChannel `json:"channels"`
+}
+
+type viewerSavedChannelStore struct {
+	mu       sync.Mutex
+	path     string
+	channels []viewerSavedChannel
+}
+
+// ---------- Shared Viewer Helpers ----------
+
+// viewerConfig holds the parsed --viewer / --debug-viewer flag state.
+type viewerConfig struct {
+	mode     string // "", "viewer", "debug"
+	selector string // channel ID or tltv:// URI (empty = auto-select first)
+	fromCLI  bool   // true if --viewer or --debug-viewer appeared in CLI args (prevents config override)
+}
+
+// enabled returns true if any viewer mode is active.
+func (vc viewerConfig) enabled() bool { return vc.mode != "" }
+
+// parseViewerArg pre-processes --viewer and --debug-viewer from args before fs.Parse().
+// --viewer enables the production viewer. --debug-viewer enables the diagnostic viewer.
+// Both accept an optional channel selector (channel ID or tltv:// URI).
+// Env vars: VIEWER=1 → production, DEBUG_VIEWER=1 → debug.
+// Mutually exclusive — both set is a startup error (handled by the caller).
 func parseViewerArg(args []string) (remaining []string, vc viewerConfig) {
-	// Env var default
+	// Env var defaults
 	if env := os.Getenv("VIEWER"); env != "" {
 		switch env {
 		case "0", "false":
 			// explicitly disabled
 		case "1", "true":
-			vc.enabled = true
+			vc.mode = "viewer"
 		default:
-			vc.enabled = true
+			vc.mode = "viewer"
+			vc.selector = env
+		}
+	}
+	if env := os.Getenv("DEBUG_VIEWER"); env != "" {
+		switch env {
+		case "0", "false":
+			// explicitly disabled
+		case "1", "true":
+			if vc.mode != "" {
+				fmt.Fprintf(os.Stderr, "error: --viewer and --debug-viewer are mutually exclusive\n")
+				os.Exit(1)
+			}
+			vc.mode = "debug"
+		default:
+			if vc.mode != "" {
+				fmt.Fprintf(os.Stderr, "error: --viewer and --debug-viewer are mutually exclusive\n")
+				os.Exit(1)
+			}
+			vc.mode = "debug"
 			vc.selector = env
 		}
 	}
@@ -123,10 +235,10 @@ func parseViewerArg(args []string) (remaining []string, vc viewerConfig) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 
-		// --viewer=value
-		if strings.HasPrefix(arg, "--viewer=") {
-			val := arg[len("--viewer="):]
-			vc.enabled = true
+		// --viewer=value / -V=value
+		if strings.HasPrefix(arg, "--viewer=") || strings.HasPrefix(arg, "-V=") {
+			val := arg[strings.IndexByte(arg, '=')+1:]
+			vc.mode = "viewer"
 			vc.fromCLI = true
 			if val != "1" && val != "true" {
 				vc.selector = val
@@ -136,9 +248,9 @@ func parseViewerArg(args []string) (remaining []string, vc viewerConfig) {
 			continue
 		}
 
-		// --viewer [optional channel selector]
-		if arg == "--viewer" {
-			vc.enabled = true
+		// --viewer / -V [optional channel selector]
+		if arg == "--viewer" || arg == "-V" {
+			vc.mode = "viewer"
 			vc.fromCLI = true
 			vc.selector = ""
 			// Peek: if next arg looks like a channel ref, consume it
@@ -152,8 +264,40 @@ func parseViewerArg(args []string) (remaining []string, vc viewerConfig) {
 			continue
 		}
 
+		// --debug-viewer=value
+		if strings.HasPrefix(arg, "--debug-viewer=") {
+			val := arg[len("--debug-viewer="):]
+			vc.mode = "debug"
+			vc.fromCLI = true
+			if val != "1" && val != "true" {
+				vc.selector = val
+			} else {
+				vc.selector = ""
+			}
+			continue
+		}
+
+		// --debug-viewer [optional channel selector]
+		if arg == "--debug-viewer" {
+			vc.mode = "debug"
+			vc.fromCLI = true
+			vc.selector = ""
+			if i+1 < len(args) {
+				next := args[i+1]
+				if strings.HasPrefix(next, "tltv://") || strings.HasPrefix(next, "TV") {
+					vc.selector = next
+					i++
+				}
+			}
+			continue
+		}
+
 		remaining = append(remaining, arg)
 	}
+
+	// Check mutual exclusion (only possible if CLI set one mode and env set another).
+	// If CLI is present, it takes priority — already handled by overwriting mode above.
+	// The problematic case is both env vars set, handled above in the env block.
 
 	return
 }
@@ -178,38 +322,100 @@ func resolveViewerChannelID(selector string) (string, error) {
 	return selector, nil
 }
 
-// applyViewerConfig applies the "viewer" field from a daemon config file.
-// Only applies if --viewer was not set on the CLI. Config accepts:
+// applyViewerConfig applies the "viewer" and "debug_viewer" fields from a
+// daemon config file. Only applies if --viewer/--debug-viewer was not set on
+// the CLI. Config accepts:
 //
-//	true       → enable auto-select
-//	"TVabc..." → enable with channel selector
-//	"tltv://..." → enable with URI selector
+//	"viewer": true            → production viewer
+//	"viewer": "TVabc..."      → production viewer with selector
+//	"debug_viewer": true      → debug viewer
+//	"debug_viewer": "TVabc..."→ debug viewer with selector
+//
+// Mutually exclusive — both set logs a warning and uses the production viewer.
 func applyViewerConfig(vc *viewerConfig, cfg map[string]interface{}) {
 	if vc.fromCLI {
 		return
 	}
-	val, ok := cfg["viewer"]
-	if !ok {
-		return
-	}
-	switch v := val.(type) {
-	case bool:
-		vc.enabled = v
-		vc.selector = ""
-	case string:
-		if v == "" || v == "0" || v == "false" {
-			return
+
+	applyField := func(key, mode string) bool {
+		val, ok := cfg[key]
+		if !ok {
+			return false
 		}
-		vc.enabled = true
-		if v != "1" && v != "true" {
-			vc.selector = v
+		switch v := val.(type) {
+		case bool:
+			if v {
+				vc.mode = mode
+				vc.selector = ""
+				return true
+			}
+		case string:
+			if v == "" || v == "0" || v == "false" {
+				return false
+			}
+			vc.mode = mode
+			if v != "1" && v != "true" {
+				vc.selector = v
+			} else {
+				vc.selector = ""
+			}
+			return true
 		}
+		return false
 	}
+
+	hasViewer := applyField("viewer", "viewer")
+	hasDebug := applyField("debug_viewer", "debug")
+
+	if hasViewer && hasDebug {
+		// Mutual exclusion: production wins, log warning.
+		applyField("viewer", "viewer")
+		logErrorf("config: both viewer and debug_viewer set; using viewer")
+	}
+}
+
+// viewerChannelRef holds per-channel data for the viewer's guide grid.
+// Unlike ChannelRef (protocol type), this carries viewer-only fields that
+// are not part of the protocol wire format.
+type viewerChannelRef struct {
+	ID       string
+	Name     string
+	Guide    []byte // raw signed guide JSON (nil if not available)
+	IconPath string // protocol icon path (e.g. "/tltv/v1/channels/{id}/icon.svg")
 }
 
 type viewerRouteOptions struct {
 	authToken string
 	private   bool
+	title     string // nav bar label (default: "" for embedded, "viewer" for portal)
+	noFooter  bool   // hide the footer with TLTV links
+}
+
+// addViewerDisplayFlags registers --viewer-title/-e and --no-viewer-footer/-Z.
+// Returns pointers to the parsed values. These are cosmetic-only flags that
+// modify the web player UI; they are not part of the protocol.
+func addViewerDisplayFlags(fs *flag.FlagSet) (title *string, noFooter *bool) {
+	defaultTitle := os.Getenv("VIEWER_TITLE")
+	title = fs.String("viewer-title", defaultTitle, "nav bar label text")
+	fs.StringVar(title, "e", defaultTitle, "alias for --viewer-title")
+
+	defaultNoFooter := os.Getenv("VIEWER_FOOTER") == "0"
+	noFooter = new(bool)
+	*noFooter = defaultNoFooter
+	fs.BoolVar(noFooter, "no-viewer-footer", defaultNoFooter, "hide the footer links")
+	fs.BoolVar(noFooter, "Z", defaultNoFooter, "alias for --no-viewer-footer")
+	return
+}
+
+// applyViewerDisplayConfig adds viewer cosmetic config (title, footer) to the
+// /api/info response so the JS can apply it on load.
+func (o viewerRouteOptions) applyDisplayConfig(info map[string]interface{}) {
+	if o.title != "" {
+		info["viewer_title"] = o.title
+	}
+	if o.noFooter {
+		info["viewer_footer"] = false
+	}
 }
 
 func (o viewerRouteOptions) authenticate(w http.ResponseWriter, r *http.Request) bool {
@@ -223,19 +429,19 @@ func (o viewerRouteOptions) authenticate(w http.ResponseWriter, r *http.Request)
 	return checkRequestToken(w, r, o.authToken)
 }
 
-// viewerEmbedRoutes registers the viewer HTML, static assets, and /api/info
+// debugViewerRoutes registers the debug viewer HTML, static assets, and /api/info
 // on an existing mux. infoFn is called per-request to get current channel state.
 //
 // Routes registered:
 //
-//	GET /{$}         → viewer HTML (exact root path only)
+//	GET /{$}         → debug viewer HTML (exact root path only)
 //	GET /favicon.svg → SVG icon
 //	GET /hls.min.js  → vendored HLS.js
 //	GET /api/info    → JSON channel info
 //
 // Protocol endpoints (/.well-known/tltv, /tltv/v1/...) registered separately
 // by the daemon take routing priority over the "/" subtree pattern.
-func viewerEmbedRoutes(mux *http.ServeMux, infoFn func(channelID string) map[string]interface{}, channelsFn func() []ChannelRef, opts ...viewerRouteOptions) {
+func debugViewerRoutes(mux *http.ServeMux, infoFn func(channelID string) map[string]interface{}, channelsFn func() []viewerChannelRef, opts ...viewerRouteOptions) {
 	var opt viewerRouteOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -270,13 +476,24 @@ func viewerEmbedRoutes(mux *http.ServeMux, infoFn func(channelID string) map[str
 		if channelsFn != nil {
 			chList := channelsFn()
 			if len(chList) > 1 {
-				var arr []interface{}
-				for _, ch := range chList {
-					arr = append(arr, map[string]interface{}{"id": ch.ID, "name": ch.Name})
+				arr := make([]interface{}, len(chList))
+				for i, ch := range chList {
+					entry := map[string]interface{}{"id": ch.ID, "name": ch.Name}
+					if ch.IconPath != "" {
+						entry["icon_path"] = ch.IconPath
+					}
+					if ch.Guide != nil {
+						var g map[string]interface{}
+						if json.Unmarshal(ch.Guide, &g) == nil {
+							entry["guide"] = g
+						}
+					}
+					arr[i] = entry
 				}
 				info["channels"] = arr
 			}
 		}
+		opt.applyDisplayConfig(info)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
@@ -373,6 +590,203 @@ func viewerBuildInfo(channelID, channelName string, metadataJSON, guideJSON []by
 	return info
 }
 
+// viewerListenIsLoopbackOnly reports whether the standalone viewer is bound
+// only to loopback. Wildcard binds like ":9000" or "0.0.0.0:9000" are NOT
+// loopback-only, even though they omit or use an unspecified host.
+func viewerListenIsLoopbackOnly(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// viewerResolveToken resolves the effective token for a viewer tune target.
+// The target's embedded tltv:// token is used by default; an explicit token
+// override wins when provided.
+func viewerResolveToken(target, explicit string) string {
+	tok := extractToken(target)
+	if explicit != "" {
+		tok = explicit
+	}
+	return tok
+}
+
+func stripViewerSavedToken(uri string) string {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return ""
+	}
+	if strings.HasPrefix(uri, "tltv://") {
+		if parsed, err := parseTLTVUri(uri); err == nil {
+			return formatTLTVUri(parsed.ChannelID, parsed.Hints, "")
+		}
+	}
+	return uri
+}
+
+func sanitizeViewerSavedChannels(channels []viewerSavedChannel) []viewerSavedChannel {
+	if len(channels) > 100 {
+		channels = channels[:100]
+	}
+	out := make([]viewerSavedChannel, 0, len(channels))
+	for _, ch := range channels {
+		sc := viewerSavedChannel{
+			ID:   strings.TrimSpace(ch.ID),
+			Name: strings.TrimSpace(ch.Name),
+			URI:  stripViewerSavedToken(ch.URI),
+		}
+		if sc.ID == "" && sc.URI != "" {
+			if strings.HasPrefix(sc.URI, "tltv://") {
+				if parsed, err := parseTLTVUri(sc.URI); err == nil {
+					sc.ID = parsed.ChannelID
+				}
+			} else if strings.HasPrefix(sc.URI, "TV") {
+				if idx := strings.IndexByte(sc.URI, '@'); idx > 0 {
+					sc.ID = sc.URI[:idx]
+				}
+			}
+		}
+		if len(ch.IconData) <= 1<<20 && strings.HasPrefix(ch.IconData, "data:") {
+			sc.IconData = ch.IconData
+		}
+		if ch.Guide != nil && len(ch.Guide.Entries) > 0 {
+			entries := ch.Guide.Entries
+			if len(entries) > 50 {
+				entries = entries[:50]
+			}
+			sc.Guide = &viewerSavedGuide{Entries: make([]viewerSavedGuideEntry, 0, len(entries))}
+			for _, entry := range entries {
+				sc.Guide.Entries = append(sc.Guide.Entries, viewerSavedGuideEntry{
+					Title:     strings.TrimSpace(entry.Title),
+					Start:     strings.TrimSpace(entry.Start),
+					End:       strings.TrimSpace(entry.End),
+					RelayFrom: strings.TrimSpace(entry.RelayFrom),
+				})
+			}
+			if len(sc.Guide.Entries) == 0 {
+				sc.Guide = nil
+			}
+		}
+		if sc.ID == "" && sc.URI == "" {
+			continue
+		}
+		out = append(out, sc)
+	}
+	return out
+}
+
+func loadViewerSavedChannels(path string) ([]viewerSavedChannel, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, nil
+	}
+	var channels []viewerSavedChannel
+	if err := json.Unmarshal(data, &channels); err == nil {
+		return sanitizeViewerSavedChannels(channels), nil
+	}
+	var uris []string
+	if err := json.Unmarshal(data, &uris); err == nil {
+		channels = make([]viewerSavedChannel, 0, len(uris))
+		for _, uri := range uris {
+			channels = append(channels, viewerSavedChannel{URI: uri})
+		}
+		return sanitizeViewerSavedChannels(channels), nil
+	}
+	return nil, fmt.Errorf("invalid saved channels JSON")
+}
+
+func newViewerSavedChannelStore(path string) (*viewerSavedChannelStore, error) {
+	channels, err := loadViewerSavedChannels(path)
+	if err != nil {
+		return nil, err
+	}
+	return &viewerSavedChannelStore{path: path, channels: channels}, nil
+}
+
+func (s *viewerSavedChannelStore) list() []viewerSavedChannel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]viewerSavedChannel, len(s.channels))
+	copy(out, s.channels)
+	return out
+}
+
+func (s *viewerSavedChannelStore) save(channels []viewerSavedChannel) error {
+	channels = sanitizeViewerSavedChannels(channels)
+	data, err := json.MarshalIndent(channels, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	dir := filepath.Dir(s.path)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	tmp, err := os.CreateTemp(dir, ".saved-channels-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.channels = channels
+	s.mu.Unlock()
+	return nil
+}
+
+func registerViewerSavedChannelRoutes(mux *http.ServeMux, store *viewerSavedChannelStore) {
+	mux.HandleFunc("GET /api/saved-channels", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		resp := viewerSavedChannelsResponse{Enabled: store != nil}
+		if store != nil {
+			resp.Channels = store.list()
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("POST /api/saved-channels", func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			jsonError(w, "saved_channels_disabled", http.StatusNotFound)
+			return
+		}
+		var req viewerSavedChannelsRequest
+		dec := json.NewDecoder(io.LimitReader(r.Body, 10<<20))
+		if err := dec.Decode(&req); err != nil {
+			jsonError(w, "invalid_json", http.StatusBadRequest)
+			return
+		}
+		if err := store.save(req.Channels); err != nil {
+			jsonError(w, "save_failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(viewerSavedChannelsResponse{Enabled: true, Channels: store.list()})
+	})
+}
+
 // ---------- Standalone Viewer ----------
 
 func cmdViewer(args []string) {
@@ -388,24 +802,39 @@ func cmdViewer(args []string) {
 	token := fs.String("token", "", "access token for private channels")
 	fs.StringVar(token, "t", "", "alias for --token")
 
+	savedChannelsPath := fs.String("saved-channels", os.Getenv("SAVED_CHANNELS"), "JSON file for saved portal channels")
+	fs.StringVar(savedChannelsPath, "E", os.Getenv("SAVED_CHANNELS"), "alias for --saved-channels")
+
+	debugMode := fs.Bool("debug", false, "use the diagnostic debug viewer instead of the production viewer")
+	viewerTitle, viewerNoFooter := addViewerDisplayFlags(fs)
+
 	logLevel, logFormat, logFile := addLogFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Start a local web viewer for a TLTV channel\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv viewer [flags] <target>\n\n")
-		fmt.Fprintf(os.Stderr, "Target can be a tltv:// URI, compact ID@host, or bare hostname:\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv viewer [flags] [target]\n\n")
+		fmt.Fprintf(os.Stderr, "Target can be a tltv:// URI, compact ID@host, or bare hostname.\n")
+		fmt.Fprintf(os.Stderr, "If no target is given, starts as a portal with a tune box.\n\n")
 		fmt.Fprintf(os.Stderr, "  tltv viewer demo.timelooptv.org\n")
 		fmt.Fprintf(os.Stderr, "  tltv viewer TVabc...@demo.timelooptv.org:443\n")
 		fmt.Fprintf(os.Stderr, "  tltv viewer \"tltv://TVabc...@demo.timelooptv.org:443\"\n")
-		fmt.Fprintf(os.Stderr, "  tltv viewer --token secret TVabc...@localhost:8000\n\n")
+		fmt.Fprintf(os.Stderr, "  tltv viewer --token secret TVabc...@localhost:8000\n")
+		fmt.Fprintf(os.Stderr, "  tltv viewer   (portal mode — tune from the browser)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
-		fmt.Fprintf(os.Stderr, "  -l, --listen string   listen address (default: 127.0.0.1:9000)\n\n")
-		fmt.Fprintf(os.Stderr, "Environment variables: LISTEN, LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
+		fmt.Fprintf(os.Stderr, "  -t, --token string       access token for private channels\n")
+		fmt.Fprintf(os.Stderr, "  -l, --listen string      listen address (default: 127.0.0.1:9000)\n")
+		fmt.Fprintf(os.Stderr, "  -E, --saved-channels FILE  JSON file for saved portal channels\n")
+		fmt.Fprintf(os.Stderr, "      --debug              use diagnostic debug viewer\n")
+		fmt.Fprintf(os.Stderr, "  -e, --viewer-title TEXT   nav bar label text\n")
+		fmt.Fprintf(os.Stderr, "  -Z, --no-viewer-footer   hide the footer links\n\n")
+		fmt.Fprintf(os.Stderr, "Environment variables: LISTEN, SAVED_CHANNELS, VIEWER_TITLE, VIEWER_FOOTER=0,\n")
+		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars.\n")
 	}
 	fs.Parse(args)
 
-	if fs.NArg() < 1 {
+	// Debug mode requires a target (no portal mode).
+	if *debugMode && fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "error: --debug requires a target argument\n")
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -414,115 +843,328 @@ func cmdViewer(args []string) {
 		fatal("%v", err)
 	}
 
-	target := fs.Arg(0)
-
-	// Token: flag overrides URI-embedded token
-	tok := extractToken(target)
-	if *token != "" {
-		tok = *token
-	}
-
 	client := newClient(flagInsecure)
-
-	channelID, host, err := parseTargetOrDiscover(target, client)
-	if err != nil {
-		fatal("%v", err)
+	// resolveClient is used by /api/resolve for user-supplied targets.
+	// When listening on a non-local address, use SSRF-safe client to prevent
+	// the portal from being used to probe internal networks (§11B).
+	// When listening on localhost (default), SSRF protection is unnecessary
+	// since only the local operator can access the portal.
+	resolveClient := client
+	if !viewerListenIsLoopbackOnly(*listen) {
+		resolveClient = newSSRFSafeClient(flagInsecure)
 	}
 
-	// Fetch and verify metadata
-	logInfof("fetching metadata for %s from %s", channelID, host)
-	doc, err := client.FetchMetadata(host, channelID, tok)
-	if err != nil {
-		fatal("fetch metadata: %v", err)
-	}
-	if err := verifyDocument(doc, channelID); err != nil {
-		fatal("verify metadata: %v", err)
-	}
-	logInfof("metadata verified: %s", getString(doc, "name"))
-
-	// Check for unknown access modes (spec §5.2)
-	if err := checkAccessMode(doc); err != nil {
-		fatal("%v", err)
-	}
-
-	// Fetch guide (non-fatal)
-	var guide map[string]interface{}
-	guide, err = client.FetchGuide(host, channelID, tok)
-	if err != nil {
-		logInfof("guide not available: %v", err)
-	} else if err := verifyDocument(guide, channelID); err != nil {
-		logInfof("guide verification failed: %v", err)
-		guide = nil
-	}
-
-	// Build stream URL components
-	streamPath := getString(doc, "stream")
-	if streamPath == "" {
-		fatal("metadata has no stream path")
-	}
-
-	base := client.baseURL(host)
-	streamDir := base + path.Dir(streamPath) + "/"
-	streamFile := path.Base(streamPath)
-	streamURL := base + streamPath
-	if tok != "" {
-		streamURL += "?token=" + tok
-	}
-
-	xmltvURL := base + "/tltv/v1/channels/" + channelID + "/guide.xml"
-	if tok != "" {
-		xmltvURL += "?token=" + tok
-	}
-
-	// Build tltv URI for display
-	tltvURI := formatTLTVUri(channelID, []string{host}, "")
-
-	// Warn if listen address is non-local
-	if listenHost, _, splitErr := net.SplitHostPort(*listen); splitErr == nil {
-		if listenHost != "" && listenHost != "127.0.0.1" && listenHost != "localhost" && listenHost != "::1" {
-			logInfof("WARNING: listening on non-local address %s", *listen)
+	var savedStore *viewerSavedChannelStore
+	if *savedChannelsPath != "" {
+		var err error
+		savedStore, err = newViewerSavedChannelStore(*savedChannelsPath)
+		if err != nil {
+			fatal("load saved channels: %v", err)
 		}
 	}
 
-	srv := &viewerServer{
-		channelID:   channelID,
-		channelName: getString(doc, "name"),
-		streamDir:   streamDir,
-		streamFile:  streamFile,
-		streamURL:   streamURL,
-		xmltvURL:    xmltvURL,
-		baseURL:     base,
-		token:       tok,
-		client:      client.http,
-		metadata:    doc,
-		guide:       guide,
-		tltvURI:     tltvURI,
+	// If a target is given, resolve it at startup.
+	var srv *viewerServer
+	if fs.NArg() >= 1 {
+		target := fs.Arg(0)
+
+		// Token: flag overrides URI-embedded token
+		tok := viewerResolveToken(target, *token)
+
+		channelID, host, err := parseTargetOrDiscover(target, client)
+		if err != nil {
+			fatal("%v", err)
+		}
+
+		// Fetch and verify metadata
+		logInfof("fetching metadata for %s from %s", channelID, host)
+		doc, err := client.FetchMetadata(host, channelID, tok)
+		if err != nil {
+			fatal("fetch metadata: %v", err)
+		}
+		if err := verifyDocument(doc, channelID); err != nil {
+			fatal("verify metadata: %v", err)
+		}
+		logInfof("metadata verified: %s", getString(doc, "name"))
+
+		if err := checkAccessMode(doc); err != nil {
+			fatal("%v", err)
+		}
+
+		// Fetch guide (non-fatal)
+		var guide map[string]interface{}
+		guide, err = client.FetchGuide(host, channelID, tok)
+		if err != nil {
+			logInfof("guide not available: %v", err)
+		} else if err := verifyDocument(guide, channelID); err != nil {
+			logInfof("guide verification failed: %v", err)
+			guide = nil
+		}
+
+		streamPath := getString(doc, "stream")
+		if streamPath == "" {
+			fatal("metadata has no stream path")
+		}
+
+		base := client.baseURL(host)
+		streamDir := base + path.Dir(streamPath) + "/"
+		streamFile := path.Base(streamPath)
+
+		tltvURI := formatTLTVUri(channelID, []string{host}, "")
+
+		srv = &viewerServer{
+			channelID:   channelID,
+			channelName: getString(doc, "name"),
+			streamDir:   streamDir,
+			streamFile:  streamFile,
+			baseURL:     base,
+			token:       tok,
+			client:      client.http,
+			metadata:    doc,
+			guide:       guide,
+			tltvURI:     tltvURI,
+		}
+	}
+
+	// Warn if listen address is non-local
+	if !viewerListenIsLoopbackOnly(*listen) {
+		logInfof("WARNING: listening on non-local address %s", *listen)
 	}
 
 	mux := http.NewServeMux()
 
-	// Shared viewer routes (HTML, assets, /api/info)
-	viewerEmbedRoutes(mux, func(_ string) map[string]interface{} {
+	// /api/info — serves current channel state (nil-safe for portal mode).
+	// Uses local proxy URLs only — never exposes token-bearing upstream URLs
+	// to the browser (§11C: standalone token leakage prevention).
+	infoFn := func(_ string) map[string]interface{} {
+		if srv == nil {
+			return map[string]interface{}{"portal": true}
+		}
 		info := map[string]interface{}{
 			"channel_id":   srv.channelID,
 			"channel_name": srv.channelName,
 			"tltv_uri":     srv.tltvURI,
 			"stream_file":  srv.streamFile,
 			"stream_src":   "/stream/" + srv.streamFile,
-			"stream_url":   srv.streamURL,
-			"xmltv_url":    srv.xmltvURL,
 			"base_url":     srv.baseURL,
 			"verified":     true,
 			"metadata":     srv.metadata,
+		}
+		// Icon URL via local proxy (avoids cross-origin + wrong content-type issues).
+		if getString(srv.metadata, "icon") != "" {
+			info["icon_url"] = "/api/icon"
 		}
 		if srv.guide != nil {
 			info["guide"] = srv.guide
 		}
 		return info
-	}, nil)
+	}
 
-	// Standalone-only: stream proxy to remote upstream
-	mux.HandleFunc("/stream/", srv.handleStream)
+	standaloneOpts := viewerRouteOptions{title: *viewerTitle, noFooter: *viewerNoFooter}
+	if *debugMode {
+		debugViewerRoutes(mux, infoFn, nil, standaloneOpts)
+	} else {
+		// Standalone portal is explicitly local/single-user (§11A).
+		// Process-global state — one tune changes playback for all clients.
+		standalonePortalRoutes(mux, infoFn, nil, standaloneOpts)
+	}
+	registerViewerSavedChannelRoutes(mux, savedStore)
+
+	// /api/resolve — server-side federated resolution for the portal tune box.
+	// Accepts ?target=<host|id@host|tltv://...> and returns resolved channel info.
+	// Uses SSRF-safe client to prevent internal network access (§11B).
+	mux.HandleFunc("GET /api/resolve", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "target parameter required"})
+			return
+		}
+
+		tok := viewerResolveToken(target, r.URL.Query().Get("token"))
+
+		chID, host, err := parseTargetOrDiscover(target, resolveClient)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(502)
+			json.NewEncoder(w).Encode(map[string]string{"error": resolveErrorMessage(err.Error())})
+			return
+		}
+
+		doc, err := resolveClient.FetchMetadata(host, chID, tok)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(502)
+			json.NewEncoder(w).Encode(map[string]string{"error": resolveErrorMessage("fetch metadata: " + err.Error())})
+			return
+		}
+		if err := verifyDocument(doc, chID); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(502)
+			json.NewEncoder(w).Encode(map[string]string{"error": "verification failed: " + err.Error()})
+			return
+		}
+
+		// Fetch guide (non-fatal)
+		var guideDoc map[string]interface{}
+		guideDoc, err = resolveClient.FetchGuide(host, chID, tok)
+		if err == nil {
+			if verifyErr := verifyDocument(guideDoc, chID); verifyErr != nil {
+				guideDoc = nil
+			}
+		}
+
+		streamPath := getString(doc, "stream")
+		base := client.baseURL(host)
+		streamDir := base + path.Dir(streamPath) + "/"
+		streamFile := path.Base(streamPath)
+
+		tltvURI := formatTLTVUri(chID, []string{host}, "")
+
+		// Update the server state for stream proxying.
+		srv = &viewerServer{
+			channelID:   chID,
+			channelName: getString(doc, "name"),
+			streamDir:   streamDir,
+			streamFile:  streamFile,
+			baseURL:     base,
+			token:       tok,
+			client:      client.http,
+			metadata:    doc,
+			guide:       guideDoc,
+			tltvURI:     tltvURI,
+		}
+		logInfof("tuned to %s (%s) via %s", chID, getString(doc, "name"), host)
+
+		// Use local proxy URLs — never expose token-bearing upstream URLs
+		// to the browser (§11C: standalone token leakage prevention).
+		result := map[string]interface{}{
+			"channel_id":   chID,
+			"channel_name": getString(doc, "name"),
+			"tltv_uri":     tltvURI,
+			"stream_file":  streamFile,
+			"stream_src":   "/stream/" + streamFile,
+			"base_url":     base,
+			"verified":     true,
+			"metadata":     doc,
+		}
+		// Icon URL via local proxy (avoids cross-origin + wrong content-type issues).
+		if getString(doc, "icon") != "" {
+			result["icon_url"] = "/api/icon"
+		}
+		if guideDoc != nil {
+			result["guide"] = guideDoc
+		}
+
+		// Discover all channels from the host so the portal can add them all.
+		// Fetch metadata+guide for each so the portal can show icons and guide entries.
+		// Non-fatal — only the primary channel is required.
+		// Skip when the client already has sibling data (e.g. clicking a saved channel).
+		skipDiscover := r.URL.Query().Get("skip_discover") == "1"
+		if !skipDiscover {
+			if nodeInfo, discErr := resolveClient.FetchNodeInfo(host); discErr == nil {
+				var discovered []map[string]interface{}
+				allRefs := make([]ChannelRef, 0, len(nodeInfo.Channels)+len(nodeInfo.Relaying))
+				allRefs = append(allRefs, nodeInfo.Channels...)
+				allRefs = append(allRefs, nodeInfo.Relaying...)
+				for _, ref := range allRefs {
+					if ref.ID == chID {
+						continue // skip the primary — already in the response
+					}
+					entry := map[string]interface{}{
+						"id":   ref.ID,
+						"name": ref.Name,
+						"uri":  formatTLTVUri(ref.ID, []string{host}, ""),
+					}
+					// Try to fetch metadata for icon — encode as data-URI to avoid CORS
+					if sibDoc, sibErr := resolveClient.FetchMetadata(host, ref.ID, tok); sibErr == nil {
+						if verifyDocument(sibDoc, ref.ID) == nil {
+							if icon := getString(sibDoc, "icon"); icon != "" {
+								iconURL := base + icon
+								if tok != "" {
+									iconURL += "?token=" + tok
+								}
+								if req, reqErr := http.NewRequest("GET", iconURL, nil); reqErr == nil {
+									req.Header.Set("User-Agent", "tltv-cli/"+version)
+									if resp, respErr := resolveClient.http.Do(req); respErr == nil {
+										if iconBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024)); readErr == nil && resp.StatusCode == 200 {
+											ct := iconContentType(icon)
+											entry["icon_data"] = "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(iconBody)
+										}
+										resp.Body.Close()
+									}
+								}
+							}
+						}
+					}
+					// Try to fetch guide for program entries
+					if sibGuide, sibErr := resolveClient.FetchGuide(host, ref.ID, tok); sibErr == nil {
+						if verifyDocument(sibGuide, ref.ID) == nil {
+							entry["guide"] = sibGuide
+						}
+					}
+					discovered = append(discovered, entry)
+				}
+				if len(discovered) > 0 {
+					result["discovered_channels"] = discovered
+				}
+			}
+		} // end skipDiscover
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		enc.Encode(result)
+	})
+
+	// Icon proxy — proxies channel icon from upstream with correct content-type.
+	mux.HandleFunc("GET /api/icon", func(w http.ResponseWriter, r *http.Request) {
+		if srv == nil {
+			http.NotFound(w, r)
+			return
+		}
+		iconPath := getString(srv.metadata, "icon")
+		if iconPath == "" {
+			http.NotFound(w, r)
+			return
+		}
+		iconURL := srv.baseURL + iconPath
+		if srv.token != "" {
+			iconURL += "?token=" + srv.token
+		}
+		req, err := http.NewRequestWithContext(r.Context(), "GET", iconURL, nil)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		req.Header.Set("User-Agent", "tltv-cli/"+version)
+		resp, err := srv.client.Do(req)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+		if err != nil || resp.StatusCode != 200 {
+			http.NotFound(w, r)
+			return
+		}
+		// Detect content-type from the icon path extension (upstream may serve wrong type).
+		ct := iconContentType(iconPath)
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Write(body)
+	})
+
+	// Stream proxy — proxies HLS to the currently-tuned upstream.
+	mux.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
+		if srv == nil {
+			http.Error(w, "No channel tuned", http.StatusServiceUnavailable)
+			return
+		}
+		srv.handleStream(w, r)
+	})
 
 	httpSrv := &http.Server{
 		Addr:              *listen,
@@ -532,7 +1174,11 @@ func cmdViewer(args []string) {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	logInfof("viewer: http://%s", displayListenAddr(*listen))
+	if srv != nil {
+		logInfof("viewer: http://%s (tuned to %s)", displayListenAddr(*listen), srv.channelName)
+	} else {
+		logInfof("viewer portal: http://%s", displayListenAddr(*listen))
+	}
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -594,14 +1240,15 @@ func (s *viewerServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set content type and cache headers
+	// Set content type and cache headers.
+	// Standalone viewer proxy uses no-store to prevent browser from serving
+	// cached segments from a previous channel when switching channels on the
+	// same node (segment names like seg1028.ts collide across channels).
 	w.Header().Set("Content-Type", streamContentType(subPath))
 	if strings.HasSuffix(subPath, ".m3u8") {
 		body = rewriteManifest(upstreamURL, body, "")
-		w.Header().Set("Cache-Control", "max-age=1, no-cache")
-	} else {
-		w.Header().Set("Cache-Control", "max-age=3600")
 	}
+	w.Header().Set("Cache-Control", "no-store")
 
 	w.Write(body)
 }
@@ -699,6 +1346,8 @@ var viewerHTML = pageHead("tltv viewer", viewerExtraCSS) + `
 
   <div class="sl">stream</div>
   <div class="db" id="std"></div>
+  <div id="std-variants"></div>
+  <div id="std-tracks"></div>
   <hr>
 
   <div class="sl">guide</div>
@@ -728,6 +1377,11 @@ function kv(p,k,v,isUrl){
   d.innerHTML='<div class="di"><span>'+esc(k)+' </span>'+vh+'</div>';
   p.appendChild(d);
 }
+function kvHtml(p,k,vh){
+  var d=document.createElement('div');d.className='dr';
+  d.innerHTML='<div class="di"><span>'+esc(k)+' </span>'+vh+'</div>';
+  p.appendChild(d);
+}
 
 var viewerToken=(new URLSearchParams(window.location.search)).get('token')||'';
 function withToken(u){
@@ -741,7 +1395,8 @@ fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
   var base=d.base_url||window.location.origin;
   var m=d.metadata||{};
   document.getElementById('cn').textContent=d.channel_name;
-  document.getElementById('uri').textContent=d.tltv_uri;
+  var tltvUri=d.tltv_uri||('tltv://'+d.channel_id+'@'+location.host);
+  document.getElementById('uri').textContent=tltvUri;
   document.title=d.channel_name+' \u2014 tltv viewer';
 
   // === Origin check from signed metadata (§11) ===
@@ -765,9 +1420,9 @@ fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
 
   // === 1. Channel section: curated fields then remaining ===
   var chd=document.getElementById('chd');
-  kv(chd,'verified',d.verified?'\u2713 Signature valid':'? Unknown',false);
+  kvHtml(chd,'verified',d.verified?'<span class="ok">\u2713 Signature valid</span>':'<span class="wn">? Unknown</span>');
   if(m.name) kv(chd,'name',m.name,false);
-  if(d.tltv_uri) kv(chd,'uri',d.tltv_uri,false);
+  kv(chd,'uri',tltvUri,false);
   kv(chd,'status',m.status||'active',false);
   kv(chd,'access',m.access||'public',false);
   if(m.description) kv(chd,'description',m.description,false);
@@ -785,11 +1440,12 @@ fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
     var ic=document.getElementById('ch-icon');
     if(ic){ic.src=iconUrl;ic.style.display='inline-block';}
   }
+  if(m.origins&&Array.isArray(m.origins)&&m.origins.length>0) kv(chd,'origins',m.origins.join(', '),false);
   if(m.updated) kv(chd,'updated',m.updated,false);
   if(m.seq!==undefined) kv(chd,'seq',String(m.seq),false);
   // Dump remaining keys
   var skip={v:1,signature:1,id:1,name:1,status:1,access:1,stream:1,guide:1,updated:1,seq:1,
-    description:1,language:1,timezone:1,tags:1,icon:1};
+    description:1,language:1,timezone:1,tags:1,icon:1,origins:1,on_demand:1};
   Object.keys(m).sort().forEach(function(k){
     if(skip[k]) return;
     var val=m[k];
@@ -802,19 +1458,22 @@ fetch(infoUrl).then(function(r){return r.json()}).then(function(d){
   // === 2. Stream section: curated fields ===
   var std=document.getElementById('std');
   kv(std,'status','connecting',false);
+  if(m.stream) kv(std,'stream',withToken(base+m.stream),true);
   if(d.stream_url) kv(std,'url',d.stream_url,true);
 
   // === 3. Guide section ===
   var gdd=document.getElementById('gdd');
   var gd=document.getElementById('gd');
   if(d.guide){
-    kv(gdd,'verified',d.verified?'\u2713 Signature valid':'? Unknown',false);
-    if(m.guide) kv(gdd,'url',withToken(base+m.guide),true);
+    kvHtml(gdd,'verified',d.verified?'<span class="ok">\u2713 Signature valid</span>':'<span class="wn">? Unknown</span>');
+    if(m.guide) kv(gdd,'guide',withToken(base+m.guide),true);
     if(m.guide) kv(gdd,'xmltv',withToken(base+m.guide.replace('guide.json','guide.xml')),true);
     if(d.guide.from) kv(gdd,'from',d.guide.from,false);
     if(d.guide.until) kv(gdd,'until',d.guide.until,false);
     var entries=d.guide.entries||[];
     kv(gdd,'entries',String(entries.length),false);
+    if(d.guide.updated) kv(gdd,'updated',d.guide.updated,false);
+    if(d.guide.seq!==undefined) kv(gdd,'seq',String(d.guide.seq),false);
     if(entries.length){
       var nowISO=new Date().toISOString();
       entries.forEach(function(e){
@@ -914,11 +1573,14 @@ function initPlayer(src){
   var ov=document.getElementById('ov');
   var std=document.getElementById('std');
 
+  var varContainer=document.getElementById('std-variants');
+  var trackContainer=document.getElementById('std-tracks');
   // Build stream section once with stable elements — values updated in-place
   function buildStreamUI(){
     std.innerHTML='';
     kv(std,'status','connecting',false);
-    if(inf.stream_url) kv(std,'url',inf.stream_url,true);
+    var sUrl=inf.stream_url||(inf.metadata&&inf.metadata.stream?(inf.base_url||location.origin)+inf.metadata.stream:'')||inf.stream_src;
+    if(sUrl) kv(std,'stream',withToken(sUrl),true);
     kv(std,'content-type','application/vnd.apple.mpegurl',false);
     kv(std,'segments','-',false);
     kv(std,'target duration','-',false);
@@ -941,6 +1603,47 @@ function initPlayer(src){
       else if(k==='buffer') val.id='sv_bu';
       else if(k==='resolution') val.id='sv_re';
     });
+    varContainer.innerHTML='';
+    trackContainer.innerHTML='';
+  }
+  // Build a sub-section with border separator (shared by variants, audio tracks, subtitle tracks)
+  function buildSubSection(container,label,fields){
+    var wrap=document.createElement('div');wrap.style.cssText='margin-top:8px;padding-top:8px;border-top:1px solid #222';
+    var hdr=document.createElement('div');hdr.className='ge';hdr.style.cssText='color:#666;margin-bottom:2px';
+    hdr.innerHTML='<span style="color:#666;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em">'+esc(label)+'</span>';
+    wrap.appendChild(hdr);
+    var sec=document.createElement('div');sec.className='db';
+    fields.forEach(function(f){kv(sec,f[0],f[1],f[2])});
+    wrap.appendChild(sec);
+    container.appendChild(wrap);
+    return sec;
+  }
+  // Build a per-variant stream sub-section
+  function buildVariantSection(lv,i,isActive){
+    var label=lv.height?lv.height+'p':'level '+i;
+    var bw=lv.bitrate?Math.round(lv.bitrate/1000)+'k':'?';
+    var heading='variant '+label+(isActive?' (active)':'');
+    var varUrl=(lv.url&&lv.url.length)?lv.url[0]:(lv.uri||'');
+    var fields=[];
+    if(varUrl) fields.push(['stream',varUrl,true]);
+    fields.push(['resolution',(lv.width||'?')+'x'+(lv.height||'?'),false]);
+    fields.push(['bandwidth',bw,false]);
+    if(lv.codecs) fields.push(['codecs',lv.codecs,false]);
+    var sec=buildSubSection(varContainer,heading,fields);
+    sec.id='sv_var_'+i;
+  }
+  // Build audio/subtitle track sub-sections (same visual treatment as variants)
+  function buildTrackSections(type,tracks){
+    tracks.forEach(function(tk,i){
+      var name=tk.name||tk.lang||('track '+(i+1));
+      var heading=type+' \u2014 '+name;
+      var fields=[];
+      var url=tk.url||(tk.details&&tk.details.url)||'';
+      if(url) fields.push(['stream',url,true]);
+      if(tk.lang) fields.push(['language',tk.lang,false]);
+      if(tk.default) fields.push(['default','yes',false]);
+      buildSubSection(trackContainer,heading,fields);
+    });
   }
   buildStreamUI();
 
@@ -954,7 +1657,47 @@ function initPlayer(src){
       video.play().catch(function(){});
       ov.classList.add('h');
       var e=document.getElementById('sv_st');
-      if(e) e.textContent='\u2713 live';
+      if(e){e.className='ok';e.textContent='\u2713 live'}
+      // Stream type detection — use codec info from master playlist when available,
+      // fall back to video element dimensions after playback starts.
+      var _hasVideo=false,_hasAudio=false,_typeDetected=false;
+      if(hls.levels&&hls.levels.length>0){
+        var lv0=hls.levels[0];
+        if(lv0.videoCodec) _hasVideo=true;
+        if(lv0.audioCodec) _hasAudio=true;
+        // Explicit audio-only: has audio codec but no video codec in master playlist
+        if(lv0.codecs&&!lv0.videoCodec&&(lv0.audioCodec||/mp4a|aac/i.test(lv0.codecs))){_hasAudio=true;_typeDetected=true}
+        // Master playlist with height means video is present
+        if(lv0.height>0) _hasVideo=true;
+        if(_hasVideo||_hasAudio) _typeDetected=true;
+      }
+      kv(std,'type',_typeDetected?(_hasVideo&&_hasAudio?'audio + video':_hasVideo?'video only':_hasAudio?'audio only':'unknown'):'detecting...',false);
+      // Show audio-only overlay when no video is present
+      if(_typeDetected&&_hasAudio&&!_hasVideo){
+        ov.classList.remove('h');
+        ov.innerHTML='<div style="text-align:center"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.3)" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><div style="margin-top:8px;color:rgba(255,255,255,.4);font-size:.7rem">audio only</div></div>';
+      }
+      // Tag the type value for later refinement
+      var tySpans=std.querySelectorAll('.di');
+      tySpans.forEach(function(di){var lb=di.querySelector('span');var vl=di.querySelectorAll('span')[1];if(lb&&vl&&lb.textContent.trim()==='type')vl.id='sv_ty'});
+      // Refine type after video metadata loads (handles single-rendition muxed streams)
+      if(!_typeDetected){
+        video.addEventListener('loadedmetadata',function(){
+          var el=document.getElementById('sv_ty');if(!el)return;
+          var hv=video.videoWidth>0,ha=!!(hls.audioTracks&&hls.audioTracks.length>0);
+          // Single rendition with video = assume muxed audio+video unless audio-only
+          if(hv) el.textContent='audio + video';
+          else if(ha) el.textContent='audio only';
+          else el.textContent='video only';
+        },{once:true});
+      }
+      // Per-variant stream sections — only for master playlists with explicit variant info
+      var _hasMaster=hls.levels&&hls.levels.length>0&&(hls.levels.length>1||hls.levels[0].height>0||hls.levels[0].bitrate>0);
+      if(_hasMaster){
+        if(hls.levels.length>1) kv(std,'variants',String(hls.levels.length),false);
+        var activeLvl=hls.currentLevel>=0?hls.currentLevel:(hls.startLevel>=0?hls.startLevel:0);
+        hls.levels.forEach(function(lv,i){buildVariantSection(lv,i,i===activeLvl)});
+      }
       // Quality selector (only for master playlists with multiple levels)
       if(hls.levels&&hls.levels.length>1){
         var qs=document.createElement('select');
@@ -975,6 +1718,14 @@ function initPlayer(src){
         var ctrl=document.getElementById('cn').parentNode;
         ctrl.appendChild(qs);
       }
+      // Update (active) labels when level switches
+      hls.on(Hls.Events.LEVEL_SWITCHED,function(ev,dat){
+        var newLvl=dat.level;
+        varContainer.querySelectorAll('[style*="text-transform"]').forEach(function(sp){
+          var txt=sp.textContent;
+          sp.textContent=txt.replace(/ \(active\)$/,'')+(sp.parentNode.parentNode.querySelector('.db')&&sp.parentNode.parentNode.querySelector('.db').id==='sv_var_'+newLvl?' (active)':'');
+        });
+      });
     });
 
     // Audio track selector (demuxed audio via EXT-X-MEDIA TYPE=AUDIO)
@@ -996,11 +1747,15 @@ function initPlayer(src){
         as.onchange=function(){hls.audioTrack=parseInt(as.value)};
         document.getElementById('cn').parentNode.appendChild(as);
       }
+      // Track listing in stream section (same visual treatment as variants)
+      if(hls.audioTracks&&hls.audioTracks.length>0) buildTrackSections('audio',hls.audioTracks);
     });
 
     // Subtitle track selector (WebVTT via EXT-X-MEDIA TYPE=SUBTITLES)
     hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,function(){
       if(hls.subtitleTracks&&hls.subtitleTracks.length>0){
+        // Ensure subtitles start OFF — HLS.js may auto-select the first track
+        hls.subtitleTrack=-1;hls.subtitleDisplay=false;
         var ss=document.getElementById('_sts');
         if(ss) ss.remove();
         ss=document.createElement('select');
@@ -1023,6 +1778,8 @@ function initPlayer(src){
         };
         document.getElementById('cn').parentNode.appendChild(ss);
       }
+      // Track listing in stream section (same visual treatment as variants)
+      if(hls.subtitleTracks&&hls.subtitleTracks.length>0) buildTrackSections('subtitle',hls.subtitleTracks);
     });
 
     hls.on(Hls.Events.LEVEL_LOADED,function(e,data){
@@ -1032,6 +1789,27 @@ function initPlayer(src){
       el=document.getElementById('sv_sg');if(el) el.textContent=String(det.fragments?det.fragments.length:0);
       el=document.getElementById('sv_td');if(el) el.textContent=det.targetduration?det.targetduration+'s':'-';
       el=document.getElementById('sv_ms');if(el) el.textContent=(det.startSN!==undefined)?String(det.startSN):'-';
+      // Add live stats to the active variant section (added dynamically on first load)
+      var lvl=data.level;
+      if(lvl!==undefined){
+        var vsec=document.getElementById('sv_var_'+lvl);
+        if(vsec&&!document.getElementById('sv_var_'+lvl+'_sg')){
+          kv(vsec,'segments',String(det.fragments?det.fragments.length:0),false);
+          kv(vsec,'target duration',det.targetduration?det.targetduration+'s':'-',false);
+          kv(vsec,'media sequence',(det.startSN!==undefined)?String(det.startSN):'-',false);
+          var spans=vsec.querySelectorAll('.di');
+          spans.forEach(function(di){var lb=di.querySelector('span');var vl=di.querySelectorAll('span')[1];if(!lb||!vl)return;
+            var k=lb.textContent.trim();
+            if(k==='segments')vl.id='sv_var_'+lvl+'_sg';
+            else if(k==='target duration')vl.id='sv_var_'+lvl+'_td';
+            else if(k==='media sequence')vl.id='sv_var_'+lvl+'_ms';
+          });
+        }else{
+          el=document.getElementById('sv_var_'+lvl+'_sg');if(el) el.textContent=String(det.fragments?det.fragments.length:0);
+          el=document.getElementById('sv_var_'+lvl+'_td');if(el) el.textContent=det.targetduration?det.targetduration+'s':'-';
+          el=document.getElementById('sv_var_'+lvl+'_ms');if(el) el.textContent=(det.startSN!==undefined)?String(det.startSN):'-';
+        }
+      }
     });
 
     hls.on(Hls.Events.FRAG_LOADED,function(e,data){
@@ -1064,10 +1842,10 @@ function initPlayer(src){
     video.addEventListener('loadedmetadata',function(){
       video.play().catch(function(){});
       ov.classList.add('h');
-      var el=document.getElementById('sv_st');if(el) el.textContent='\u2713 live';
+      var el=document.getElementById('sv_st');if(el){el.className='ok';el.textContent='\u2713 live'}
     });
   } else {
-    var el=document.getElementById('sv_st');if(el) el.textContent='\u2717 HLS not supported';
+    var el=document.getElementById('sv_st');if(el) el.innerHTML='<span class="er">\u2717 HLS not supported</span>';
   }
 }
 

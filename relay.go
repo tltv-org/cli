@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -57,6 +58,7 @@ func cmdRelay(args []string) {
 
 	// Viewer (parsed manually before fs.Parse)
 	var viewer viewerConfig
+	viewerTitle, viewerNoFooter := addViewerDisplayFlags(fs)
 
 	// --- TLS ---
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
@@ -290,11 +292,15 @@ func cmdRelay(args []string) {
 		if *bufferMaxMemStr != "" {
 			cfg["buffer_max_memory"] = *bufferMaxMemStr
 		}
-		if viewer.enabled {
+		if viewer.enabled() {
+			key := "viewer"
+			if viewer.mode == "debug" {
+				key = "debug_viewer"
+			}
 			if viewer.selector != "" {
-				cfg["viewer"] = viewer.selector
+				cfg[key] = viewer.selector
 			} else {
-				cfg["viewer"] = true
+				cfg[key] = true
 			}
 		}
 		if *gossipEnabled {
@@ -468,7 +474,7 @@ func cmdRelay(args []string) {
 
 	// Embed viewer
 	var viewerChannelName string
-	if viewer.enabled {
+	if viewer.enabled() {
 		viewerID, err := resolveViewerChannelID(viewer.selector)
 		if err != nil {
 			fatal("viewer: %v", err)
@@ -496,8 +502,12 @@ func cmdRelay(args []string) {
 		}
 
 		if viewerChID != "" {
-			chID := viewerChID
-			viewerEmbedRoutes(server.mux, func(_ string) map[string]interface{} {
+			defaultChID := viewerChID
+			relayInfoFn := func(reqChID string) map[string]interface{} {
+				chID := defaultChID
+				if reqChID != "" {
+					chID = reqChID
+				}
 				current := registry.GetChannel(chID)
 				if current == nil {
 					return map[string]interface{}{}
@@ -509,7 +519,39 @@ func cmdRelay(args []string) {
 					info["tltv_uri"] = formatTLTVUri(current.ChannelID, []string{registry.hostname}, "")
 				}
 				return info
-			}, nil)
+			}
+			relayChannelsFn := func() []viewerChannelRef {
+				channels := registry.ListChannels()
+				var refs []viewerChannelRef
+				for _, ch := range channels {
+					if ch.Name == "(migrated)" {
+						continue
+					}
+					ref := viewerChannelRef{
+						ID:    ch.ChannelID,
+						Name:  ch.Name,
+						Guide: ch.Guide,
+					}
+					// Extract icon path from raw metadata
+					if ch.Metadata != nil {
+						var meta map[string]interface{}
+						if json.Unmarshal(ch.Metadata, &meta) == nil {
+							if icon, ok := meta["icon"].(string); ok && icon != "" {
+								ref.IconPath = icon
+							}
+						}
+					}
+					refs = append(refs, ref)
+				}
+				return refs
+			}
+			relayViewerOpts := viewerRouteOptions{title: *viewerTitle, noFooter: *viewerNoFooter}
+			switch viewer.mode {
+			case "debug":
+				debugViewerRoutes(server.mux, relayInfoFn, relayChannelsFn, relayViewerOpts)
+			default:
+				productionViewerRoutes(server.mux, relayInfoFn, relayChannelsFn, relayViewerOpts)
+			}
 		}
 	} else {
 		statusPageRoutes(server.mux, func() *NodeInfo {
@@ -555,8 +597,8 @@ func cmdRelay(args []string) {
 	if len(relayTargets) == 1 {
 		logInfof("tltv URI: tltv://%s@%s", relayTargets[0].ChannelID, addr)
 	}
-	if viewer.enabled && viewerChannelName != "" {
-		logInfof("viewer: %s://%s (channel: %s)", scheme, addr, viewerChannelName)
+	if viewer.enabled() && viewerChannelName != "" {
+		logInfof("viewer: %s://%s (%s, channel: %s)", scheme, addr, viewer.mode, viewerChannelName)
 	}
 
 	if tlsCfg != nil {

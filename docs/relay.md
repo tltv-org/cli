@@ -113,7 +113,10 @@ item size: 50 MB. Only HTTP 200 responses are cached.
 | `--cache` | `CACHE=1` | off | Enable in-memory HLS cache |
 | `--cache-max-entries` | `CACHE_MAX_ENTRIES` | `100` | Max cached items before LRU eviction |
 | `--cache-stats` | `CACHE_STATS` | | Log cache stats at this interval (e.g. `30s`) |
-| `--viewer` | `VIEWER=1` | off | Embed web viewer on `GET /` |
+| `--viewer` | `VIEWER=1` | off | Embed production web viewer on `GET /` |
+| `--debug-viewer` | `DEBUG_VIEWER=1` | off | Embed debug viewer on `GET /` (mutually exclusive with `--viewer`) |
+| `--viewer-title` | `VIEWER_TITLE` | | Nav bar label text |
+| `--no-viewer-footer` | `VIEWER_FOOTER=0` | on | Hide footer links |
 | `--peers`, `-P` | `PEERS` | | `tltv://` URIs to advertise in peer exchange |
 | `--gossip`, `-g` | `GOSSIP=1` | off | Include validated gossip peers in responses |
 | `--proxy` | `PROXY` | | Proxy URL (`socks5://`, `http://`, `https://`) for upstream connections |

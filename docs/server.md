@@ -125,7 +125,12 @@ hourly in the background; certs renew when <30 days remain.
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
-| `--viewer` | `VIEWER=1` | off | Serve built-in HLS.js web player at `/` (private channels require `/?token=...`) |
+| `--viewer` | `VIEWER=1` | off | Serve production web player at `/` (private channels require `/?token=...`) |
+| `--debug-viewer` | `DEBUG_VIEWER=1` | off | Serve diagnostic debug viewer at `/` (mutually exclusive with `--viewer`) |
+| `--viewer-title` | `VIEWER_TITLE` | *(empty)* | Nav bar label text |
+| `--no-viewer-footer` | `VIEWER_FOOTER=0` | on | Hide footer links |
+
+See [docs/viewer.md](viewer.md) for details on viewer modes and display config.
 
 #### Logging
 

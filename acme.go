@@ -1016,6 +1016,7 @@ type certStore struct {
 	accountURL string
 
 	// Renewal tracking.
+	renewCtx    context.Context
 	renewCancel context.CancelFunc
 }
 
@@ -1107,6 +1108,7 @@ func (cs *certStore) Hostnames() []string {
 // Call StopRenewals on shutdown.
 func (cs *certStore) StartRenewals() {
 	ctx, cancel := context.WithCancel(context.Background())
+	cs.renewCtx = ctx
 	cs.renewCancel = cancel
 
 	cs.mu.RLock()
@@ -1126,6 +1128,41 @@ func (cs *certStore) StopRenewals() {
 	if cs.renewCancel != nil {
 		cs.renewCancel()
 	}
+}
+
+// EnsureHostname loads or issues a certificate for a hostname and starts a
+// renewal goroutine if one is not already running. Idempotent — safe to call
+// for hostnames that already have certs. Used by router config hot-reload to
+// handle dynamically-added hostnames.
+func (cs *certStore) EnsureHostname(ctx context.Context, hostname string) error {
+	// Already have a cert for this hostname? No-op.
+	cs.mu.RLock()
+	_, hasCert := cs.certs[hostname]
+	cs.mu.RUnlock()
+	if hasCert {
+		return nil
+	}
+
+	// No ACME mode (manual cert) — can't issue new certs.
+	if cs.renewCtx == nil {
+		logInfof("certstore: no ACME configured, skipping cert for new hostname %s", hostname)
+		return nil
+	}
+
+	// Issue cert via ACME (blocks until complete).
+	if err := cs.EnsureCert(ctx, hostname); err != nil {
+		return err
+	}
+
+	// Start renewal goroutine for this hostname.
+	cs.mu.RLock()
+	mgr := cs.managers[hostname]
+	cs.mu.RUnlock()
+	if mgr != nil {
+		go cs.renewLoop(cs.renewCtx, mgr)
+	}
+
+	return nil
 }
 
 // renewLoop checks one hostname hourly and syncs certs back to the store.

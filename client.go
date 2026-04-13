@@ -150,7 +150,7 @@ func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	var lastErr error
 	for _, ip := range ips {
-		if isLocalAddress(ip.IP.String() + ":0") {
+		if !flagLocal && isLocalAddress(ip.IP.String()+":0") {
 			lastErr = fmt.Errorf("hint resolves to local address %s (%s), blocked per spec section 3.1", host, ip.IP)
 			continue
 		}

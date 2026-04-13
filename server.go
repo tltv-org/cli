@@ -151,6 +151,7 @@ func cmdServerTest(args []string) {
 
 	// --- Viewer (parsed manually before fs.Parse) ---
 	var viewer viewerConfig
+	viewerTitle, viewerNoFooter := addViewerDisplayFlags(fs)
 
 	// --- TLS ---
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
@@ -218,7 +219,9 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "      --cache-max-entries N  max cached items (default: 100)\n")
 		fmt.Fprintf(os.Stderr, "      --cache-stats N        log cache stats every N seconds (0 = off)\n\n")
 		fmt.Fprintf(os.Stderr, "Viewer:\n")
-		fmt.Fprintf(os.Stderr, "      --viewer               serve built-in web player at /\n\n")
+		fmt.Fprintf(os.Stderr, "      --viewer               serve built-in web player at /\n")
+		fmt.Fprintf(os.Stderr, "  -e, --viewer-title TEXT     nav bar label text\n")
+		fmt.Fprintf(os.Stderr, "  -Z, --no-viewer-footer     hide the footer links\n\n")
 		fmt.Fprintf(os.Stderr, "Logging:\n")
 		fmt.Fprintf(os.Stderr, "      --log-level LEVEL      log level: debug, info, error (default: info)\n")
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT    log format: human, json (default: human)\n")
@@ -231,7 +234,8 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  WIDTH, HEIGHT, FPS, QP,\n")
 		fmt.Fprintf(os.Stderr, "  LISTEN, HOSTNAME, SEGMENT_DURATION, SEGMENT_COUNT, PEERS, GOSSIP=1,\n")
 		fmt.Fprintf(os.Stderr, "  CONFIG, TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
-		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER,\n")
+		fmt.Fprintf(os.Stderr, "  CACHE=1, CACHE_MAX_ENTRIES, CACHE_STATS, VIEWER, VIEWER_TITLE,\n")
+		fmt.Fprintf(os.Stderr, "  VIEWER_FOOTER=0,\n")
 		fmt.Fprintf(os.Stderr, "  LOG_LEVEL, LOG_FORMAT, LOG_FILE\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  tltv server test -k channel.key --name \"TLTV Test\"\n")
@@ -338,11 +342,15 @@ func cmdServerTest(args []string) {
 		if *cacheEnabled {
 			cfg["cache"] = true
 		}
-		if viewer.enabled {
+		if viewer.enabled() {
+			key := "viewer"
+			if viewer.mode == "debug" {
+				key = "debug_viewer"
+			}
 			if viewer.selector != "" {
-				cfg["viewer"] = viewer.selector
+				cfg[key] = viewer.selector
 			} else {
-				cfg["viewer"] = true
+				cfg[key] = true
 			}
 		}
 		if *gossipEnabled {
@@ -825,13 +833,13 @@ func cmdServerTest(args []string) {
 
 	// HTTP server
 	mux := http.NewServeMux()
-	if viewer.enabled {
+	if viewer.enabled() {
 		// Build channel lookup for viewer
 		chanMap := make(map[string]*serverChannel, len(channels))
 		for _, ch := range channels {
 			chanMap[ch.channelID] = ch
 		}
-		viewerEmbedRoutes(mux, func(reqChID string) map[string]interface{} {
+		viewerInfoFn := func(reqChID string) map[string]interface{} {
 			// Pick requested channel, default to first
 			ch := channels[0]
 			if reqChID != "" {
@@ -841,14 +849,28 @@ func cmdServerTest(args []string) {
 			}
 			docs := ch.docs.Load()
 			return serverViewerInfo(docs, hostname)
-		}, func() []ChannelRef {
-			var refs []ChannelRef
+		}
+		viewerChannelsFn := func() []viewerChannelRef {
+			var refs []viewerChannelRef
 			for _, ch := range channels {
 				docs := ch.docs.Load()
-				refs = append(refs, ChannelRef{ID: docs.channelID, Name: docs.channelName})
+				ref := viewerChannelRef{
+					ID:       docs.channelID,
+					Name:     docs.channelName,
+					Guide:    docs.guide,
+					IconPath: "/tltv/v1/channels/" + docs.channelID + "/" + iconFileName,
+				}
+				refs = append(refs, ref)
 			}
 			return refs
-		}, viewerRouteOptions{authToken: serverToken, private: serverIsPrivate})
+		}
+		viewerOpts := viewerRouteOptions{authToken: serverToken, private: serverIsPrivate, title: *viewerTitle, noFooter: *viewerNoFooter}
+		switch viewer.mode {
+		case "debug":
+			debugViewerRoutes(mux, viewerInfoFn, viewerChannelsFn, viewerOpts)
+		default:
+			productionViewerRoutes(mux, viewerInfoFn, viewerChannelsFn, viewerOpts)
+		}
 	} else {
 		statusPageRoutes(mux, func() *NodeInfo {
 			ni := &NodeInfo{
@@ -897,8 +919,8 @@ func cmdServerTest(args []string) {
 	for _, ch := range channels {
 		logInfof("stream: %s://%s/tltv/v1/channels/%s/stream.m3u8", scheme, addr, ch.channelID)
 	}
-	if viewer.enabled {
-		logInfof("viewer: %s://%s", scheme, addr)
+	if viewer.enabled() {
+		logInfof("viewer: %s://%s (%s)", scheme, addr, viewer.mode)
 	}
 
 	srv := &http.Server{
@@ -971,7 +993,9 @@ func cmdServerTest(args []string) {
 				if *numChannels > 1 {
 					chName = fmt.Sprintf("%s %d", lc.channelName, i+1)
 				}
-				ch.state.channelName = strings.ToUpper(chName)
+				if ch.state != nil {
+					ch.state.channelName = strings.ToUpper(chName)
+				}
 				metadata, guide := serverSignDocs(ch.channelID, chName, hostname, ch.privKey, lc.guideEntries, access, *onDemand, metaOpts)
 				ch.docs.Store(&serverDocs{
 					channelID:   ch.channelID,

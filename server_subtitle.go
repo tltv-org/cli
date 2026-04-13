@@ -126,9 +126,10 @@ func generateSubtitleVTT(trackName string, seqNum uint64, segDuration int, now t
 	// Generate cue content based on track name
 	cueText := subtitleCueText(trackName, seqNum, now)
 
-	// Single cue spanning the segment duration
+	// Single cue spanning the segment duration.
+	// Position ~85% from top (10% above bottom) with center alignment.
 	endSec := segDuration
-	fmt.Fprintf(&sb, "00:00:00.000 --> 00:%02d:%02d.000\n", endSec/60, endSec%60)
+	fmt.Fprintf(&sb, "00:00:00.000 --> 00:%02d:%02d.000 line:85%% position:50%% align:center\n", endSec/60, endSec%60)
 	sb.WriteString(cueText)
 	sb.WriteString("\n")
 

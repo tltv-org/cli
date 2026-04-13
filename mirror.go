@@ -705,7 +705,9 @@ func mirrorResignPromoted(registry *mirrorRegistry, state *mirrorState, privKey 
 // ---------- Viewer Info Helper ----------
 
 // mirrorViewerBuildInfo builds the /api/info response for the embedded viewer.
-func mirrorViewerBuildInfo(registry *mirrorRegistry, channelID string) func(reqChannelID string) map[string]interface{} {
+// Uses the shared viewerBuildInfo helper for a consistent payload shape across
+// all four daemons (server, bridge, relay, mirror).
+func mirrorViewerBuildInfo(registry *mirrorRegistry, channelID, hostname string) func(reqChannelID string) map[string]interface{} {
 	return func(reqChannelID string) map[string]interface{} {
 		ch := registry.GetChannel()
 		if ch == nil {
@@ -715,28 +717,28 @@ func mirrorViewerBuildInfo(registry *mirrorRegistry, channelID string) func(reqC
 		}
 
 		meta := ch.Metadata
+		guide := ch.Guide
 		if ch.PromotedMeta != nil {
 			meta = ch.PromotedMeta
 		}
-
-		info := map[string]interface{}{
-			"channel_id": ch.ChannelID,
-			"stream_src": "/tltv/v1/channels/" + ch.ChannelID + "/stream.m3u8",
+		if ch.PromotedGuide != nil {
+			guide = ch.PromotedGuide
 		}
 
-		if meta != nil {
-			var doc map[string]interface{}
-			json.Unmarshal(meta, &doc)
-			info["metadata"] = doc
+		info := viewerBuildInfo(ch.ChannelID, ch.Name, meta, guide)
+		info["stream_src"] = "/tltv/v1/channels/" + ch.ChannelID + "/stream.m3u8"
+		info["xmltv_url"] = "/tltv/v1/channels/" + ch.ChannelID + "/guide.xml"
+		if hostname != "" {
+			info["tltv_uri"] = formatTLTVUri(ch.ChannelID, []string{hostname}, "")
 		}
 
-		channels := []interface{}{
+		// Single-channel: include in channels list for viewer consistency.
+		info["channels"] = []interface{}{
 			map[string]interface{}{
 				"id":   ch.ChannelID,
 				"name": ch.Name,
 			},
 		}
-		info["channels"] = channels
 
 		return info
 	}
@@ -814,6 +816,7 @@ func cmdMirror(args []string) {
 
 	// Viewer (parsed manually before fs.Parse)
 	var viewer viewerConfig
+	viewerTitle, viewerNoFooter := addViewerDisplayFlags(fs)
 
 	// Tuning
 	defaultMetaPoll := "60s"
@@ -908,6 +911,7 @@ func cmdMirror(args []string) {
 			os.Exit(1)
 		}
 		applyConfigToFlags(fs, cfg)
+		applyViewerConfig(&viewer, cfg)
 	}
 
 	// Dump config
@@ -942,6 +946,17 @@ func cmdMirror(args []string) {
 		}
 		if *cacheEnabled {
 			out["cache"] = true
+		}
+		if viewer.enabled() {
+			key := "viewer"
+			if viewer.mode == "debug" {
+				key = "debug_viewer"
+			}
+			if viewer.selector != "" {
+				out[key] = viewer.selector
+			} else {
+				out[key] = true
+			}
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -1175,19 +1190,47 @@ func cmdMirror(args []string) {
 	}
 
 	// Viewer or status page
-	if viewer.enabled {
-		infoFn := mirrorViewerBuildInfo(registry, channelID)
-		channelsFn := func() []ChannelRef {
+	if viewer.enabled() {
+		infoFn := mirrorViewerBuildInfo(registry, channelID, *hostnameArg)
+		channelsFn := func() []viewerChannelRef {
 			ch := registry.GetChannel()
 			if ch == nil {
 				return nil
 			}
-			return []ChannelRef{{ID: ch.ChannelID, Name: ch.Name}}
+			meta := ch.Metadata
+			guide := ch.Guide
+			if ch.PromotedMeta != nil {
+				meta = ch.PromotedMeta
+			}
+			if ch.PromotedGuide != nil {
+				guide = ch.PromotedGuide
+			}
+			ref := viewerChannelRef{
+				ID:    ch.ChannelID,
+				Name:  ch.Name,
+				Guide: guide,
+			}
+			// Extract icon path from metadata
+			if meta != nil {
+				var m map[string]interface{}
+				if json.Unmarshal(meta, &m) == nil {
+					if icon, ok := m["icon"].(string); ok && icon != "" {
+						ref.IconPath = icon
+					}
+				}
+			}
+			return []viewerChannelRef{ref}
 		}
+		mirrorViewerOpts := viewerRouteOptions{title: *viewerTitle, noFooter: *viewerNoFooter}
 		if isPrivate {
-			viewerEmbedRoutes(srv.mux, infoFn, channelsFn, viewerRouteOptions{authToken: *tokenStr, private: true})
-		} else {
-			viewerEmbedRoutes(srv.mux, infoFn, channelsFn)
+			mirrorViewerOpts.authToken = *tokenStr
+			mirrorViewerOpts.private = true
+		}
+		switch viewer.mode {
+		case "debug":
+			debugViewerRoutes(srv.mux, infoFn, channelsFn, mirrorViewerOpts)
+		default:
+			productionViewerRoutes(srv.mux, infoFn, channelsFn, mirrorViewerOpts)
 		}
 	} else {
 		statusPageRoutes(srv.mux, func() *NodeInfo {
