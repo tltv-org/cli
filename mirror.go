@@ -235,6 +235,7 @@ func (s *mirrorServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]interface{}{
 		"status":    "ok",
+		"version":   version,
 		"mode":      status,
 		"channel":   s.channelID,
 		"mirroring": 1,
@@ -726,6 +727,9 @@ func mirrorViewerBuildInfo(registry *mirrorRegistry, channelID, hostname string)
 		}
 
 		info := viewerBuildInfo(ch.ChannelID, ch.Name, meta, guide)
+		if icon := viewerIconDataURI(ch.IconData, ch.IconCT); icon != "" {
+			info["icon_data"] = icon
+		}
 		info["stream_src"] = "/tltv/v1/channels/" + ch.ChannelID + "/stream.m3u8"
 		info["xmltv_url"] = "/tltv/v1/channels/" + ch.ChannelID + "/guide.xml"
 		if hostname != "" {
@@ -735,8 +739,9 @@ func mirrorViewerBuildInfo(registry *mirrorRegistry, channelID, hostname string)
 		// Single-channel: include in channels list for viewer consistency.
 		info["channels"] = []interface{}{
 			map[string]interface{}{
-				"id":   ch.ChannelID,
-				"name": ch.Name,
+				"id":        ch.ChannelID,
+				"name":      ch.Name,
+				"icon_data": viewerIconDataURI(ch.IconData, ch.IconCT),
 			},
 		}
 
@@ -787,6 +792,7 @@ func cmdMirror(args []string) {
 
 	// Icon
 	iconPathFlag := fs.String("icon", os.Getenv("ICON"), "local icon override for promoted mode")
+	fs.StringVar(iconPathFlag, "c", os.Getenv("ICON"), "alias for --icon")
 
 	// Promotion
 	defaultPromoteAfter := 3
@@ -794,6 +800,7 @@ func cmdMirror(args []string) {
 		fmt.Sscanf(v, "%d", &defaultPromoteAfter)
 	}
 	promoteAfter := fs.Int("promote-after", defaultPromoteAfter, "consecutive failures before promotion")
+	fs.IntVar(promoteAfter, "R", defaultPromoteAfter, "alias for --promote-after")
 
 	// State file
 	defaultStatePath := "mirror-state.json"
@@ -801,12 +808,10 @@ func cmdMirror(args []string) {
 		defaultStatePath = v
 	}
 	stateFile := fs.String("state-file", defaultStatePath, "persisted state file path")
+	fs.StringVar(stateFile, "S", defaultStatePath, "alias for --state-file")
 
 	// Config
-	configPath := fs.String("config", os.Getenv("CONFIG"), "config file (JSON)")
-	fs.StringVar(configPath, "f", os.Getenv("CONFIG"), "alias for --config")
-	dumpConfig := fs.Bool("dump-config", false, "print resolved config as JSON and exit")
-	fs.BoolVar(dumpConfig, "D", false, "alias for --dump-config")
+	configPath, dumpConfig := addConfigFlags(fs, configFlagOpts{ConfigShort: "f", DumpShort: "D"})
 
 	// Cache
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -856,9 +861,9 @@ func cmdMirror(args []string) {
 		fmt.Fprintf(os.Stderr, "Failover:\n")
 		fmt.Fprintf(os.Stderr, "      --fallback-stream    local HLS source after buffer drains\n")
 		fmt.Fprintf(os.Stderr, "      --fallback-guide     guide file for fallback content\n")
-		fmt.Fprintf(os.Stderr, "      --promote-after N    consecutive failures before promotion (default: 3)\n")
-		fmt.Fprintf(os.Stderr, "      --state-file PATH    persisted state file (default: mirror-state.json)\n")
-		fmt.Fprintf(os.Stderr, "      --icon PATH          local icon override for promoted mode\n\n")
+		fmt.Fprintf(os.Stderr, "  -R, --promote-after N    consecutive failures before promotion (default: 3)\n")
+		fmt.Fprintf(os.Stderr, "  -S, --state-file PATH    persisted state file (default: mirror-state.json)\n")
+		fmt.Fprintf(os.Stderr, "  -c, --icon PATH          local icon override for promoted mode\n\n")
 		fmt.Fprintf(os.Stderr, "Peers:\n")
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
 		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n")
@@ -970,6 +975,8 @@ func cmdMirror(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	// Validate required flags
 	if *sourceStr == "" {
@@ -1206,9 +1213,10 @@ func cmdMirror(args []string) {
 				guide = ch.PromotedGuide
 			}
 			ref := viewerChannelRef{
-				ID:    ch.ChannelID,
-				Name:  ch.Name,
-				Guide: guide,
+				ID:       ch.ChannelID,
+				Name:     ch.Name,
+				Guide:    guide,
+				IconData: viewerIconDataURI(ch.IconData, ch.IconCT),
 			}
 			// Extract icon path from metadata
 			if meta != nil {

@@ -14,6 +14,94 @@ import (
 
 const relayMaxMigrationHops = 5
 
+type relayStartupVerified struct {
+	target relayTarget
+	result *fetchResult
+}
+
+type relayStartupState struct {
+	migrations map[string][]byte
+	verified   []relayStartupVerified
+}
+
+// relayBackoff sleeps for the current backoff and doubles it (capped at 30s).
+func relayBackoff(backoff *time.Duration) {
+	time.Sleep(*backoff)
+	*backoff *= 2
+	if *backoff > 30*time.Second {
+		*backoff = 30 * time.Second
+	}
+}
+
+func relayInitialStartupState(client *Client, channels, nodes []string, timeout time.Duration) (*relayStartupState, error) {
+	deadline := time.Now().Add(timeout)
+	backoff := time.Second
+	attempt := 1
+
+	for {
+		logInfof("startup discovery attempt %d", attempt)
+
+		targets, err := relayDiscoverTargets(client, channels, nodes)
+		if err != nil {
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("target discovery: %w", err)
+			}
+			logErrorf("startup discovery attempt %d failed: %v (retrying in %s)", attempt, err, backoff)
+			relayBackoff(&backoff)
+			attempt++
+			continue
+		}
+		if len(targets) == 0 {
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("no channels found to relay")
+			}
+			logErrorf("startup discovery attempt %d found no channels (retrying in %s)", attempt, backoff)
+			relayBackoff(&backoff)
+			attempt++
+			continue
+		}
+
+		state := &relayStartupState{migrations: make(map[string][]byte)}
+		for _, t := range targets {
+			res, err := fetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
+			if err != nil {
+				logErrorf("startup skip %s: %v", t.ChannelID, err)
+				continue
+			}
+
+			if res.IsMigration {
+				logInfof("%s migrated, following chain...", t.ChannelID)
+				finalID, finalRes, err := relayFollowMigration(client, t.ChannelID, t.Hints, relayMaxMigrationHops)
+				if err != nil {
+					logErrorf("startup skip %s: migration: %v", t.ChannelID, err)
+					continue
+				}
+				state.migrations[t.ChannelID] = res.Raw
+				res = finalRes
+				t = relayTarget{ChannelID: finalID, Hints: t.Hints}
+			}
+
+			if err := checkChannelAccess(res.Doc); err != nil {
+				logErrorf("startup skip %s: %v", t.ChannelID, err)
+				continue
+			}
+
+			state.verified = append(state.verified, relayStartupVerified{target: t, result: res})
+		}
+
+		if len(state.verified) > 0 {
+			return state, nil
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("no channels could be verified for relaying")
+		}
+		logErrorf("startup attempt %d verified no channels yet (retrying in %s)", attempt, backoff)
+		relayBackoff(&backoff)
+		attempt++
+	}
+}
+
 // cmdRelay implements the "tltv relay" subcommand -- a TLTV relay node
 // that re-serves channels from upstream nodes with signature verification.
 func cmdRelay(args []string) {
@@ -24,8 +112,7 @@ func cmdRelay(args []string) {
 	fs.StringVar(channelsStr, "c", os.Getenv("CHANNELS"), "alias for --channels")
 	nodeStr := fs.String("node", os.Getenv("NODE"), "relay all public channels from node(s) (comma-separated host:port)")
 	fs.StringVar(nodeStr, "n", os.Getenv("NODE"), "alias for --node")
-	configPath := fs.String("config", os.Getenv("CONFIG"), "path to relay config file (JSON)")
-	fs.StringVar(configPath, "f", os.Getenv("CONFIG"), "alias for --config")
+	configPath, dumpConfigRelay := addConfigFlags(fs, configFlagOpts{ConfigShort: "f", DumpShort: "D"})
 
 	// Server flags
 	defaultListen := ":8000"
@@ -42,10 +129,6 @@ func cmdRelay(args []string) {
 	gossipEnabled := addGossipFlag(fs)
 	proxyStr := addProxyFlag(fs)
 
-	// --- Config ---
-	dumpConfigRelay := fs.Bool("dump-config", false, "print resolved config as JSON and exit")
-	fs.BoolVar(dumpConfigRelay, "D", false, "alias for --dump-config")
-
 	// Cache flags
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
 
@@ -53,6 +136,7 @@ func cmdRelay(args []string) {
 	bufferStr := fs.String("buffer", os.Getenv("BUFFER"), "proactive buffer duration (e.g. 2h, 30m)")
 	fs.StringVar(bufferStr, "b", os.Getenv("BUFFER"), "alias for --buffer")
 	delayStr := fs.String("delay", os.Getenv("DELAY"), "serve with time delay (e.g. 30m, requires --buffer)")
+	fs.StringVar(delayStr, "y", os.Getenv("DELAY"), "alias for --delay")
 	bufferMaxMemStr := fs.String("buffer-max-memory", os.Getenv("BUFFER_MAX_MEMORY"), "max total buffer memory (default: 1g)")
 	fs.StringVar(bufferMaxMemStr, "B", os.Getenv("BUFFER_MAX_MEMORY"), "alias for --buffer-max-memory")
 
@@ -126,7 +210,7 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "      --cache-stats N      log cache stats every N seconds (0 = off)\n\n")
 		fmt.Fprintf(os.Stderr, "Buffer:\n")
 		fmt.Fprintf(os.Stderr, "  -b, --buffer DUR         proactive buffer duration (e.g. 2h, 30m)\n")
-		fmt.Fprintf(os.Stderr, "      --delay DUR          serve stream with time delay (requires --buffer)\n")
+		fmt.Fprintf(os.Stderr, "  -y, --delay DUR          serve stream with time delay (requires --buffer)\n")
 		fmt.Fprintf(os.Stderr, "  -B, --buffer-max-memory  max total buffer memory (default: 1g)\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                enable TLS (autocert via Let's Encrypt if no cert/key)\n")
@@ -173,6 +257,8 @@ func cmdRelay(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	// Parse durations
 	metaPoll, err := time.ParseDuration(*metaPollStr)
@@ -369,58 +455,24 @@ func cmdRelay(args []string) {
 	// Create upstream client
 	client := newClientWithProxy(flagInsecure, proxyURL)
 
-	// Discover relay targets
-	logInfof("discovering channels...")
-	targets, err := relayDiscoverTargets(client, channels, nodes)
+	startupState, err := relayInitialStartupState(client, channels, nodes, 5*time.Minute)
 	if err != nil {
-		fatal("target discovery: %v", err)
-	}
-	if len(targets) == 0 {
-		fatal("no channels found to relay")
+		fatal("startup: %v", err)
 	}
 
 	// Create registry
 	registry := newRelayRegistry(*hostnameArg, *gossipEnabled, *maxPeers, *staleDays)
-
-	// Initial metadata fetch + verification for all targets
-	var relayTargets []relayTarget // successfully verified targets
-	for _, t := range targets {
-		res, err := fetchAndVerifyMetadata(client, t.ChannelID, t.Hints)
-		if err != nil {
-			logErrorf("skip %s: %v", t.ChannelID, err)
-			continue
-		}
-
-		if res.IsMigration {
-			// Follow migration chain
-			logInfof("%s migrated, following chain...", t.ChannelID)
-			finalID, finalRes, err := relayFollowMigration(client, t.ChannelID, t.Hints, relayMaxMigrationHops)
-			if err != nil {
-				logErrorf("skip %s: migration: %v", t.ChannelID, err)
-				continue
-			}
-			// Store migration doc at old ID
-			registry.StoreMigration(t.ChannelID, res.Raw)
-			// Relay the new channel
-			res = finalRes
-			t = relayTarget{ChannelID: finalID, Hints: t.Hints}
-		}
-
-		// Check access restrictions
-		if err := checkChannelAccess(res.Doc); err != nil {
-			logErrorf("skip %s: %v", t.ChannelID, err)
-			continue
-		}
-
-		registry.UpdateChannel(t.ChannelID, res.Raw, res.Doc, t.Hints, res.Hint)
-		relayTargets = append(relayTargets, t)
-
-		name := getString(res.Doc, "name")
-		logInfof("  %s  %s", t.ChannelID, name)
+	for oldID, raw := range startupState.migrations {
+		registry.StoreMigration(oldID, raw)
 	}
 
-	if len(relayTargets) == 0 {
-		fatal("no channels could be verified for relaying")
+	// Initial metadata fetch + verification for all targets
+	relayTargets := make([]relayTarget, 0, len(startupState.verified))
+	for _, v := range startupState.verified {
+		registry.UpdateChannel(v.target.ChannelID, v.result.Raw, v.result.Doc, v.target.Hints, v.result.Hint)
+		relayTargets = append(relayTargets, v.target)
+		name := getString(v.result.Doc, "name")
+		logInfof("  %s  %s", v.target.ChannelID, name)
 	}
 
 	// Initial guide fetch
@@ -513,6 +565,16 @@ func cmdRelay(args []string) {
 					return map[string]interface{}{}
 				}
 				info := viewerBuildInfo(current.ChannelID, current.Name, current.Metadata, current.Guide)
+				if current.Metadata != nil && current.StreamHint != "" {
+					var meta map[string]interface{}
+					if json.Unmarshal(current.Metadata, &meta) == nil {
+						if icon, ok := meta["icon"].(string); ok && icon != "" {
+							if dataURI := viewerFetchIconDataURI(client.http, client.baseURL(current.StreamHint)+icon, icon); dataURI != "" {
+								info["icon_data"] = dataURI
+							}
+						}
+					}
+				}
 				info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
 				info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
 				if registry.hostname != "" {
@@ -538,6 +600,9 @@ func cmdRelay(args []string) {
 						if json.Unmarshal(ch.Metadata, &meta) == nil {
 							if icon, ok := meta["icon"].(string); ok && icon != "" {
 								ref.IconPath = icon
+								if ch.StreamHint != "" {
+									ref.IconData = viewerFetchIconDataURI(client.http, client.baseURL(ch.StreamHint)+icon, icon)
+								}
 							}
 						}
 					}

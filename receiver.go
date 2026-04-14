@@ -295,18 +295,18 @@ type ReceiverManifestResult struct {
 
 // ReceiverStats aggregates receiver statistics.
 type ReceiverStats struct {
-	mu             sync.Mutex
-	SegmentsFetched int64
-	SegmentErrors   int64
-	ManifestPolls   int64
-	ManifestErrors  int64
-	BytesReceived   int64
-	CacheHits       int64
-	CacheMisses     int64
-	SegmentLatencies []int64 // ms per segment fetch
+	mu                sync.Mutex
+	SegmentsFetched   int64
+	SegmentErrors     int64
+	ManifestPolls     int64
+	ManifestErrors    int64
+	BytesReceived     int64
+	CacheHits         int64
+	CacheMisses       int64
+	SegmentLatencies  []int64 // ms per segment fetch
 	ManifestLatencies []int64 // ms per manifest poll
-	StartTime       time.Time
-	LastSegmentTime time.Time
+	StartTime         time.Time
+	LastSegmentTime   time.Time
 }
 
 func (s *ReceiverStats) addSegment(r ReceiverSegmentResult) {
@@ -343,15 +343,15 @@ func (s *ReceiverStats) snapshot() *ReceiverStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := &ReceiverStats{
-		SegmentsFetched:   s.SegmentsFetched,
-		SegmentErrors:     s.SegmentErrors,
-		ManifestPolls:     s.ManifestPolls,
-		ManifestErrors:    s.ManifestErrors,
-		BytesReceived:     s.BytesReceived,
-		CacheHits:         s.CacheHits,
-		CacheMisses:       s.CacheMisses,
-		StartTime:         s.StartTime,
-		LastSegmentTime:   s.LastSegmentTime,
+		SegmentsFetched: s.SegmentsFetched,
+		SegmentErrors:   s.SegmentErrors,
+		ManifestPolls:   s.ManifestPolls,
+		ManifestErrors:  s.ManifestErrors,
+		BytesReceived:   s.BytesReceived,
+		CacheHits:       s.CacheHits,
+		CacheMisses:     s.CacheMisses,
+		StartTime:       s.StartTime,
+		LastSegmentTime: s.LastSegmentTime,
 	}
 	cp.SegmentLatencies = make([]int64, len(s.SegmentLatencies))
 	copy(cp.SegmentLatencies, s.SegmentLatencies)
@@ -942,6 +942,8 @@ func cmdReceiver(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	// Parse durations
 	timeoutDur, err := time.ParseDuration(*timeout)

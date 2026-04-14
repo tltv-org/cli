@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -104,7 +105,7 @@ type hlsCacheEntry struct {
 	data        []byte
 	contentType string
 	expires     time.Time
-	accessTime  time.Time // for LRU eviction
+	accessTime  atomic.Int64 // UnixNano for LRU eviction
 }
 
 // hlsCache is an in-memory cache for HLS stream content with
@@ -114,17 +115,17 @@ type hlsCacheEntry struct {
 //   - Manifests (.m3u8): 1 second
 //   - Segments (.ts, .m4s, .mp4): 3600 seconds
 type hlsCache struct {
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	items      map[string]*hlsCacheEntry
 	sf         singleflightGroup
 	maxEntries int
 	maxItemKB  int // max single item size in KB (0 = no limit)
 	now        func() time.Time
 
-	// Stats
-	hits   int64
-	misses int64
-	evicts int64
+	// Stats (atomics — no lock needed on the hot path)
+	hits   atomic.Int64
+	misses atomic.Int64
+	evicts atomic.Int64
 }
 
 const (
@@ -170,21 +171,27 @@ func hlsCacheTTL(path string) time.Duration {
 // get returns a cached entry if it exists and hasn't expired.
 // Returns nil on miss or expiration.
 func (c *hlsCache) get(key string) *hlsCacheEntry {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
 
 	entry, ok := c.items[key]
 	if !ok {
+		c.mu.RUnlock()
 		return nil
 	}
 
 	now := c.now()
 	if now.After(entry.expires) {
-		delete(c.items, key)
+		c.mu.RUnlock()
+		c.mu.Lock()
+		if current, ok := c.items[key]; ok && current == entry && now.After(current.expires) {
+			delete(c.items, key)
+		}
+		c.mu.Unlock()
 		return nil
 	}
 
-	entry.accessTime = now
+	entry.accessTime.Store(now.UnixNano())
+	c.mu.RUnlock()
 	return entry
 }
 
@@ -200,8 +207,8 @@ func (c *hlsCache) set(key string, data []byte, contentType string, ttl time.Dur
 		data:        data,
 		contentType: contentType,
 		expires:     now.Add(ttl),
-		accessTime:  now,
 	}
+	entry.accessTime.Store(now.UnixNano())
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -228,16 +235,17 @@ func (c *hlsCache) evictLRU() {
 	first := true
 
 	for k, v := range c.items {
-		if first || v.accessTime.Before(oldestTime) {
+		at := time.Unix(0, v.accessTime.Load())
+		if first || at.Before(oldestTime) {
 			oldestKey = k
-			oldestTime = v.accessTime
+			oldestTime = at
 			first = false
 		}
 	}
 
 	if !first {
 		delete(c.items, oldestKey)
-		c.evicts++
+		c.evicts.Add(1)
 	}
 }
 
@@ -247,15 +255,11 @@ func (c *hlsCache) evictLRU() {
 func (c *hlsCache) getOrFetch(key string, fn func() (*hlsCacheFetchResult, error)) ([]byte, string, bool, error) {
 	// Check cache first
 	if entry := c.get(key); entry != nil {
-		c.mu.Lock()
-		c.hits++
-		c.mu.Unlock()
+		c.hits.Add(1)
 		return entry.data, entry.contentType, true, nil
 	}
 
-	c.mu.Lock()
-	c.misses++
-	c.mu.Unlock()
+	c.misses.Add(1)
 
 	// Singleflight: N concurrent requests = 1 upstream fetch
 	result, err := c.sf.Do(key, func() (interface{}, error) {
@@ -276,9 +280,10 @@ func (c *hlsCache) getOrFetch(key string, fn func() (*hlsCacheFetchResult, error
 
 // stats returns current cache statistics.
 func (c *hlsCache) stats() (hits, misses, evicts int64, size int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.hits, c.misses, c.evicts, len(c.items)
+	c.mu.RLock()
+	size = len(c.items)
+	c.mu.RUnlock()
+	return c.hits.Load(), c.misses.Load(), c.evicts.Load(), size
 }
 
 // sweep removes expired entries. Called periodically by background goroutine.

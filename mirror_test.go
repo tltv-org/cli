@@ -54,12 +54,12 @@ func testMirrorOrigin(t *testing.T, priv ed25519.PrivateKey, pub ed25519.PublicK
 		"seq":     json.Number("1000"),
 		"id":      channelID,
 		"from":    now.Truncate(24 * time.Hour).Format(timestampFormat),
-		"until":   now.Truncate(24*time.Hour).Add(24 * time.Hour).Format(timestampFormat),
+		"until":   now.Truncate(24 * time.Hour).Add(24 * time.Hour).Format(timestampFormat),
 		"updated": "2026-04-01T00:00:00Z",
 		"entries": []interface{}{
 			map[string]interface{}{
 				"start": now.Truncate(24 * time.Hour).Format(timestampFormat),
-				"end":   now.Truncate(24*time.Hour).Add(24 * time.Hour).Format(timestampFormat),
+				"end":   now.Truncate(24 * time.Hour).Add(24 * time.Hour).Format(timestampFormat),
 				"title": "Primary Programming",
 			},
 		},
@@ -433,6 +433,9 @@ func TestMirrorServer_Health(t *testing.T) {
 
 	var health map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &health)
+	if health["version"] != version {
+		t.Errorf("version = %v, want %s", health["version"], version)
+	}
 	if health["mode"] != "passive" {
 		t.Errorf("mode = %v, want passive", health["mode"])
 	}
@@ -850,7 +853,7 @@ func TestMirror_APIInfo_Passive(t *testing.T) {
 		"entries": []map[string]interface{}{
 			{
 				"start": time.Now().Truncate(24 * time.Hour).Format(timestampFormat),
-				"end":   time.Now().Truncate(24*time.Hour).Add(24 * time.Hour).Format(timestampFormat),
+				"end":   time.Now().Truncate(24 * time.Hour).Add(24 * time.Hour).Format(timestampFormat),
 				"title": "Mirror Programming",
 			},
 		},

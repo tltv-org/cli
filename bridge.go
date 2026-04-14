@@ -27,7 +27,7 @@ func cmdBridge(args []string) {
 	nameArg := fs.String("name", os.Getenv("NAME"), "channel name (single-stream mode only)")
 	fs.StringVar(nameArg, "n", os.Getenv("NAME"), "alias for --name")
 	descriptionArg := fs.String("description", os.Getenv("DESCRIPTION"), "channel description")
-	fs.StringVar(descriptionArg, "D", os.Getenv("DESCRIPTION"), "alias for --description")
+	fs.StringVar(descriptionArg, "U", os.Getenv("DESCRIPTION"), "alias for --description")
 	tagsArg := fs.String("tags", os.Getenv("TAGS"), "comma-separated tags (max 5)")
 	fs.StringVar(tagsArg, "T", os.Getenv("TAGS"), "alias for --tags")
 	languageArg := fs.String("language", os.Getenv("LANGUAGE"), "ISO 639-1 language code (e.g. en, ja)")
@@ -72,7 +72,7 @@ func cmdBridge(args []string) {
 	proxyStr := addProxyFlag(fs)
 
 	// --- Config ---
-	configPathBridge, dumpConfigBridge := addConfigFlags(fs)
+	configPathBridge, dumpConfigBridge := addConfigFlags(fs, configFlagOpts{ConfigShort: "f", DumpShort: "D"})
 
 	// --- Cache ---
 	cacheEnabled, cacheMaxEntries, cacheStatsInterval := addCacheFlags(fs)
@@ -97,7 +97,7 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  -G, --guide URL/PATH     guide source: XMLTV or JSON (optional)\n\n")
 		fmt.Fprintf(os.Stderr, "Channel defaults:\n")
 		fmt.Fprintf(os.Stderr, "  -n, --name STRING        channel name (single-stream mode only)\n")
-		fmt.Fprintf(os.Stderr, "  -D, --description TEXT   channel description\n")
+		fmt.Fprintf(os.Stderr, "  -U, --description TEXT   channel description\n")
 		fmt.Fprintf(os.Stderr, "  -T, --tags LIST          comma-separated tags (max 5)\n")
 		fmt.Fprintf(os.Stderr, "  -a, --language CODE      ISO 639-1 language code (e.g. en, ja)\n")
 		fmt.Fprintf(os.Stderr, "  -z, --timezone TZ        IANA timezone name for metadata\n")
@@ -113,8 +113,8 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST         tltv:// URIs to advertise in peer exchange\n")
 		fmt.Fprintf(os.Stderr, "  -g, --gossip             re-advertise validated gossip-discovered channels\n\n")
 		fmt.Fprintf(os.Stderr, "Config:\n")
-		fmt.Fprintf(os.Stderr, "      --config PATH        config file (JSON)\n")
-		fmt.Fprintf(os.Stderr, "      --dump-config        print resolved config as JSON and exit\n\n")
+		fmt.Fprintf(os.Stderr, "  -f, --config PATH        config file (JSON)\n")
+		fmt.Fprintf(os.Stderr, "  -D, --dump-config        print resolved config as JSON and exit\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                enable TLS (autocert via Let's Encrypt if no cert/key)\n")
 		fmt.Fprintf(os.Stderr, "      --tls-cert FILE      TLS certificate file (PEM)\n")
@@ -159,6 +159,8 @@ func cmdBridge(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	// Load config file (if specified). Config values fill in unset flags.
 	var bridgeGuideEntries []guideEntry // from config inline guide
@@ -472,6 +474,9 @@ func cmdBridge(args []string) {
 					return map[string]interface{}{}
 				}
 				info := viewerBuildInfo(current.ChannelID, current.Name, current.metadata, current.guideDoc)
+				if icon := viewerIconDataURI(iconData, iconCT); icon != "" {
+					info["icon_data"] = icon
+				}
 				info["stream_src"] = "/tltv/v1/channels/" + current.ChannelID + "/stream.m3u8"
 				info["xmltv_url"] = "/tltv/v1/channels/" + current.ChannelID + "/guide.xml"
 				if registry.hostname != "" {
@@ -495,6 +500,7 @@ func cmdBridge(args []string) {
 					}
 					if ch.IconFileName != "" {
 						ref.IconPath = "/tltv/v1/channels/" + ch.ChannelID + "/" + ch.IconFileName
+						ref.IconData = viewerIconDataURI(iconData, iconCT)
 					}
 					refs = append(refs, ref)
 				}

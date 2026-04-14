@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,8 @@ var (
 	logMinLevel  logLevel  = levelInfo
 	logJSON      bool
 	logComponent string
+	logFilePath  string
+	logFile      *os.File
 )
 
 // addLogFlags registers --log-level, --log-format, --log-file on a flag set.
@@ -42,6 +45,15 @@ func addLogFlags(fs *flag.FlagSet) (level, format, file *string) {
 // setupLogging configures the package-level logger. Must be called before
 // any log output. The component name is included in every log line.
 func setupLogging(level, format, file, component string) error {
+	logMu.Lock()
+	defer logMu.Unlock()
+
+	if logFile != nil {
+		logFile.Close()
+		logFile = nil
+	}
+	logOut = os.Stderr
+	logFilePath = ""
 	logComponent = component
 
 	switch strings.ToLower(level) {
@@ -70,9 +82,66 @@ func setupLogging(level, format, file, component string) error {
 			return fmt.Errorf("open log file: %w", err)
 		}
 		logOut = f
+		logFile = f
+		logFilePath = file
 	}
 
 	return nil
+}
+
+func reopenLogFile() error {
+	logMu.Lock()
+	path := logFilePath
+	oldFile := logFile
+	logMu.Unlock()
+
+	if path == "" {
+		return nil
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+
+	logMu.Lock()
+	logOut = f
+	logFile = f
+	logMu.Unlock()
+
+	if oldFile != nil {
+		oldFile.Close()
+	}
+	return nil
+}
+
+func startLogReopenWatcher() func() {
+	logMu.Lock()
+	hasFile := logFilePath != ""
+	logMu.Unlock()
+	if !hasFile {
+		return func() {}
+	}
+
+	ch := make(chan os.Signal, 1)
+	sighupNotify(ch)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				signal.Stop(ch)
+				return
+			case <-ch:
+				if err := reopenLogFile(); err != nil {
+					logErrorf("reopen log file: %v", err)
+				} else {
+					logInfof("reopened log file")
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // logf writes a structured log entry at the given level.

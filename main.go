@@ -899,7 +899,7 @@ func cmdVersion() {
 var allCommands = []string{
 	"info", "channel", "stream", "guide", "node", "peers",
 	"resolve", "crawl",
-	"server", "bridge", "relay", "router",
+	"server", "bridge", "relay", "mirror", "router",
 	"viewer", "receiver",
 	"keygen", "vanity", "inspect",
 	"sign", "verify", "template", "migrate",
@@ -907,13 +907,61 @@ var allCommands = []string{
 	"loadtest", "version", "update", "completion",
 }
 
+var commandDescriptions = map[string]string{
+	"info": "Show all channel info", "channel": "Fetch channel metadata",
+	"stream": "Check stream status", "guide": "Fetch channel guide",
+	"node": "Query node identity", "peers": "List peers from a node",
+	"resolve": "Resolve URI end-to-end", "crawl": "Crawl the gossip network",
+	"server": "SMPTE test signal generator", "bridge": "Bridge origin server", "relay": "Relay node",
+	"mirror": "Mirror origin", "router": "Routing reverse proxy",
+	"viewer": "Open a local web viewer", "receiver": "Consume an HLS stream",
+	"keygen": "Generate channel keypair", "vanity": "Mine vanity IDs",
+	"inspect": "Inspect channel ID", "sign": "Sign document",
+	"verify": "Verify document", "template": "Document template",
+	"migrate": "Create migration document", "parse": "Parse tltv:// URI",
+	"format": "Build tltv:// URI", "loadtest": "Load test with receivers",
+	"version": "Show version", "update": "Update to latest release",
+	"completion": "Shell completions",
+}
+
+var completionFlagRegistry = map[string][]string{
+	"info":        {"--token", "-t", "--no-verify", "-V", "--watch", "-w", "--interval", "-i"},
+	"channel":     {"--token", "-t", "--no-verify", "-V", "--watch", "-w", "--interval", "-i"},
+	"guide":       {"--token", "-t", "--no-verify", "-V", "--xmltv", "-x", "--watch", "-w", "--interval", "-i"},
+	"node":        {"--watch", "-w", "--interval", "-i"},
+	"peers":       {"--watch", "-w", "--interval", "-i"},
+	"stream":      {"--token", "-t", "--url", "-u", "--watch", "-w", "--interval", "-i"},
+	"resolve":     {"--token", "-t", "--no-verify", "-V"},
+	"crawl":       {"--depth", "-d"},
+	"server":      {},
+	"server test": {"--key", "-k", "--name", "-n", "--uptime", "-u", "--font-scale", "-J", "--timezone", "-z", "--description", "-U", "--tags", "-T", "--language", "-a", "--icon", "-c", "--access", "-A", "--token", "-t", "--on-demand", "-O", "--channels", "-N", "--variants", "-V", "--audio-tracks", "-R", "--subtitles", "-W", "--audio-only", "-B", "--no-audio", "-M", "--program-date-time", "-d", "--width", "-X", "--height", "-Y", "--fps", "-F", "--qp", "-Q", "--listen", "-l", "--hostname", "-H", "--peers", "-P", "--gossip", "-g", "--cache", "--cache-max-entries", "--cache-stats", "--viewer", "--debug-viewer", "--viewer-title", "-e", "--no-viewer-footer", "-Z", "--config", "-f", "--dump-config", "-D", "--log-level", "--log-format", "--log-file", "--tls", "--tls-cert", "--tls-key", "--tls-staging", "--acme-email"},
+	"bridge":      {"--stream", "-s", "--guide", "-G", "--name", "-n", "--description", "-U", "--tags", "-T", "--language", "-a", "--timezone", "-z", "--icon", "-c", "--on-demand", "-O", "--poll", "-p", "--listen", "-l", "--key", "-k", "--keys-dir", "-K", "--hostname", "-H", "--peers", "-P", "--gossip", "-g", "--proxy", "-x", "--config", "-f", "--dump-config", "-D", "--cache", "--cache-max-entries", "--cache-stats", "--viewer", "--debug-viewer", "--viewer-title", "-e", "--no-viewer-footer", "-Z", "--tls", "--tls-cert", "--tls-key", "--tls-staging", "--acme-email", "--log-level", "--log-format", "--log-file"},
+	"relay":       {"--channels", "-c", "--node", "-n", "--config", "-f", "--dump-config", "-D", "--listen", "-l", "--hostname", "-H", "--peers", "-P", "--gossip", "-g", "--proxy", "-x", "--cache", "--cache-max-entries", "--cache-stats", "--buffer", "-b", "--delay", "-y", "--buffer-max-memory", "-B", "--viewer", "--debug-viewer", "--viewer-title", "-e", "--no-viewer-footer", "-Z", "--tls", "--tls-cert", "--tls-key", "--tls-staging", "--acme-email", "--meta-poll", "-m", "--guide-poll", "-G", "--peer-poll", "-p", "--max-peers", "-M", "--stale-days", "-s", "--log-level", "--log-format", "--log-file"},
+	"mirror":      {"--source", "-s", "--key", "-k", "--listen", "-l", "--hostname", "-H", "--token", "-t", "--peers", "-P", "--gossip", "-g", "--proxy", "-x", "--buffer", "-b", "--buffer-max-memory", "-B", "--fallback-stream", "--fallback-guide", "--icon", "-c", "--promote-after", "-R", "--state-file", "-S", "--config", "-f", "--dump-config", "-D", "--cache", "--cache-max-entries", "--cache-stats", "--tls", "--tls-cert", "--tls-key", "--tls-staging", "--acme-email", "--viewer", "--debug-viewer", "--viewer-title", "-e", "--no-viewer-footer", "-Z", "--meta-poll", "-m", "--guide-poll", "-G", "--log-level", "--log-format", "--log-file"},
+	"router":      {"--route", "-r", "--listen", "-l", "--http-listen", "-J", "--health-check", "-H", "--health-interval", "-i", "--read-timeout", "-R", "--keepalive-max-requests", "-K", "--keepalive-max-time", "-T", "--config", "-f", "--dump-config", "-D", "--tls", "--tls-cert", "--tls-key", "--tls-staging", "--acme-email", "--log-level", "--log-format", "--log-file"},
+	"viewer":      {"--listen", "-l", "--token", "-t", "--saved-channels", "-E", "--log-level", "--log-format", "--log-file", "--debug"},
+	"receiver":    {"--monitor", "-m", "--timeout", "-T", "--duration", "-d", "--record", "-r", "--pipe", "-p", "--url", "-u", "--quality", "-q", "--proxy", "-x", "--log-level", "--log-format", "--log-file"},
+	"loadtest":    {"--receivers", "-n", "--duration", "-d", "--ramp", "-r", "--url", "-u", "--quality", "-q", "--connect-timeout", "-T", "--proxy", "-x", "--log-level", "--log-format", "--log-file"},
+	"completion":  {"--install", "-i", "--flags"},
+}
+
+func completionFlagsFor(commandPath ...string) []string {
+	key := strings.TrimSpace(strings.Join(commandPath, " "))
+	if key == "" {
+		return nil
+	}
+	return completionFlagRegistry[key]
+}
+
 func cmdCompletion(args []string) {
 	fs := flag.NewFlagSet("completion", flag.ExitOnError)
 	install := fs.Bool("install", false, "write completions to the standard shell location")
 	fs.BoolVar(install, "i", false, "alias for --install")
+	flagsOnly := fs.Bool("flags", false, "print known flags for a command path")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Generate shell completion scripts\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: tltv completion [--install] <shell>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tltv completion [--install] <shell>\n")
+		fmt.Fprintf(os.Stderr, "       tltv completion --flags <command> [subcommand]\n\n")
 		fmt.Fprintf(os.Stderr, "Shells: bash, zsh, fish\n\n")
 		fmt.Fprintf(os.Stderr, "Without --install, prints the script to stdout.\n")
 		fmt.Fprintf(os.Stderr, "With --install, writes to the standard location:\n")
@@ -922,8 +970,17 @@ func cmdCompletion(args []string) {
 		fmt.Fprintf(os.Stderr, "  fish:  ~/.config/fish/completions/tltv.fish\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -i, --install    write completions to the standard shell location\n")
+		fmt.Fprintf(os.Stderr, "      --flags      print known flags for a command path\n")
 	}
 	fs.Parse(args)
+
+	if *flagsOnly {
+		if fs.NArg() < 1 {
+			fatal("completion --flags requires a command")
+		}
+		fmt.Println(strings.Join(completionFlagsFor(fs.Args()...), " "))
+		return
+	}
 
 	if fs.NArg() < 1 {
 		fs.Usage()
@@ -968,83 +1025,151 @@ func cmdCompletion(args []string) {
 
 func completionBash() string {
 	cmds := strings.Join(allCommands, " ")
-	return `# tltv bash completion
-_tltv() {
-    local cur prev commands
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="` + cmds + `"
-
-    if [[ ${COMP_CWORD} -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
-        return 0
-    fi
-
-    case "${prev}" in
-        template)
-            COMPREPLY=( $(compgen -W "metadata guide migration" -- "${cur}") )
-            ;;
-        server)
-            COMPREPLY=( $(compgen -W "test" -- "${cur}") )
-            ;;
-        completion)
-            COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") )
-            ;;
-        -key|-k|-input|-i|-output|-o|-from-key)
-            COMPREPLY=( $(compgen -f -- "${cur}") )
-            ;;
-        verify)
-            COMPREPLY=( $(compgen -f -- "${cur}") )
-            ;;
-    esac
-}
-complete -F _tltv tltv
-`
+	var sb strings.Builder
+	sb.WriteString("# tltv bash completion\n")
+	sb.WriteString("_tltv() {\n")
+	sb.WriteString("    local cur prev commands flags\n")
+	sb.WriteString("    COMPREPLY=()\n")
+	sb.WriteString("    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n")
+	sb.WriteString("    prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n")
+	sb.WriteString("    commands=\"")
+	sb.WriteString(cmds)
+	sb.WriteString("\"\n\n")
+	sb.WriteString("    if [[ ${COMP_CWORD} -eq 1 ]]; then\n")
+	sb.WriteString("        COMPREPLY=( $(compgen -W \"${commands}\" -- \"${cur}\") )\n")
+	sb.WriteString("        return 0\n")
+	sb.WriteString("    fi\n\n")
+	sb.WriteString("    if [[ ${COMP_WORDS[1]} == \"server\" && ${COMP_CWORD} -eq 2 ]]; then\n")
+	sb.WriteString("        COMPREPLY=( $(compgen -W \"test\" -- \"${cur}\") )\n")
+	sb.WriteString("        return 0\n")
+	sb.WriteString("    fi\n\n")
+	sb.WriteString("    case \"${prev}\" in\n")
+	sb.WriteString("        template)\n")
+	sb.WriteString("            COMPREPLY=( $(compgen -W \"metadata guide migration\" -- \"${cur}\") )\n")
+	sb.WriteString("            return 0\n")
+	sb.WriteString("            ;;\n")
+	sb.WriteString("        completion)\n")
+	sb.WriteString("            COMPREPLY=( $(compgen -W \"bash zsh fish\" -- \"${cur}\") )\n")
+	sb.WriteString("            return 0\n")
+	sb.WriteString("            ;;\n")
+	sb.WriteString("        --key|-k|--input|-i|--output|-o|--from-key)\n")
+	sb.WriteString("            COMPREPLY=( $(compgen -f -- \"${cur}\") )\n")
+	sb.WriteString("            return 0\n")
+	sb.WriteString("            ;;\n")
+	sb.WriteString("    esac\n\n")
+	sb.WriteString("    if [[ ${COMP_WORDS[1]} == \"verify\" ]]; then\n")
+	sb.WriteString("        COMPREPLY=( $(compgen -f -- \"${cur}\") )\n")
+	sb.WriteString("        return 0\n")
+	sb.WriteString("    fi\n\n")
+	sb.WriteString("    if [[ \"${cur}\" == -* ]]; then\n")
+	sb.WriteString("        case \"${COMP_WORDS[1]} ${COMP_WORDS[2]}\" in\n")
+	for _, key := range []string{"server test"} {
+		flags := strings.Join(completionFlagsFor(strings.Split(key, " ")...), " ")
+		sb.WriteString("            \"")
+		sb.WriteString(key)
+		sb.WriteString("\") flags=\"")
+		sb.WriteString(flags)
+		sb.WriteString("\" ;;\n")
+	}
+	sb.WriteString("        esac\n")
+	sb.WriteString("        if [[ -z \"${flags}\" ]]; then\n")
+	sb.WriteString("            case \"${COMP_WORDS[1]}\" in\n")
+	for _, cmd := range allCommands {
+		flags := strings.Join(completionFlagsFor(cmd), " ")
+		if flags == "" {
+			continue
+		}
+		sb.WriteString("                ")
+		sb.WriteString(cmd)
+		sb.WriteString(") flags=\"")
+		sb.WriteString(flags)
+		sb.WriteString("\" ;;\n")
+	}
+	sb.WriteString("            esac\n")
+	sb.WriteString("        fi\n")
+	sb.WriteString("        if [[ -n \"${flags}\" ]]; then\n")
+	sb.WriteString("            COMPREPLY=( $(compgen -W \"${flags}\" -- \"${cur}\") )\n")
+	sb.WriteString("            return 0\n")
+	sb.WriteString("        fi\n")
+	sb.WriteString("    fi\n")
+	sb.WriteString("}\n")
+	sb.WriteString("complete -F _tltv tltv\n")
+	return sb.String()
 }
 
 func completionZsh() string {
 	cmds := strings.Join(allCommands, " ")
-	return `#compdef tltv
-# tltv zsh completion
-
-_tltv() {
-    local -a commands
-    commands=(` + cmds + `)
-
-    _arguments -C \
-        '(-j --json)'{-j,--json}'[JSON output]' \
-        '(-C --no-color)'{-C,--no-color}'[Disable colors]' \
-        '(-I --insecure)'{-I,--insecure}'[Use HTTP transport]' \
-        '(-L --local)'{-L,--local}'[Allow local/private address hints]' \
-        '1:command:->cmd' \
-        '*::arg:->args'
-
-    case $state in
-        cmd)
-            _describe 'command' commands
-            ;;
-        args)
-            case $words[1] in
-                server)
-                    _values 'subcommand' test
-                    ;;
-                template)
-                    _values 'type' metadata guide migration
-                    ;;
-                completion)
-                    _values 'shell' bash zsh fish
-                    ;;
-                verify)
-                    _files
-                    ;;
-            esac
-            ;;
-    esac
-}
-
-_tltv "$@"
-`
+	var sb strings.Builder
+	sb.WriteString("#compdef tltv\n# tltv zsh completion\n\n")
+	sb.WriteString("_tltv() {\n")
+	sb.WriteString("    local -a commands flags\n")
+	sb.WriteString("    commands=(")
+	sb.WriteString(cmds)
+	sb.WriteString(")\n\n")
+	sb.WriteString("    _arguments -C \\\n")
+	sb.WriteString("        '(-j --json)'{-j,--json}'[JSON output]' \\\n")
+	sb.WriteString("        '(-C --no-color)'{-C,--no-color}'[Disable colors]' \\\n")
+	sb.WriteString("        '(-I --insecure)'{-I,--insecure}'[Use HTTP transport]' \\\n")
+	sb.WriteString("        '(-L --local)'{-L,--local}'[Allow local/private address hints]' \\\n")
+	sb.WriteString("        '1:command:->cmd' \\\n")
+	sb.WriteString("        '*::arg:->args'\n\n")
+	sb.WriteString("    case $state in\n")
+	sb.WriteString("        cmd)\n")
+	sb.WriteString("            _describe 'command' commands\n")
+	sb.WriteString("            ;;\n")
+	sb.WriteString("        args)\n")
+	sb.WriteString("            if [[ $words[1] == server && $CURRENT -eq 2 ]]; then\n")
+	sb.WriteString("                _values 'subcommand' test\n")
+	sb.WriteString("                return\n")
+	sb.WriteString("            fi\n")
+	sb.WriteString("            case $words[1] in\n")
+	sb.WriteString("                template)\n")
+	sb.WriteString("                    if [[ $CURRENT -eq 2 ]]; then _values 'type' metadata guide migration; return; fi\n")
+	sb.WriteString("                    ;;\n")
+	sb.WriteString("                completion)\n")
+	sb.WriteString("                    if [[ $CURRENT -eq 2 ]]; then _values 'shell' bash zsh fish; return; fi\n")
+	sb.WriteString("                    ;;\n")
+	sb.WriteString("                verify)\n")
+	sb.WriteString("                    _files\n")
+	sb.WriteString("                    return\n")
+	sb.WriteString("                    ;;\n")
+	sb.WriteString("            esac\n")
+	sb.WriteString("            if [[ $words[$CURRENT] == -* ]]; then\n")
+	sb.WriteString("                case \"$words[1] $words[2]\" in\n")
+	for _, key := range []string{"server test"} {
+		flags := strings.Join(completionFlagsFor(strings.Split(key, " ")...), " ")
+		sb.WriteString("                    \"")
+		sb.WriteString(key)
+		sb.WriteString("\") flags=(")
+		sb.WriteString(flags)
+		sb.WriteString(") ;;\n")
+	}
+	sb.WriteString("                esac\n")
+	sb.WriteString("                if (( ${#flags} == 0 )); then\n")
+	sb.WriteString("                    case $words[1] in\n")
+	for _, cmd := range allCommands {
+		flags := strings.Join(completionFlagsFor(cmd), " ")
+		if flags == "" {
+			continue
+		}
+		sb.WriteString("                        ")
+		sb.WriteString(cmd)
+		sb.WriteString(") flags=(")
+		sb.WriteString(flags)
+		sb.WriteString(") ;;\n")
+	}
+	sb.WriteString("                    esac\n")
+	sb.WriteString("                fi\n")
+	sb.WriteString("                if (( ${#flags} > 0 )); then\n")
+	sb.WriteString("                    _describe 'flag' flags\n")
+	sb.WriteString("                    return\n")
+	sb.WriteString("                fi\n")
+	sb.WriteString("            fi\n")
+	sb.WriteString("            ;;\n")
+	sb.WriteString("    esac\n")
+	sb.WriteString("}\n\n")
+	sb.WriteString("_tltv \"$@\"\n")
+	return sb.String()
 }
 
 func completionFish() string {
@@ -1059,28 +1184,29 @@ func completionFish() string {
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -s I -l insecure -d 'Use HTTP transport'\n")
 	sb.WriteString("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -s L -l local -d 'Allow local addresses'\n")
 
-	descriptions := map[string]string{
-		"info": "Show all channel info", "channel": "Fetch channel metadata",
-		"stream": "Check stream status", "guide": "Fetch channel guide",
-		"node": "Query node identity", "peers": "List peers from a node",
-		"resolve": "Resolve URI end-to-end", "crawl": "Crawl the gossip network",
-		"server": "SMPTE test signal generator", "bridge": "Bridge origin server", "relay": "Relay node",
-		"viewer": "Open a local web viewer", "receiver": "Consume an HLS stream",
-		"keygen": "Generate channel keypair", "vanity": "Mine vanity IDs",
-		"inspect": "Inspect channel ID", "sign": "Sign document",
-		"verify": "Verify document", "template": "Document template",
-		"migrate": "Create migration document",
-		"parse": "Parse tltv:// URI", "format": "Build tltv:// URI",
-		"loadtest": "Load test with receivers",
-		"version": "Show version", "update": "Update to latest release",
-		"completion": "Shell completions",
-	}
 	for _, cmd := range allCommands {
-		desc := descriptions[cmd]
+		desc := commandDescriptions[cmd]
 		sb.WriteString(fmt.Sprintf("complete -c tltv -n \"not __fish_seen_subcommand_from $commands\" -a %s -d '%s'\n", cmd, desc))
 	}
 	sb.WriteString("\ncomplete -c tltv -n \"__fish_seen_subcommand_from server\" -a 'test'\n")
 	sb.WriteString("complete -c tltv -n \"__fish_seen_subcommand_from template\" -a 'metadata guide migration'\n")
 	sb.WriteString("complete -c tltv -n \"__fish_seen_subcommand_from completion\" -a 'bash zsh fish'\n")
+	for _, cmd := range allCommands {
+		for _, flagName := range completionFlagsFor(cmd) {
+			if strings.HasPrefix(flagName, "--") {
+				sb.WriteString(fmt.Sprintf("complete -c tltv -n \"__fish_seen_subcommand_from %s\" -l %s\n", cmd, strings.TrimPrefix(flagName, "--")))
+			} else if strings.HasPrefix(flagName, "-") {
+				sb.WriteString(fmt.Sprintf("complete -c tltv -n \"__fish_seen_subcommand_from %s\" -s %s\n", cmd, strings.TrimPrefix(flagName, "-")))
+			}
+		}
+	}
+	for _, flagName := range completionFlagsFor("server", "test") {
+		condition := "contains -- server (commandline -opc); and contains -- test (commandline -opc)"
+		if strings.HasPrefix(flagName, "--") {
+			sb.WriteString(fmt.Sprintf("complete -c tltv -n \"%s\" -l %s\n", condition, strings.TrimPrefix(flagName, "--")))
+		} else if strings.HasPrefix(flagName, "-") {
+			sb.WriteString(fmt.Sprintf("complete -c tltv -n \"%s\" -s %s\n", condition, strings.TrimPrefix(flagName, "-")))
+		}
+	}
 	return sb.String()
 }

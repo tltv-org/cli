@@ -154,7 +154,7 @@ func bridgeServeUpstreamStream(w http.ResponseWriter, r *http.Request, manifestU
 		return
 	}
 
-	setStreamHeaders(w, subPath, private)
+	setStreamHeadersWithContentType(w, subPath, private, resp.Header.Get("Content-Type"))
 
 	if strings.HasSuffix(subPath, ".m3u8") {
 		// Read and rewrite manifest
@@ -276,7 +276,17 @@ func bridgeAppendToken(uri, token string) string {
 
 // setStreamHeaders sets Content-Type and Cache-Control for stream responses.
 func setStreamHeaders(w http.ResponseWriter, subPath string, private bool) {
-	w.Header().Set("Content-Type", streamContentType(subPath))
+	setStreamHeadersWithContentType(w, subPath, private, "")
+}
+
+// setStreamHeadersWithContentType prefers the canonical content type for known
+// file extensions and falls back to the upstream content type for unknown ones.
+func setStreamHeadersWithContentType(w http.ResponseWriter, subPath string, private bool, contentType string) {
+	ct := streamContentType(subPath)
+	if ct == "application/octet-stream" && contentType != "" {
+		ct = contentType
+	}
+	w.Header().Set("Content-Type", ct)
 
 	if private {
 		w.Header().Set("Cache-Control", "private, no-store")
@@ -304,6 +314,12 @@ func streamContentType(name string) string {
 		return "audio/aac"
 	case strings.HasSuffix(name, ".vtt"):
 		return "text/vtt"
+	case strings.HasSuffix(name, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(name, ".png"):
+		return "image/png"
+	case strings.HasSuffix(name, ".jpg"), strings.HasSuffix(name, ".jpeg"):
+		return "image/jpeg"
 	default:
 		return "application/octet-stream"
 	}

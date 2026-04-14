@@ -54,6 +54,9 @@ func registerViewerRoutes(mux *http.ServeMux, html string, infoFn func(channelID
 					if ch.IconPath != "" {
 						entry["icon_path"] = ch.IconPath
 					}
+					if ch.IconData != "" {
+						entry["icon_data"] = ch.IconData
+					}
 					if ch.Guide != nil {
 						var g map[string]interface{}
 						if json.Unmarshal(ch.Guide, &g) == nil {
@@ -246,13 +249,14 @@ function updateUI(){
   applyViewerConfig(_info);
   document.getElementById('cn').textContent=_info.channel_name||_info.channel_id||'';
   // Icon in controls bar
-  var icon=document.getElementById('ch-icon');
-  var meta=_info.metadata||{};
-  if(icon){
-    if(_info.icon_url){icon.src=withToken(_info.icon_url);icon.style.display=''}
-    else if(meta.icon){var ext=meta.icon.split('.').pop()||'svg';icon.src=withToken('/tltv/v1/channels/'+_chID+'/icon.'+ext);icon.style.display=''}
-    else{icon.style.display='none'}
-  }
+	var icon=document.getElementById('ch-icon');
+	var meta=_info.metadata||{};
+	if(icon){
+		if(_info.icon_data&&_info.icon_data.indexOf('data:')===0){icon.src=_info.icon_data;icon.style.display=''}
+		else if(_info.icon_url){icon.src=withToken(_info.icon_url);icon.style.display=''}
+		else if(meta.icon){var ext=meta.icon.split('.').pop()||'svg';icon.src=withToken('/tltv/v1/channels/'+_chID+'/icon.'+ext);icon.style.display=''}
+		else{icon.style.display='none'}
+	}
   // URI
   var tltvUri=_info.tltv_uri||('tltv://'+_chID+'@'+location.host);
   var uriEl=document.getElementById('uri-display');
@@ -300,13 +304,17 @@ function buildGuide(){
     var btn=document.createElement('button');
     btn.className='guide-label'+(isActive?' active':'');
     var h='';
-    // Icon — active channel uses metadata icon or icon_url; others use icon_path or cached data-URI
-    if(isActive&&(_info.icon_url||meta.icon)){
-      var iSrc=_info.icon_url||('/tltv/v1/channels/'+ch.id+'/icon.'+(meta.icon?meta.icon.split('.').pop():'svg'));
-      h+='<img class="label-icon" src="'+esc(withToken(iSrc))+'" alt="" onerror="this.style.display=\'none\'">';
-    }else if(ch.icon_path){
-      h+='<img class="label-icon" src="'+esc(withToken(ch.icon_path))+'" alt="" onerror="this.style.display=\'none\'">';
-    }else if(ch.icon_data&&ch.icon_data.indexOf('data:')===0){
+	// Icon — active channel prefers embedded icon_data, then icon_url/metadata path.
+	if(isActive&&(_info.icon_data||_info.icon_url||meta.icon)){
+	  if(_info.icon_data&&_info.icon_data.indexOf('data:')===0){
+	    h+='<img class="label-icon" src="'+esc(_info.icon_data)+'" alt="" onerror="this.style.display=\'none\'">';
+	  }else{
+	    var iSrc=_info.icon_url||('/tltv/v1/channels/'+ch.id+'/icon.'+(meta.icon?meta.icon.split('.').pop():'svg'));
+	    h+='<img class="label-icon" src="'+esc(withToken(iSrc))+'" alt="" onerror="this.style.display=\'none\'">';
+	  }
+	}else if(ch.icon_path){
+	  h+='<img class="label-icon" src="'+esc(withToken(ch.icon_path))+'" alt="" onerror="this.style.display=\'none\'">';
+	}else if(ch.icon_data&&ch.icon_data.indexOf('data:')===0){
       h+='<img class="label-icon" src="'+esc(ch.icon_data)+'" alt="" onerror="this.style.display=\'none\'">';
     }
     h+='<span class="label-name">'+esc(ch.name||ch.id)+'</span>';

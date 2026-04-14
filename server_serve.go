@@ -298,6 +298,7 @@ func serverHTTP(mux *http.ServeMux, seg *hlsSegmenter, channelID, channelName st
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		writeJSON(w, map[string]interface{}{
 			"status":   "ok",
+			"version":  version,
 			"channels": 1,
 		}, http.StatusOK)
 	})
@@ -633,6 +634,7 @@ func serverMultiHTTP(mux *http.ServeMux, channels []*serverChannel, cache *hlsCa
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{
 			"status":   "ok",
+			"version":  version,
 			"channels": len(channels),
 		}, http.StatusOK)
 	})

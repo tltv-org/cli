@@ -163,15 +163,15 @@ func addWatchFlags(fs *flag.FlagSet) (*bool, *int) {
 	watch := fs.Bool("watch", false, "auto-refresh output")
 	fs.BoolVar(watch, "w", false, "alias for --watch")
 	interval := fs.Int("interval", 2, "refresh interval in seconds")
+	fs.IntVar(interval, "i", 2, "alias for --interval")
 	return watch, interval
 }
 
 // watchLoop clears the screen and calls displayFn repeatedly until interrupted.
-// If watch is false, calls displayFn once and returns.
-func watchLoop(watch bool, intervalSec int, displayFn func()) {
+// If watch is false, calls displayFn once and returns its error.
+func watchLoop(watch bool, intervalSec int, displayFn func() error) error {
 	if !watch {
-		displayFn()
-		return
+		return displayFn()
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -180,13 +180,15 @@ func watchLoop(watch bool, intervalSec int, displayFn func()) {
 	for {
 		// Clear screen and move cursor to top-left
 		fmt.Print("\033[2J\033[H")
-		displayFn()
+		if err := displayFn(); err != nil {
+			fmt.Fprintf(os.Stderr, "watch error: %v\n", err)
+		}
 		fmt.Printf("\n%s", c(cDim, fmt.Sprintf("  refreshing every %ds — Ctrl-C to exit", intervalSec)))
 
 		select {
 		case <-sigCh:
 			fmt.Println()
-			return
+			return nil
 		case <-time.After(time.Duration(intervalSec) * time.Second):
 		}
 	}

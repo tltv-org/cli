@@ -117,11 +117,22 @@ func parseProxyURL(s string) (*url.URL, error) {
 	return u, nil
 }
 
+type configFlagOpts struct {
+	ConfigShort string
+	DumpShort   string
+}
+
 // addConfigFlags registers --config and --dump-config flags on a FlagSet.
 // Env vars: CONFIG.
-func addConfigFlags(fs *flag.FlagSet) (configPath *string, dumpConfig *bool) {
+func addConfigFlags(fs *flag.FlagSet, opts configFlagOpts) (configPath *string, dumpConfig *bool) {
 	configPath = fs.String("config", os.Getenv("CONFIG"), "config file (JSON)")
 	dumpConfig = fs.Bool("dump-config", false, "print resolved config as JSON and exit")
+	if opts.ConfigShort != "" {
+		fs.StringVar(configPath, opts.ConfigShort, os.Getenv("CONFIG"), "alias for --config")
+	}
+	if opts.DumpShort != "" {
+		fs.BoolVar(dumpConfig, opts.DumpShort, false, "alias for --dump-config")
+	}
 	return
 }
 

@@ -3416,6 +3416,54 @@ func TestLogLevelFiltering(t *testing.T) {
 	}
 }
 
+func TestReopenLogFile(t *testing.T) {
+	defer func() {
+		if logFile != nil {
+			logFile.Close()
+			logFile = nil
+		}
+		logFilePath = ""
+		logMinLevel = levelInfo
+		logJSON = false
+		logOut = os.Stderr
+		logComponent = ""
+	}()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "reopen.log")
+	rotated := filepath.Join(dir, "reopen.log.1")
+	if err := setupLogging("info", "human", path, "test"); err != nil {
+		t.Fatalf("setupLogging: %v", err)
+	}
+
+	logInfof("before rotate")
+	if err := os.Rename(path, rotated); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if err := reopenLogFile(); err != nil {
+		t.Fatalf("reopenLogFile: %v", err)
+	}
+	logInfof("after rotate")
+
+	oldData, err := os.ReadFile(rotated)
+	if err != nil {
+		t.Fatalf("Read rotated: %v", err)
+	}
+	newData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Read new log: %v", err)
+	}
+	if !strings.Contains(string(oldData), "before rotate") {
+		t.Fatalf("rotated log missing old entry: %s", oldData)
+	}
+	if strings.Contains(string(oldData), "after rotate") {
+		t.Fatalf("rotated log should not contain reopened entry: %s", oldData)
+	}
+	if !strings.Contains(string(newData), "after rotate") {
+		t.Fatalf("new log missing reopened entry: %s", newData)
+	}
+}
+
 func TestLogJSONFormat(t *testing.T) {
 	defer func() {
 		logMinLevel = levelInfo
@@ -3535,6 +3583,45 @@ func TestAllCommands_ContainsInfo(t *testing.T) {
 	}
 	if !found {
 		t.Error("allCommands missing 'info'")
+	}
+}
+
+func TestAllCommands_ContainsMirror(t *testing.T) {
+	found := false
+	for _, cmd := range allCommands {
+		if cmd == "mirror" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("allCommands missing 'mirror'")
+	}
+}
+
+func TestCompletionFlagsFor_ServerTest(t *testing.T) {
+	flags := completionFlagsFor("server", "test")
+	joined := strings.Join(flags, " ")
+	if !strings.Contains(joined, "--font-scale") {
+		t.Fatalf("server test flags missing --font-scale: %s", joined)
+	}
+	if !strings.Contains(joined, "--dump-config") {
+		t.Fatalf("server test flags missing --dump-config: %s", joined)
+	}
+}
+
+func TestCompletionScripts_ContainMirrorAndFlagMetadata(t *testing.T) {
+	bash := completionBash()
+	zsh := completionZsh()
+	fish := completionFish()
+	if !strings.Contains(bash, "mirror") {
+		t.Fatal("bash completion missing mirror")
+	}
+	if !strings.Contains(fish, "Routing reverse proxy") {
+		t.Fatal("fish completion missing router description")
+	}
+	if !strings.Contains(zsh, "--keepalive-max-requests") {
+		t.Fatal("zsh completion missing router flag metadata")
 	}
 }
 

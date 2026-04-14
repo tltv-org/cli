@@ -14,12 +14,12 @@ import (
 // bridgeServer implements the TLTV protocol HTTP endpoints for bridged channels.
 type bridgeServer struct {
 	registry  *bridgeRegistry
-	cache     *hlsCache        // optional response cache (nil = disabled)
-	peerReg   *peerRegistry    // optional external peers (nil = no --peers)
-	gossipReg *peerRegistry    // optional gossip-discovered peers (nil = no --gossip)
+	cache     *hlsCache     // optional response cache (nil = disabled)
+	peerReg   *peerRegistry // optional external peers (nil = no --peers)
+	gossipReg *peerRegistry // optional gossip-discovered peers (nil = no --gossip)
 	mux       *http.ServeMux
-	iconData  []byte           // default icon data (nil = no default icon)
-	iconCT    string           // icon content type
+	iconData  []byte // default icon data (nil = no default icon)
+	iconCT    string // icon content type
 }
 
 // newBridgeServer creates a bridge HTTP server with all protocol endpoints registered.
@@ -181,6 +181,7 @@ func (s *bridgeServer) handleChannelPath(w http.ResponseWriter, r *http.Request)
 func (s *bridgeServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
 		"status":   "ok",
+		"version":  version,
 		"channels": s.registry.PublicChannelCount(),
 	}, http.StatusOK)
 }
@@ -255,7 +256,7 @@ func (s *bridgeServer) serveCachedStream(w http.ResponseWriter, r *http.Request,
 	}
 
 	cacheKey := r.URL.Path
-	data, _, hit, err := s.cache.getOrFetch(cacheKey, func() (*hlsCacheFetchResult, error) {
+	data, contentType, hit, err := s.cache.getOrFetch(cacheKey, func() (*hlsCacheFetchResult, error) {
 		fr, err := hlsCacheFetchUpstream(bridgeStreamClient, fetchURL, r)
 		if err != nil {
 			return nil, err
@@ -272,7 +273,7 @@ func (s *bridgeServer) serveCachedStream(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	setStreamHeaders(w, subPath, ch.IsPrivate())
+	setStreamHeadersWithContentType(w, subPath, ch.IsPrivate(), contentType)
 	if hit {
 		w.Header().Set("Cache-Status", "HIT")
 	} else {

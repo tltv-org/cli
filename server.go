@@ -77,13 +77,13 @@ func cmdServerTest(args []string) {
 	showUptime := fs.Bool("uptime", os.Getenv("UPTIME") == "1", "show uptime instead of wall clock")
 	fs.BoolVar(showUptime, "u", os.Getenv("UPTIME") == "1", "alias for --uptime")
 	fontScale := fs.Int("font-scale", envInt("FONT_SCALE", 0), "font scale factor (0 = auto from resolution)")
-	fs.IntVar(fontScale, "f", envInt("FONT_SCALE", 0), "alias for --font-scale")
+	fs.IntVar(fontScale, "J", envInt("FONT_SCALE", 0), "alias for --font-scale")
 	timezoneArg := fs.String("timezone", os.Getenv("TIMEZONE"), "IANA timezone for clock display (e.g. America/New_York)")
 	fs.StringVar(timezoneArg, "z", os.Getenv("TIMEZONE"), "alias for --timezone")
 
 	// --- Metadata ---
 	descriptionArg := fs.String("description", os.Getenv("DESCRIPTION"), "channel description")
-	fs.StringVar(descriptionArg, "D", os.Getenv("DESCRIPTION"), "alias for --description")
+	fs.StringVar(descriptionArg, "U", os.Getenv("DESCRIPTION"), "alias for --description")
 	tagsArg := fs.String("tags", os.Getenv("TAGS"), "comma-separated tags (max 5)")
 	fs.StringVar(tagsArg, "T", os.Getenv("TAGS"), "alias for --tags")
 	languageArg := fs.String("language", os.Getenv("LANGUAGE"), "ISO 639-1 language code (e.g. en, ja)")
@@ -157,7 +157,7 @@ func cmdServerTest(args []string) {
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
 
 	// --- Config ---
-	configPath, dumpConfigFlag := addConfigFlags(fs)
+	configPath, dumpConfigFlag := addConfigFlags(fs, configFlagOpts{ConfigShort: "f", DumpShort: "D"})
 
 	// --- Logging ---
 	logLvl, logFmt, logPath := addLogFlags(fs)
@@ -175,9 +175,9 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  -n, --name STRING          channel name on test screen (default: TLTV)\n")
 		fmt.Fprintf(os.Stderr, "  -u, --uptime               show elapsed time instead of wall clock\n")
 		fmt.Fprintf(os.Stderr, "  -z, --timezone TZ          IANA timezone for clock display (default: UTC)\n")
-		fmt.Fprintf(os.Stderr, "  -f, --font-scale N         font scale, 0 = auto (default: 0)\n\n")
+		fmt.Fprintf(os.Stderr, "  -J, --font-scale N         font scale, 0 = auto (default: 0)\n\n")
 		fmt.Fprintf(os.Stderr, "Metadata:\n")
-		fmt.Fprintf(os.Stderr, "  -D, --description TEXT     channel description\n")
+		fmt.Fprintf(os.Stderr, "  -U, --description TEXT     channel description\n")
 		fmt.Fprintf(os.Stderr, "  -T, --tags LIST            comma-separated tags (max 5)\n")
 		fmt.Fprintf(os.Stderr, "  -a, --language CODE        ISO 639-1 language code (e.g. en, ja)\n")
 		fmt.Fprintf(os.Stderr, "  -c, --icon PATH            icon file (PNG, JPEG, or SVG)\n\n")
@@ -206,8 +206,8 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "  -P, --peers LIST           tltv:// URIs to advertise in peer exchange\n")
 		fmt.Fprintf(os.Stderr, "  -g, --gossip               re-advertise validated gossip-discovered channels\n\n")
 		fmt.Fprintf(os.Stderr, "Config:\n")
-		fmt.Fprintf(os.Stderr, "      --config PATH          config file (JSON)\n")
-		fmt.Fprintf(os.Stderr, "      --dump-config          print resolved config as JSON and exit\n\n")
+		fmt.Fprintf(os.Stderr, "  -f, --config PATH          config file (JSON)\n")
+		fmt.Fprintf(os.Stderr, "  -D, --dump-config          print resolved config as JSON and exit\n\n")
 		fmt.Fprintf(os.Stderr, "TLS:\n")
 		fmt.Fprintf(os.Stderr, "      --tls                  enable TLS (autocert via Let's Encrypt if no cert/key)\n")
 		fmt.Fprintf(os.Stderr, "      --tls-cert FILE        TLS certificate file (PEM)\n")
@@ -395,6 +395,8 @@ func cmdServerTest(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	channelName := *nameArg
 	if channelName == "" {
@@ -848,7 +850,7 @@ func cmdServerTest(args []string) {
 				}
 			}
 			docs := ch.docs.Load()
-			return serverViewerInfo(docs, hostname)
+			return serverViewerInfo(docs, hostname, iconData, iconCT)
 		}
 		viewerChannelsFn := func() []viewerChannelRef {
 			var refs []viewerChannelRef
@@ -859,6 +861,7 @@ func cmdServerTest(args []string) {
 					Name:     docs.channelName,
 					Guide:    docs.guide,
 					IconPath: "/tltv/v1/channels/" + docs.channelID + "/" + iconFileName,
+					IconData: viewerIconDataURI(iconData, iconCT),
 				}
 				refs = append(refs, ref)
 			}
@@ -1292,8 +1295,11 @@ type serverDocs struct {
 	guide       []byte
 }
 
-func serverViewerInfo(docs *serverDocs, hostname string) map[string]interface{} {
+func serverViewerInfo(docs *serverDocs, hostname string, iconData []byte, iconCT string) map[string]interface{} {
 	info := viewerBuildInfo(docs.channelID, docs.channelName, docs.metadata, docs.guide)
+	if icon := viewerIconDataURI(iconData, iconCT); icon != "" {
+		info["icon_data"] = icon
+	}
 	info["stream_src"] = "/tltv/v1/channels/" + docs.channelID + "/stream.m3u8"
 	info["xmltv_url"] = "/tltv/v1/channels/" + docs.channelID + "/guide.xml"
 	if hostname != "" {

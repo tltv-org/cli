@@ -3,8 +3,11 @@ package main
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,6 +32,75 @@ type ghRelease struct {
 type ghAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+func findReleaseAsset(assets []ghAsset, wantSuffix string) *ghAsset {
+	for i := range assets {
+		if strings.HasSuffix(assets[i].Name, wantSuffix) {
+			return &assets[i]
+		}
+	}
+	return nil
+}
+
+func downloadReleaseAsset(client *http.Client, assetURL string) ([]byte, error) {
+	resp, err := client.Get(assetURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download returned %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20))
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func parseChecksums(data []byte) (map[string]string, error) {
+	checksums := make(map[string]string)
+	s := bufio.NewScanner(bytes.NewReader(data))
+	lineNo := 0
+	for s.Scan() {
+		lineNo++
+		line := strings.TrimSpace(s.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("invalid checksum line %d", lineNo)
+		}
+		hash := fields[0]
+		if len(hash) != sha256.Size*2 {
+			return nil, fmt.Errorf("invalid checksum length on line %d", lineNo)
+		}
+		if _, err := hex.DecodeString(hash); err != nil {
+			return nil, fmt.Errorf("invalid checksum hex on line %d: %v", lineNo, err)
+		}
+		name := strings.TrimPrefix(fields[len(fields)-1], "*")
+		checksums[name] = strings.ToLower(hash)
+	}
+	if err := s.Err(); err != nil {
+		return nil, err
+	}
+	return checksums, nil
+}
+
+func verifyChecksum(data []byte, expectedHex string) error {
+	want, err := hex.DecodeString(strings.TrimSpace(expectedHex))
+	if err != nil {
+		return fmt.Errorf("invalid expected checksum: %v", err)
+	}
+	got := sha256.Sum256(data)
+	if !bytes.Equal(got[:], want) {
+		return fmt.Errorf("checksum mismatch: got %x, want %s", got, strings.ToLower(strings.TrimSpace(expectedHex)))
+	}
+	return nil
 }
 
 func cmdUpdate(args []string) {
@@ -102,15 +174,13 @@ func cmdUpdate(args []string) {
 	}
 	wantSuffix := fmt.Sprintf("%s-%s%s", runtime.GOOS, runtime.GOARCH, ext)
 
-	var assetURL string
-	for _, a := range release.Assets {
-		if strings.HasSuffix(a.Name, wantSuffix) {
-			assetURL = a.BrowserDownloadURL
-			break
-		}
-	}
-	if assetURL == "" {
+	asset := findReleaseAsset(release.Assets, wantSuffix)
+	if asset == nil {
 		fatal("update: no release asset found for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	checksumsAsset := findReleaseAsset(release.Assets, "checksums.txt")
+	if checksumsAsset == nil {
+		fatal("update: release is missing checksums.txt")
 	}
 
 	// Download the archive.
@@ -118,19 +188,24 @@ func cmdUpdate(args []string) {
 		fmt.Printf("  Downloading %s/%s binary...\n", runtime.GOOS, runtime.GOARCH)
 	}
 
-	dresp, err := client.Get(assetURL)
+	archive, err := downloadReleaseAsset(client, asset.BrowserDownloadURL)
 	if err != nil {
 		fatal("update: download failed: %v", err)
 	}
-	defer dresp.Body.Close()
-
-	if dresp.StatusCode != 200 {
-		fatal("update: download returned %d", dresp.StatusCode)
-	}
-
-	archive, err := io.ReadAll(io.LimitReader(dresp.Body, 100<<20)) // 100 MB limit
+	checksumsData, err := downloadReleaseAsset(client, checksumsAsset.BrowserDownloadURL)
 	if err != nil {
-		fatal("update: download failed: %v", err)
+		fatal("update: failed to download checksums: %v", err)
+	}
+	checksums, err := parseChecksums(checksumsData)
+	if err != nil {
+		fatal("update: invalid checksums.txt: %v", err)
+	}
+	expectedChecksum, ok := checksums[asset.Name]
+	if !ok {
+		fatal("update: checksums.txt missing entry for %s", asset.Name)
+	}
+	if err := verifyChecksum(archive, expectedChecksum); err != nil {
+		fatal("update: %v", err)
 	}
 
 	// Extract the binary from the archive.

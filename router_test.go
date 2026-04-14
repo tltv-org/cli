@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ---------- parseRoutePair ----------
@@ -919,6 +921,34 @@ func TestRouterBackendHealthCheck_ConnectionRefused(t *testing.T) {
 	}
 }
 
+func TestRouterBackendInitialHealthCheck_RetriesBeforeMarkingDown(t *testing.T) {
+	setupLogging("error", "", "", "test")
+
+	var attempts atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(503)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	b := &routeBackend{address: backend.Listener.Addr().String()}
+	b.healthy.Store(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	routerBackendInitialHealthCheck(ctx, &http.Client{}, backend.URL, b, "test", 5*time.Second)
+
+	if !b.healthy.Load() {
+		t.Fatal("backend should remain healthy after startup retries succeed")
+	}
+	if attempts.Load() < 3 {
+		t.Fatalf("attempts = %d, want at least 3", attempts.Load())
+	}
+}
+
 // ---------- buildReverseProxy ----------
 
 func TestBuildReverseProxy_HeadersHTTPS(t *testing.T) {
@@ -973,7 +1003,7 @@ func TestDumpRouterConfig_SingleBackend(t *testing.T) {
 	routes := map[string]parsedRoute{
 		"demo.tv": {hostname: "demo.tv", prefix: "", backends: []string{"relay:8000"}},
 	}
-	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s")
+	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s", "30s", 1000, "10m")
 
 	rm, ok := cfg["routes"].(map[string]interface{})
 	if !ok {
@@ -988,7 +1018,7 @@ func TestDumpRouterConfig_MultiBackend(t *testing.T) {
 	routes := map[string]parsedRoute{
 		"lb.tv": {hostname: "lb.tv", prefix: "", backends: []string{"b1:80", "b2:80"}},
 	}
-	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s")
+	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s", "30s", 1000, "10m")
 
 	rm := cfg["routes"].(map[string]interface{})
 	arr, ok := rm["lb.tv"].([]interface{})
@@ -1004,7 +1034,7 @@ func TestDumpRouterConfig_PathPrefix(t *testing.T) {
 	routes := map[string]parsedRoute{
 		"demo.tv/tltv": {hostname: "demo.tv", prefix: "/tltv", backends: []string{"relay:8000"}},
 	}
-	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s")
+	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s", "30s", 1000, "10m")
 
 	rm := cfg["routes"].(map[string]interface{})
 	if _, ok := rm["demo.tv/tltv"]; !ok {
@@ -1016,7 +1046,7 @@ func TestDumpRouterConfig_OmitsDefaults(t *testing.T) {
 	routes := map[string]parsedRoute{
 		"demo.tv": {hostname: "demo.tv", prefix: "", backends: []string{"relay:8000"}},
 	}
-	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s")
+	cfg := dumpRouterConfig(routes, ":443", ":80", "", "30s", "30s", 1000, "10m")
 
 	if _, ok := cfg["listen"]; ok {
 		t.Error("listen should be omitted when default")
@@ -1031,7 +1061,7 @@ func TestDumpRouterConfig_OmitsDefaults(t *testing.T) {
 
 func TestDumpRouterConfig_IncludesNonDefaults(t *testing.T) {
 	routes := map[string]parsedRoute{}
-	cfg := dumpRouterConfig(routes, ":8443", ":8080", "/health", "10s")
+	cfg := dumpRouterConfig(routes, ":8443", ":8080", "/health", "10s", "15s", 2000, "5m")
 
 	if cfg["listen"] != ":8443" {
 		t.Errorf("listen = %v, want :8443", cfg["listen"])
@@ -1044,6 +1074,31 @@ func TestDumpRouterConfig_IncludesNonDefaults(t *testing.T) {
 	}
 	if cfg["health_interval"] != "10s" {
 		t.Errorf("health_interval = %v, want 10s", cfg["health_interval"])
+	}
+	if cfg["read_timeout"] != "15s" {
+		t.Errorf("read_timeout = %v, want 15s", cfg["read_timeout"])
+	}
+	if cfg["keepalive_max_requests"] != 2000 {
+		t.Errorf("keepalive_max_requests = %v, want 2000", cfg["keepalive_max_requests"])
+	}
+	if cfg["keepalive_max_time"] != "5m" {
+		t.Errorf("keepalive_max_time = %v, want 5m", cfg["keepalive_max_time"])
+	}
+}
+
+func TestRouterConnShouldClose(t *testing.T) {
+	tracker := &routerConnTracker{acceptedAt: time.Now().Add(-11 * time.Minute)}
+	tracker.requests.Store(1001)
+	if !routerConnShouldClose(tracker, routerServerOpts{keepAliveMaxRequests: 1000}, 0) {
+		t.Fatal("expected close when request count exceeded")
+	}
+	if !routerConnShouldClose(tracker, routerServerOpts{keepAliveMaxTime: 10 * time.Minute}, 0) {
+		t.Fatal("expected close when keepalive max time exceeded")
+	}
+	tracker = &routerConnTracker{acceptedAt: time.Now()}
+	tracker.requests.Store(10)
+	if routerConnShouldClose(tracker, routerServerOpts{keepAliveMaxRequests: 1000, keepAliveMaxTime: 10 * time.Minute}, 0) {
+		t.Fatal("did not expect close under limits")
 	}
 }
 

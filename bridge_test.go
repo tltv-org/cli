@@ -808,6 +808,9 @@ func TestBridgeHealth(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Errorf("status = %v, want ok", resp["status"])
 	}
+	if resp["version"] != version {
+		t.Errorf("version = %v, want %s", resp["version"], version)
+	}
 	if resp["channels"] != float64(1) {
 		t.Errorf("channels = %v, want 1", resp["channels"])
 	}

@@ -36,12 +36,25 @@ type routeBackend struct {
 	healthy atomic.Bool
 }
 
+type routerServerOpts struct {
+	readTimeout          time.Duration
+	keepAliveMaxRequests uint64
+	keepAliveMaxTime     time.Duration
+}
+
+type routerConnTracker struct {
+	acceptedAt time.Time
+	requests   atomic.Uint64
+}
+
+type routerConnContextKey struct{}
+
 // routeEntry holds a parsed route with optional path prefix and one or more backends.
 type routeEntry struct {
 	hostname string
-	prefix   string           // "" for catch-all, "/tltv" for path routes
-	backends []*routeBackend  // slice for round-robin, usually len 1
-	next     atomic.Uint64    // round-robin counter
+	prefix   string          // "" for catch-all, "/tltv" for path routes
+	backends []*routeBackend // slice for round-robin, usually len 1
+	next     atomic.Uint64   // round-robin counter
 }
 
 // pickBackend returns the next healthy backend via round-robin.
@@ -305,13 +318,65 @@ func buildReverseProxy(backend string, useTLS bool) *httputil.ReverseProxy {
 	return proxy
 }
 
+func routerConnShouldClose(tracker *routerConnTracker, opts routerServerOpts, requests uint64) bool {
+	if tracker == nil {
+		return false
+	}
+	if requests == 0 {
+		requests = tracker.requests.Load()
+	}
+	if opts.keepAliveMaxRequests > 0 && requests >= opts.keepAliveMaxRequests {
+		return true
+	}
+	if opts.keepAliveMaxTime > 0 && time.Since(tracker.acceptedAt) >= opts.keepAliveMaxTime {
+		return true
+	}
+	return false
+}
+
+func routerServerConnHooks(opts routerServerOpts) (func(context.Context, net.Conn) context.Context, func(net.Conn, http.ConnState)) {
+	if opts.keepAliveMaxRequests == 0 && opts.keepAliveMaxTime == 0 {
+		return nil, nil
+	}
+	var trackers sync.Map
+	connContext := func(ctx context.Context, c net.Conn) context.Context {
+		tracker := &routerConnTracker{acceptedAt: time.Now()}
+		trackers.Store(c, tracker)
+		return context.WithValue(ctx, routerConnContextKey{}, tracker)
+	}
+	connState := func(c net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateIdle:
+			if v, ok := trackers.Load(c); ok {
+				if tracker, ok := v.(*routerConnTracker); ok && routerConnShouldClose(tracker, opts, 0) {
+					c.Close()
+				}
+			}
+		case http.StateClosed, http.StateHijacked:
+			trackers.Delete(c)
+		}
+	}
+	return connContext, connState
+}
+
 // ---------- Request Handler ----------
 
 // routerHandler returns the main HTTP handler that dispatches by Host header
 // and path prefix. Reads the current route table from the atomic pointer on
 // every request (supports hot-reload).
 func routerHandler(tablePtr *atomic.Pointer[routeTable]) http.Handler {
+	return routerHandlerWithOpts(tablePtr, routerServerOpts{})
+}
+
+func routerHandlerWithOpts(tablePtr *atomic.Pointer[routeTable], opts routerServerOpts) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tracker, ok := r.Context().Value(routerConnContextKey{}).(*routerConnTracker); ok {
+			requests := tracker.requests.Add(1)
+			if r.ProtoMajor < 2 && routerConnShouldClose(tracker, opts, requests) {
+				w.Header().Set("Connection", "close")
+			}
+		}
+
 		// Strip port from Host header for lookup.
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
@@ -343,8 +408,9 @@ func routerBackendHealthLoop(ctx context.Context, backend *routeBackend, label, 
 	client := &http.Client{Timeout: 5 * time.Second}
 	checkURL := "http://" + backend.address + path
 
-	// Initial check immediately.
-	routerBackendHealthCheck(client, checkURL, backend, label)
+	// Initial check with quick retries to avoid cold-start blackouts when DNS
+	// or backend readiness lags behind container startup.
+	routerBackendInitialHealthCheck(ctx, client, checkURL, backend, label, interval)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -359,29 +425,68 @@ func routerBackendHealthLoop(ctx context.Context, backend *routeBackend, label, 
 	}
 }
 
-// routerBackendHealthCheck performs a single health check and updates the backend's healthy flag.
-func routerBackendHealthCheck(client *http.Client, checkURL string, backend *routeBackend, label string) {
+func routerProbeBackendHealth(client *http.Client, checkURL string) (bool, int, error) {
 	resp, err := client.Get(checkURL)
 	if err != nil {
-		if backend.healthy.Load() {
-			logErrorf("health: %s (%s) is down: %v", label, backend.address, err)
-		}
-		backend.healthy.Store(false)
-		return
+		return false, 0, err
 	}
-	resp.Body.Close()
-
+	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		if !backend.healthy.Load() {
-			logInfof("health: %s (%s) is up (status %d)", label, backend.address, resp.StatusCode)
+		return true, resp.StatusCode, nil
+	}
+	return false, resp.StatusCode, nil
+}
+
+func routerApplyBackendHealth(backend *routeBackend, label string, healthy bool, status int, err error) {
+	prev := backend.healthy.Load()
+	if healthy {
+		if !prev {
+			logInfof("health: %s (%s) is up (status %d)", label, backend.address, status)
 		}
 		backend.healthy.Store(true)
-	} else {
-		if backend.healthy.Load() {
-			logErrorf("health: %s (%s) is down (status %d)", label, backend.address, resp.StatusCode)
-		}
-		backend.healthy.Store(false)
+		return
 	}
+	if prev {
+		if err != nil {
+			logErrorf("health: %s (%s) is down: %v", label, backend.address, err)
+		} else {
+			logErrorf("health: %s (%s) is down (status %d)", label, backend.address, status)
+		}
+	}
+	backend.healthy.Store(false)
+}
+
+func routerBackendInitialHealthCheck(ctx context.Context, client *http.Client, checkURL string, backend *routeBackend, label string, interval time.Duration) {
+	grace := interval
+	if grace > 10*time.Second {
+		grace = 10 * time.Second
+	}
+	if grace <= 0 {
+		grace = time.Second
+	}
+	deadline := time.Now().Add(grace)
+	for {
+		healthy, status, err := routerProbeBackendHealth(client, checkURL)
+		if healthy {
+			routerApplyBackendHealth(backend, label, true, status, nil)
+			return
+		}
+		if time.Now().After(deadline) {
+			routerApplyBackendHealth(backend, label, false, status, err)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// routerBackendHealthCheck performs a single health check and updates the backend's healthy flag.
+func routerBackendHealthCheck(client *http.Client, checkURL string, backend *routeBackend, label string) {
+	healthy, status, err := routerProbeBackendHealth(client, checkURL)
+	routerApplyBackendHealth(backend, label, healthy, status, err)
 }
 
 // startRouterHealthChecks starts health check goroutines for all backends
@@ -432,7 +537,7 @@ func (s *routerHealthState) stop() {
 
 // dumpRouterConfig builds the config map for --dump-config output.
 // Path routes use "host/prefix" keys. Multi-backend routes use array values.
-func dumpRouterConfig(routes map[string]parsedRoute, listenAddr, httpListenAddr, healthPath, healthIntervalStr string) map[string]interface{} {
+func dumpRouterConfig(routes map[string]parsedRoute, listenAddr, httpListenAddr, healthPath, healthIntervalStr, readTimeoutStr string, keepAliveMaxRequests int, keepAliveMaxTimeStr string) map[string]interface{} {
 	cfg := make(map[string]interface{})
 	if len(routes) > 0 {
 		rm := make(map[string]interface{})
@@ -466,6 +571,15 @@ func dumpRouterConfig(routes map[string]parsedRoute, listenAddr, httpListenAddr,
 	if healthIntervalStr != "30s" {
 		cfg["health_interval"] = healthIntervalStr
 	}
+	if readTimeoutStr != "30s" {
+		cfg["read_timeout"] = readTimeoutStr
+	}
+	if keepAliveMaxRequests != 1000 {
+		cfg["keepalive_max_requests"] = keepAliveMaxRequests
+	}
+	if keepAliveMaxTimeStr != "10m" {
+		cfg["keepalive_max_time"] = keepAliveMaxTimeStr
+	}
 	return cfg
 }
 
@@ -495,6 +609,7 @@ func cmdRouter(args []string) {
 		defaultHTTPListen = v
 	}
 	httpListenAddr := fs.String("http-listen", defaultHTTPListen, "HTTP listen address (challenges + redirect)")
+	fs.StringVar(httpListenAddr, "J", defaultHTTPListen, "alias for --http-listen")
 
 	// Health check flags
 	healthPath := fs.String("health-check", os.Getenv("HEALTH_CHECK"), "health check path on backends")
@@ -505,12 +620,31 @@ func cmdRouter(args []string) {
 		defaultHealthInterval = v
 	}
 	healthIntervalStr := fs.String("health-interval", defaultHealthInterval, "health check interval")
+	fs.StringVar(healthIntervalStr, "i", defaultHealthInterval, "alias for --health-interval")
+
+	defaultReadTimeout := "30s"
+	if v := os.Getenv("READ_TIMEOUT"); v != "" {
+		defaultReadTimeout = v
+	}
+	readTimeoutStr := fs.String("read-timeout", defaultReadTimeout, "full request read timeout")
+	fs.StringVar(readTimeoutStr, "R", defaultReadTimeout, "alias for --read-timeout")
+
+	defaultKeepAliveMaxRequests := 1000
+	if v := os.Getenv("KEEPALIVE_MAX_REQUESTS"); v != "" {
+		fmt.Sscanf(v, "%d", &defaultKeepAliveMaxRequests)
+	}
+	keepAliveMaxRequests := fs.Int("keepalive-max-requests", defaultKeepAliveMaxRequests, "max requests per keep-alive connection")
+	fs.IntVar(keepAliveMaxRequests, "K", defaultKeepAliveMaxRequests, "alias for --keepalive-max-requests")
+
+	defaultKeepAliveMaxTime := "10m"
+	if v := os.Getenv("KEEPALIVE_MAX_TIME"); v != "" {
+		defaultKeepAliveMaxTime = v
+	}
+	keepAliveMaxTimeStr := fs.String("keepalive-max-time", defaultKeepAliveMaxTime, "max lifetime of a keep-alive connection")
+	fs.StringVar(keepAliveMaxTimeStr, "T", defaultKeepAliveMaxTime, "alias for --keepalive-max-time")
 
 	// Config
-	configPath := fs.String("config", os.Getenv("CONFIG"), "path to router config file (JSON)")
-	fs.StringVar(configPath, "f", os.Getenv("CONFIG"), "alias for --config")
-	dumpConfigFlag := fs.Bool("dump-config", false, "print resolved config as JSON and exit")
-	fs.BoolVar(dumpConfigFlag, "D", false, "alias for --dump-config")
+	configPath, dumpConfigFlag := addConfigFlags(fs, configFlagOpts{ConfigShort: "f", DumpShort: "D"})
 
 	// TLS
 	tlsEnabled, tlsCert, tlsKey, acmeEmail, tlsStaging := addTLSFlags(fs)
@@ -528,10 +662,13 @@ func cmdRouter(args []string) {
 		fmt.Fprintf(os.Stderr, "  -r, --route HOST[/PREFIX]=BACKEND[,BACKEND...]  route mapping (repeatable)\n\n")
 		fmt.Fprintf(os.Stderr, "Server:\n")
 		fmt.Fprintf(os.Stderr, "  -l, --listen ADDR         HTTPS listen address (default: :443)\n")
-		fmt.Fprintf(os.Stderr, "      --http-listen ADDR    HTTP listen for challenges + redirect (default: :80)\n\n")
+		fmt.Fprintf(os.Stderr, "  -J, --http-listen ADDR    HTTP listen for challenges + redirect (default: :80)\n\n")
 		fmt.Fprintf(os.Stderr, "Health:\n")
 		fmt.Fprintf(os.Stderr, "  -H, --health-check PATH   health check path on backends (e.g. /health)\n")
-		fmt.Fprintf(os.Stderr, "      --health-interval DUR health check interval (default: 30s)\n\n")
+		fmt.Fprintf(os.Stderr, "  -i, --health-interval DUR health check interval (default: 30s)\n")
+		fmt.Fprintf(os.Stderr, "  -R, --read-timeout DUR    full request read timeout (default: 30s)\n")
+		fmt.Fprintf(os.Stderr, "  -K, --keepalive-max-requests N  max requests per keep-alive connection (default: 1000)\n")
+		fmt.Fprintf(os.Stderr, "  -T, --keepalive-max-time DUR    max keep-alive connection lifetime (default: 10m)\n\n")
 		fmt.Fprintf(os.Stderr, "Config:\n")
 		fmt.Fprintf(os.Stderr, "  -f, --config PATH         router config file (JSON)\n")
 		fmt.Fprintf(os.Stderr, "  -D, --dump-config         print resolved config as JSON and exit\n\n")
@@ -546,7 +683,8 @@ func cmdRouter(args []string) {
 		fmt.Fprintf(os.Stderr, "      --log-format FORMAT   log format: human, json (default: human)\n")
 		fmt.Fprintf(os.Stderr, "      --log-file PATH       log to file instead of stderr\n\n")
 		fmt.Fprintf(os.Stderr, "Environment variables: ROUTES (semicolon- or comma-separated route pairs),\n")
-		fmt.Fprintf(os.Stderr, "LISTEN, HTTP_LISTEN, HEALTH_CHECK, HEALTH_INTERVAL, CONFIG,\n")
+		fmt.Fprintf(os.Stderr, "LISTEN, HTTP_LISTEN, HEALTH_CHECK, HEALTH_INTERVAL, READ_TIMEOUT,\n")
+		fmt.Fprintf(os.Stderr, "KEEPALIVE_MAX_REQUESTS, KEEPALIVE_MAX_TIME, CONFIG,\n")
 		fmt.Fprintf(os.Stderr, "TLS=1, TLS_CERT, TLS_KEY, TLS_STAGING=1, TLS_DIR, ACME_EMAIL,\n")
 		fmt.Fprintf(os.Stderr, "LOG_LEVEL, LOG_FORMAT, LOG_FILE.\n")
 		fmt.Fprintf(os.Stderr, "Flags override env vars. Config file reloaded on change (30s check).\n\n")
@@ -621,7 +759,7 @@ func cmdRouter(args []string) {
 
 	// Dump config and exit if requested.
 	if *dumpConfigFlag {
-		dumpCfg := dumpRouterConfig(allRoutes, *listenAddr, *httpListenAddr, *healthPath, *healthIntervalStr)
+		dumpCfg := dumpRouterConfig(allRoutes, *listenAddr, *httpListenAddr, *healthPath, *healthIntervalStr, *readTimeoutStr, *keepAliveMaxRequests, *keepAliveMaxTimeStr)
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.SetEscapeHTML(false)
@@ -641,15 +779,32 @@ func cmdRouter(args []string) {
 		fmt.Fprintf(os.Stderr, "error: invalid health-interval: %v\n", err)
 		os.Exit(1)
 	}
+	readTimeout, err := time.ParseDuration(*readTimeoutStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid read-timeout: %v\n", err)
+		os.Exit(1)
+	}
+	keepAliveMaxTime, err := time.ParseDuration(*keepAliveMaxTimeStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid keepalive-max-time: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Setup logging.
 	if err := setupLogging(*logLvl, *logFmt, *logPath, "router"); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	// Determine TLS mode for X-Forwarded-Proto.
 	useTLS := *tlsEnabled || *tlsCert != "" || *tlsKey != ""
+	routerOpts := routerServerOpts{
+		readTimeout:          readTimeout,
+		keepAliveMaxRequests: uint64(*keepAliveMaxRequests),
+		keepAliveMaxTime:     keepAliveMaxTime,
+	}
 
 	// Build initial route table.
 	table := buildRouteTable(allRoutes, useTLS)
@@ -763,7 +918,7 @@ func cmdRouter(args []string) {
 	}
 
 	// Build main handler.
-	handler := routerHandler(&tablePtr)
+	handler := routerHandlerWithOpts(&tablePtr, routerOpts)
 
 	// Start main server.
 	ln, err := net.Listen("tcp", *listenAddr)
@@ -771,12 +926,16 @@ func cmdRouter(args []string) {
 		logFatalf("listen %s: %v", *listenAddr, err)
 	}
 
+	connContext, connState := routerServerConnHooks(routerOpts)
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       readTimeout,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		TLSConfig:         tlsConfig,
+		ConnContext:       connContext,
+		ConnState:         connState,
 	}
 
 	go func() {

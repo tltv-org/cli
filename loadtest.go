@@ -95,6 +95,8 @@ func cmdLoadtest(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	// Parse durations
 	testDuration, err := time.ParseDuration(*durationStr)
@@ -420,17 +422,17 @@ func loadtestPrintJSON(agg *loadtestAggregator, target, directURL string, durati
 	}
 
 	result := map[string]interface{}{
-		"target":             displayTarget,
-		"receivers":          receivers,
-		"duration_ms":        elapsed.Milliseconds(),
-		"ramp_ms":            ramp.Milliseconds(),
-		"segments_total":     agg.totalSegments.Load() + agg.segmentErrors.Load(),
-		"segments_ok":        agg.totalSegments.Load(),
-		"segment_errors":     agg.segmentErrors.Load(),
-		"manifests_total":    agg.totalManifests.Load() + agg.manifestErrors.Load(),
-		"manifests_ok":       agg.totalManifests.Load(),
-		"manifest_errors":    agg.manifestErrors.Load(),
-		"bytes_received":     agg.bytesReceived.Load(),
+		"target":          displayTarget,
+		"receivers":       receivers,
+		"duration_ms":     elapsed.Milliseconds(),
+		"ramp_ms":         ramp.Milliseconds(),
+		"segments_total":  agg.totalSegments.Load() + agg.segmentErrors.Load(),
+		"segments_ok":     agg.totalSegments.Load(),
+		"segment_errors":  agg.segmentErrors.Load(),
+		"manifests_total": agg.totalManifests.Load() + agg.manifestErrors.Load(),
+		"manifests_ok":    agg.totalManifests.Load(),
+		"manifest_errors": agg.manifestErrors.Load(),
+		"bytes_received":  agg.bytesReceived.Load(),
 	}
 
 	if elapsed.Seconds() > 0 {

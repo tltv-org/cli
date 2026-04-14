@@ -103,6 +103,80 @@ func testRelayUpstream(t *testing.T) (*httptest.Server, string, ed25519.PrivateK
 	return ts, channelID, priv
 }
 
+func testRelayUpstreamWithIcon(t *testing.T) (*httptest.Server, string, ed25519.PrivateKey) {
+	t.Helper()
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := makeChannelID(pub)
+	now := time.Now().UTC()
+
+	meta := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number(fmt.Sprintf("%d", now.Unix())),
+		"id":      channelID,
+		"name":    "Icon Channel",
+		"stream":  "/tltv/v1/channels/" + channelID + "/stream.m3u8",
+		"icon":    "/tltv/v1/channels/" + channelID + "/icon.svg",
+		"access":  "public",
+		"status":  "active",
+		"updated": now.Format(timestampFormat),
+	}
+	signedMeta, _ := signDocument(meta, priv)
+	metaBytes, _ := json.Marshal(signedMeta)
+
+	guide := map[string]interface{}{
+		"v":       json.Number("1"),
+		"seq":     json.Number(fmt.Sprintf("%d", now.Unix())),
+		"id":      channelID,
+		"from":    now.Format(timestampFormat),
+		"until":   now.Add(24 * time.Hour).Format(timestampFormat),
+		"entries": []interface{}{},
+		"updated": now.Format(timestampFormat),
+	}
+	signedGuide, _ := signDocument(guide, priv)
+	guideBytes, _ := json.Marshal(signedGuide)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/tltv", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"protocol": "tltv",
+			"versions": []int{1},
+			"channels": []map[string]string{{"id": channelID, "name": "Icon Channel"}},
+			"relaying": []interface{}{},
+		})
+	})
+	mux.HandleFunc("GET /tltv/v1/channels/"+channelID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Write(metaBytes)
+	})
+	mux.HandleFunc("GET /tltv/v1/channels/"+channelID+"/guide.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Write(guideBytes)
+	})
+	mux.HandleFunc("GET /tltv/v1/channels/"+channelID+"/stream.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Write([]byte("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg-000.ts\n"))
+	})
+	mux.HandleFunc("GET /tltv/v1/channels/"+channelID+"/seg-000.ts", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Write([]byte("fake-ts-data"))
+	})
+	mux.HandleFunc("GET /tltv/v1/channels/"+channelID+"/icon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write([]byte("<svg>icon</svg>"))
+	})
+	mux.HandleFunc("GET /tltv/v1/peers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]interface{}{"peers": []interface{}{}})
+	})
+
+	return httptest.NewServer(mux), channelID, priv
+}
+
 func testRelayUpstreamMaster(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 
@@ -558,6 +632,9 @@ func TestRelayServerHealth(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Errorf("status = %v", resp["status"])
 	}
+	if resp["version"] != version {
+		t.Errorf("version = %v, want %s", resp["version"], version)
+	}
 	// Health shows "relaying" count, not "channels"
 	if resp["relaying"] != float64(1) {
 		t.Errorf("relaying = %v", resp["relaying"])
@@ -725,6 +802,61 @@ func TestRelayEndToEnd_StreamProxyUsesSuccessfulHint(t *testing.T) {
 	}
 	if w.Body.String() != "fake-ts-data" {
 		t.Fatalf("segment body = %q, want fake-ts-data", w.Body.String())
+	}
+}
+
+func TestRelayEndToEnd_IconContentType(t *testing.T) {
+	upstream, channelID, _ := testRelayUpstreamWithIcon(t)
+	defer upstream.Close()
+
+	client := newClient(false)
+	hint := hostFromURL(upstream.URL)
+	res, err := fetchAndVerifyMetadata(client, channelID, []string{hint})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry := newRelayRegistry("", false, 100, 7)
+	registry.UpdateChannel(channelID, res.Raw, res.Doc, []string{hint}, res.Hint)
+	srv := newRelayServer(registry, client, nil, nil, nil)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/icon.svg", nil))
+	if w.Code != 200 {
+		t.Fatalf("icon status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Fatalf("icon content-type = %q, want image/svg+xml", ct)
+	}
+}
+
+func TestRelayEndToEnd_CachedIconContentType(t *testing.T) {
+	upstream, channelID, _ := testRelayUpstreamWithIcon(t)
+	defer upstream.Close()
+
+	client := newClient(false)
+	hint := hostFromURL(upstream.URL)
+	res, err := fetchAndVerifyMetadata(client, channelID, []string{hint})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry := newRelayRegistry("", false, 100, 7)
+	registry.UpdateChannel(channelID, res.Raw, res.Doc, []string{hint}, res.Hint)
+	srv := newRelayServer(registry, client, newHLSCache(10), nil, nil)
+
+	for i, wantStatus := range []string{"MISS", "HIT"} {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, httptest.NewRequest("GET", "/tltv/v1/channels/"+channelID+"/icon.svg", nil))
+		if w.Code != 200 {
+			t.Fatalf("request %d: icon status = %d, want 200", i+1, w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "image/svg+xml" {
+			t.Fatalf("request %d: icon content-type = %q, want image/svg+xml", i+1, ct)
+		}
+		if got := w.Header().Get("Cache-Status"); got != wantStatus {
+			t.Fatalf("request %d: Cache-Status = %q, want %q", i+1, got, wantStatus)
+		}
 	}
 }
 

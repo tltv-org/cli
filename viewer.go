@@ -382,6 +382,7 @@ type viewerChannelRef struct {
 	Name     string
 	Guide    []byte // raw signed guide JSON (nil if not available)
 	IconPath string // protocol icon path (e.g. "/tltv/v1/channels/{id}/icon.svg")
+	IconData string // optional icon data URI for direct embedding
 }
 
 type viewerRouteOptions struct {
@@ -481,6 +482,9 @@ func debugViewerRoutes(mux *http.ServeMux, infoFn func(channelID string) map[str
 					entry := map[string]interface{}{"id": ch.ID, "name": ch.Name}
 					if ch.IconPath != "" {
 						entry["icon_path"] = ch.IconPath
+					}
+					if ch.IconData != "" {
+						entry["icon_data"] = ch.IconData
 					}
 					if ch.Guide != nil {
 						var g map[string]interface{}
@@ -588,6 +592,37 @@ func viewerBuildInfo(channelID, channelName string, metadataJSON, guideJSON []by
 	}
 
 	return info
+}
+
+func viewerIconDataURI(iconData []byte, iconCT string) string {
+	if len(iconData) == 0 || iconCT == "" || len(iconData) > 1<<20 {
+		return ""
+	}
+	return "data:" + iconCT + ";base64," + base64.StdEncoding.EncodeToString(iconData)
+}
+
+func viewerFetchIconDataURI(client *http.Client, iconURL, iconPath string) string {
+	if client == nil || iconURL == "" || iconPath == "" {
+		return ""
+	}
+	req, err := http.NewRequest("GET", iconURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "tltv-cli/"+version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	iconBody, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+	if err != nil {
+		return ""
+	}
+	return viewerIconDataURI(iconBody, iconContentType(iconPath))
 }
 
 // viewerListenIsLoopbackOnly reports whether the standalone viewer is bound
@@ -842,6 +877,8 @@ func cmdViewer(args []string) {
 	if err := setupLogging(*logLevel, *logFormat, *logFile, "viewer"); err != nil {
 		fatal("%v", err)
 	}
+	stopLogReopen := startLogReopenWatcher()
+	defer stopLogReopen()
 
 	client := newClient(flagInsecure)
 	// resolveClient is used by /api/resolve for user-supplied targets.
@@ -1085,15 +1122,8 @@ func cmdViewer(args []string) {
 								if tok != "" {
 									iconURL += "?token=" + tok
 								}
-								if req, reqErr := http.NewRequest("GET", iconURL, nil); reqErr == nil {
-									req.Header.Set("User-Agent", "tltv-cli/"+version)
-									if resp, respErr := resolveClient.http.Do(req); respErr == nil {
-										if iconBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024)); readErr == nil && resp.StatusCode == 200 {
-											ct := iconContentType(icon)
-											entry["icon_data"] = "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(iconBody)
-										}
-										resp.Body.Close()
-									}
+								if dataURI := viewerFetchIconDataURI(resolveClient.http, iconURL, icon); dataURI != "" {
+									entry["icon_data"] = dataURI
 								}
 							}
 						}

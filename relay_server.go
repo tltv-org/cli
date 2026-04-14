@@ -154,6 +154,7 @@ func (s *relayServer) handleChannelPath(w http.ResponseWriter, r *http.Request) 
 func (s *relayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
 		"status":   "ok",
+		"version":  version,
 		"relaying": s.registry.ChannelCount(),
 	}, http.StatusOK)
 }
@@ -280,14 +281,13 @@ func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *re
 			return
 		}
 
-		setStreamHeaders(w, subPath, false)
+		setStreamHeadersWithContentType(w, subPath, false, contentType)
 		if hit {
 			w.Header().Set("Cache-Status", "HIT")
 		} else {
 			w.Header().Set("Cache-Status", "MISS")
 		}
 		w.Write(data)
-		_ = contentType // headers set by setStreamHeaders
 		return
 	}
 
@@ -312,7 +312,7 @@ func (s *relayServer) serveStream(w http.ResponseWriter, r *http.Request, ch *re
 	}
 
 	// Set headers (no private channel handling -- relay never has private channels)
-	setStreamHeaders(w, subPath, false)
+	setStreamHeadersWithContentType(w, subPath, false, resp.Header.Get("Content-Type"))
 
 	if strings.HasSuffix(subPath, ".m3u8") {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestSize))

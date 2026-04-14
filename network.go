@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +10,21 @@ import (
 	"strings"
 	"time"
 )
+
+type quietExitError struct{ err error }
+
+func (e quietExitError) Error() string { return e.err.Error() }
+
+func handleWatchCommandError(err error) {
+	if err == nil {
+		return
+	}
+	var quiet quietExitError
+	if errors.As(err, &quiet) {
+		os.Exit(1)
+	}
+	fatal("%v", err)
+}
 
 func cmdInfo(args []string) {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
@@ -31,7 +47,7 @@ func cmdInfo(args []string) {
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
 		fmt.Fprintf(os.Stderr, "  -V, --no-verify       skip signature verification\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
-		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --interval int    refresh interval in seconds (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -51,23 +67,24 @@ func cmdInfo(args []string) {
 	if parseErr != nil {
 		// Bare host mode — just show node info
 		host = normalizeHost(fs.Arg(0))
-		watchLoop(*watch, *interval, func() {
-			infoNodeOnly(client, host)
-		})
+		handleWatchCommandError(watchLoop(*watch, *interval, func() error {
+			return infoNodeOnly(client, host)
+		}))
 		return
 	}
 
 	// Full channel mode — all 5 sections
-	watchLoop(*watch, *interval, func() {
+	handleWatchCommandError(watchLoop(*watch, *interval, func() error {
 		infoFull(client, channelID, host, *token, *noVerify)
-	})
+		return nil
+	}))
 }
 
 // infoNodeOnly shows node info for a bare host target.
-func infoNodeOnly(client *Client, host string) {
+func infoNodeOnly(client *Client, host string) error {
 	info, err := client.FetchNodeInfo(host)
 	if err != nil {
-		fatal("could not reach node: %v", err)
+		return fmt.Errorf("could not reach node: %v", err)
 	}
 
 	if flagJSON {
@@ -76,11 +93,12 @@ func infoNodeOnly(client *Client, host string) {
 		enc.Encode(map[string]interface{}{
 			"node": info,
 		})
-		return
+		return nil
 	}
 
 	printInfoNode(info, host, "", nil)
 	fmt.Println()
+	return nil
 }
 
 // infoFull shows all 5 sections for a channel target.
@@ -478,9 +496,9 @@ func printInfoNode(info *NodeInfo, host, activeID string, checks map[string]*ori
 		}
 		if discoveryType == "channel" {
 			// Discovery claims origin but signed metadata says otherwise
-			return c(cYellow, " (spoofed origin" + originHint + ")")
+			return c(cYellow, " (spoofed origin"+originHint+")")
 		}
-		return c(cDim, " (relay" + originHint + ")")
+		return c(cDim, " (relay"+originHint+")")
 	}
 
 	// Determine section label — override "Origin" if signed data says otherwise
@@ -554,7 +572,7 @@ func cmdNode(args []string) {
 		fmt.Fprintf(os.Stderr, "  tltv node localhost:8000\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
-		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --interval int    refresh interval in seconds (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -566,22 +584,23 @@ func cmdNode(args []string) {
 	host := normalizeHost(fs.Arg(0))
 	client := newClient(flagInsecure)
 
-	watchLoop(*watch, *interval, func() {
+	handleWatchCommandError(watchLoop(*watch, *interval, func() error {
 		info, err := client.FetchNodeInfo(host)
 		if err != nil {
-			fatal("could not reach node: %v", err)
+			return fmt.Errorf("could not reach node: %v", err)
 		}
 
 		if flagJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			enc.Encode(info)
-			return
+			return nil
 		}
 
 		printInfoNode(info, host, "", nil)
 		fmt.Println()
-	})
+		return nil
+	}))
 }
 
 func cmdChannel(args []string) {
@@ -602,7 +621,7 @@ func cmdChannel(args []string) {
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
 		fmt.Fprintf(os.Stderr, "  -V, --no-verify       skip signature verification\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
-		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --interval int    refresh interval in seconds (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -616,15 +635,15 @@ func cmdChannel(args []string) {
 	}
 
 	client := newClient(flagInsecure)
-	channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
-	if err != nil {
-		fatal("%v", err)
-	}
 
-	displayChannel := func() {
+	displayChannel := func() error {
+		channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
+		if err != nil {
+			return err
+		}
 		doc, err := client.FetchMetadata(host, channelID, *token)
 		if err != nil {
-			fatal("%v", err)
+			return err
 		}
 
 		var sigErr error
@@ -673,9 +692,11 @@ func cmdChannel(args []string) {
 			enc.SetIndent("", "  ")
 			enc.Encode(result)
 			if sigErr != nil {
-				os.Exit(1)
+				if !*watch {
+					return quietExitError{sigErr}
+				}
 			}
-			return
+			return nil
 		}
 
 		if docType == "migration" {
@@ -755,11 +776,12 @@ func cmdChannel(args []string) {
 		fmt.Println()
 
 		if sigErr != nil && !*watch {
-			os.Exit(1)
+			return quietExitError{sigErr}
 		}
+		return nil
 	}
 
-	watchLoop(*watch, *interval, displayChannel)
+	handleWatchCommandError(watchLoop(*watch, *interval, displayChannel))
 }
 
 // printRemainingKeys prints any document keys not in the skip set.
@@ -825,7 +847,7 @@ func cmdGuide(args []string) {
 		fmt.Fprintf(os.Stderr, "  -V, --no-verify       skip signature verification\n")
 		fmt.Fprintf(os.Stderr, "  -x, --xmltv           output as XMLTV XML\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
-		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --interval int    refresh interval in seconds (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -840,15 +862,15 @@ func cmdGuide(args []string) {
 	}
 
 	client := newClient(flagInsecure)
-	channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
-	if err != nil {
-		fatal("%v", err)
-	}
 
-	watchLoop(*watch, *interval, func() {
+	handleWatchCommandError(watchLoop(*watch, *interval, func() error {
+		channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
+		if err != nil {
+			return err
+		}
 		doc, err := client.FetchGuide(host, channelID, *token)
 		if err != nil {
-			fatal("%v", err)
+			return err
 		}
 
 		var sigErr error
@@ -863,9 +885,11 @@ func cmdGuide(args []string) {
 			}
 			outputXMLTV(channelID, doc)
 			if sigErr != nil {
-				os.Exit(1)
+				if !*watch {
+					return quietExitError{sigErr}
+				}
 			}
-			return
+			return nil
 		}
 
 		if flagJSON {
@@ -882,9 +906,11 @@ func cmdGuide(args []string) {
 			enc.SetIndent("", "  ")
 			enc.Encode(result)
 			if sigErr != nil {
-				os.Exit(1)
+				if !*watch {
+					return quietExitError{sigErr}
+				}
 			}
-			return
+			return nil
 		}
 
 		printHeader("Guide")
@@ -947,9 +973,10 @@ func cmdGuide(args []string) {
 		fmt.Println()
 
 		if sigErr != nil && !*watch {
-			os.Exit(1)
+			return quietExitError{sigErr}
 		}
-	})
+		return nil
+	}))
 }
 
 func cmdPeers(args []string) {
@@ -960,7 +987,7 @@ func cmdPeers(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: tltv peers <host[:port]>\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
-		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --interval int    refresh interval in seconds (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -972,17 +999,17 @@ func cmdPeers(args []string) {
 	host := normalizeHost(fs.Arg(0))
 	client := newClient(flagInsecure)
 
-	watchLoop(*watch, *interval, func() {
+	handleWatchCommandError(watchLoop(*watch, *interval, func() error {
 		exchange, err := client.FetchPeers(host)
 		if err != nil {
-			fatal("%v", err)
+			return err
 		}
 
 		if flagJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			enc.Encode(exchange)
-			return
+			return nil
 		}
 
 		printHeader(fmt.Sprintf("Peers (%d)", len(exchange.Peers)))
@@ -1000,7 +1027,8 @@ func cmdPeers(args []string) {
 			printTable([]string{"ID", "Name", "Hints"}, rows)
 		}
 		fmt.Println()
-	})
+		return nil
+	}))
 }
 
 func cmdStream(args []string) {
@@ -1020,7 +1048,7 @@ func cmdStream(args []string) {
 		fmt.Fprintf(os.Stderr, "  -t, --token string    access token for private channels\n")
 		fmt.Fprintf(os.Stderr, "  -u, --url             print only the stream URL\n")
 		fmt.Fprintf(os.Stderr, "  -w, --watch           auto-refresh output\n")
-		fmt.Fprintf(os.Stderr, "      --interval int    refresh interval in seconds (default 2)\n")
+		fmt.Fprintf(os.Stderr, "  -i, --interval int    refresh interval in seconds (default 2)\n")
 	}
 	fs.Parse(args)
 
@@ -1035,25 +1063,32 @@ func cmdStream(args []string) {
 	}
 
 	client := newClient(flagInsecure)
-	channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
-	if err != nil {
-		fatal("%v", err)
-	}
-
-	streamURL := client.baseURL(host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
-	if *token != "" {
-		streamURL += "?token=" + *token
-	}
 
 	if *urlOnly {
+		channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
+		if err != nil {
+			fatal("%v", err)
+		}
+		streamURL := client.baseURL(host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
+		if *token != "" {
+			streamURL += "?token=" + *token
+		}
 		fmt.Println(streamURL)
 		return
 	}
 
-	watchLoop(*watch, *interval, func() {
+	handleWatchCommandError(watchLoop(*watch, *interval, func() error {
+		channelID, host, err := parseTargetOrDiscover(fs.Arg(0), client)
+		if err != nil {
+			return err
+		}
+		streamURL := client.baseURL(host) + "/tltv/v1/channels/" + channelID + "/stream.m3u8"
+		if *token != "" {
+			streamURL += "?token=" + *token
+		}
 		status, contentType, body, err := client.CheckStream(host, channelID, *token)
 		if err != nil {
-			fatal("stream check failed: %v", err)
+			return fmt.Errorf("stream check failed: %v", err)
 		}
 
 		var segments int
@@ -1081,7 +1116,7 @@ func cmdStream(args []string) {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			enc.Encode(result)
-			return
+			return nil
 		}
 
 		printHeader("Stream")
@@ -1120,7 +1155,8 @@ func cmdStream(args []string) {
 			printField("URL", streamURL)
 		}
 		fmt.Println()
-	})
+		return nil
+	}))
 }
 
 func cmdCrawl(args []string) {

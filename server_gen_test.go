@@ -875,10 +875,11 @@ func TestServerPrivateViewer_RequiresAuthAndDoesNotLeakToken(t *testing.T) {
 	channelID := makeChannelID(pub)
 	metadata, guide := serverSignDocs(channelID, "Private Test", "", priv, nil, "token", false, nil)
 	docs := &serverDocs{channelID: channelID, channelName: "Private Test", metadata: metadata, guide: guide}
+	iconData := []byte("<svg>private</svg>")
 
 	mux := http.NewServeMux()
 	debugViewerRoutes(mux, func(_ string) map[string]interface{} {
-		return serverViewerInfo(docs, "viewer.example.com:443")
+		return serverViewerInfo(docs, "viewer.example.com:443", iconData, "image/svg+xml")
 	}, nil, viewerRouteOptions{authToken: "secret123", private: true})
 
 	w := httptest.NewRecorder()
@@ -1336,6 +1337,9 @@ func TestServerMultiChannel_Health(t *testing.T) {
 	}
 	var resp map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["version"] != version {
+		t.Errorf("version = %v, want %s", resp["version"], version)
+	}
 	if n, _ := resp["channels"].(float64); int(n) != 3 {
 		t.Errorf("channels = %v, want 3", resp["channels"])
 	}
@@ -2633,12 +2637,14 @@ func TestProductionViewerPrivateAuth(t *testing.T) {
 	channelID := makeChannelID(pub)
 	metadata, guide := serverSignDocs(channelID, "Private Prod", "", priv, nil, "token", false, nil)
 	docs := &serverDocs{channelID: channelID, channelName: "Private Prod", metadata: metadata, guide: guide}
+	iconData := []byte("<svg>prod</svg>")
+	iconURI := viewerIconDataURI(iconData, "image/svg+xml")
 
 	mux := http.NewServeMux()
 	productionViewerRoutes(mux, func(reqChID string) map[string]interface{} {
-		return serverViewerInfo(docs, "example.com:443")
+		return serverViewerInfo(docs, "example.com:443", iconData, "image/svg+xml")
 	}, func() []viewerChannelRef {
-		return []viewerChannelRef{{ID: channelID, Name: "Private Prod", Guide: guide, IconPath: "/tltv/v1/channels/" + channelID + "/icon.svg"}}
+		return []viewerChannelRef{{ID: channelID, Name: "Private Prod", Guide: guide, IconPath: "/tltv/v1/channels/" + channelID + "/icon.svg", IconData: iconURI}}
 	}, viewerRouteOptions{authToken: "secret456", private: true})
 
 	// Root without token → 403
@@ -2678,6 +2684,9 @@ func TestProductionViewerPrivateAuth(t *testing.T) {
 	if strings.Contains(body, "?token=") {
 		t.Fatalf("/api/info should not contain token query param: %s", body)
 	}
+	if !strings.Contains(body, "\"icon_data\":") {
+		t.Fatalf("/api/info should include icon_data: %s", body)
+	}
 	// Private headers
 	if cc := w.Header().Get("Cache-Control"); cc != "private, no-store" {
 		t.Errorf("Cache-Control = %q, want private, no-store", cc)
@@ -2688,7 +2697,7 @@ func TestProductionViewerPrivateAuth(t *testing.T) {
 }
 
 // TestViewerChannelsPayloadShape verifies the /api/info channels[] array
-// includes per-channel guide entries and icon_path fields.
+// includes per-channel guide entries, icon_path fields, and icon_data.
 func TestViewerChannelsPayloadShape(t *testing.T) {
 	pub1, priv1, _ := ed25519.GenerateKey(nil)
 	chID1 := makeChannelID(pub1)
@@ -2710,8 +2719,8 @@ func TestViewerChannelsPayloadShape(t *testing.T) {
 		}
 	}, func() []viewerChannelRef {
 		return []viewerChannelRef{
-			{ID: chID1, Name: "Ch1", Guide: guide1, IconPath: "/tltv/v1/channels/" + chID1 + "/icon.svg"},
-			{ID: chID2, Name: "Ch2", Guide: guide2, IconPath: "/tltv/v1/channels/" + chID2 + "/icon.png"},
+			{ID: chID1, Name: "Ch1", Guide: guide1, IconPath: "/tltv/v1/channels/" + chID1 + "/icon.svg", IconData: "data:image/svg+xml;base64,AAA="},
+			{ID: chID2, Name: "Ch2", Guide: guide2, IconPath: "/tltv/v1/channels/" + chID2 + "/icon.png", IconData: "data:image/png;base64,BBB="},
 		}
 	})
 
@@ -2744,6 +2753,9 @@ func TestViewerChannelsPayloadShape(t *testing.T) {
 		}
 		if _, ok := ch["icon_path"].(string); !ok {
 			t.Errorf("channels[%d] missing icon_path", i)
+		}
+		if _, ok := ch["icon_data"].(string); !ok {
+			t.Errorf("channels[%d] missing icon_data", i)
 		}
 		guide, ok := ch["guide"].(map[string]interface{})
 		if !ok {

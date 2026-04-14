@@ -126,7 +126,7 @@ tltv viewer demo.timelooptv.org
 | `loadtest <target>` | Multi-receiver load simulator |
 | `version` | Version, protocol version, platform info |
 | `update` | Self-update to latest GitHub release |
-| `completion` | Shell completions (`--install` for auto-install) |
+| `completion` | Shell completions and flag metadata (`--install`, `--flags`) |
 
 ## Global Flags
 
