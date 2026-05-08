@@ -6,7 +6,7 @@ are available for Linux, macOS, Windows, and FreeBSD on both amd64 and arm64.
 ## Quick Install (Linux / macOS)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/tltv-org/cli/main/install.sh | sh
+curl -fsSL timelooptv.org/install | sh
 ```
 
 Downloads the latest release binary for your OS and architecture, installs to
@@ -30,6 +30,9 @@ docker build -t tltv .
 The Docker image is multi-stage (`golang:1.22-alpine` → `scratch`, ~10 MB).
 `WORKDIR /data` — mount a volume here to persist channel keys. CA certificates
 are included for outbound HTTPS.
+
+The image also includes a basic Docker `HEALTHCHECK` (`tltv version`), so
+container runtimes can report binary liveness out of the box.
 
 **HOSTNAME:** Docker sets `HOSTNAME` to the container ID by default. Always set
 it explicitly (`-e HOSTNAME=public.example.com`) when running bridge or relay.
@@ -69,6 +72,10 @@ tltv completion --install fish
 
 # Or print to stdout for manual placement
 tltv completion zsh >> ~/.zshrc
+
+# Inspect machine-readable flag metadata
+tltv completion --flags relay
+tltv completion --flags server test
 ```
 
 ## Self-Update
@@ -77,8 +84,14 @@ tltv completion zsh >> ~/.zshrc
 tltv update
 ```
 
-Downloads the latest release from GitHub and replaces the current binary
-in-place. Detects OS and architecture automatically.
+Downloads the latest release from GitHub, verifies the selected archive against
+the release `checksums.txt`, then replaces the current binary in-place. Detects
+OS and architecture automatically.
+
+## Daemon Log Files
+
+When running daemons with `--log-file`, send `SIGHUP` after rotating or
+renaming the file to make TLTV reopen the log destination without a restart.
 
 ## Platform Matrix
 

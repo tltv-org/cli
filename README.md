@@ -6,7 +6,7 @@ Single static binary, zero dependencies.
 ## Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/tltv-org/cli/main/install.sh | sh
+curl -fsSL timelooptv.org/install | sh
 ```
 
 Or with Docker:
